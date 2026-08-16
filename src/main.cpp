@@ -141,6 +141,10 @@ static std::vector<StaticMesh> g_wsMeshes; // mesh per g_world.models
 // appiattisce la geometria e butta le ossa, quindi un mostro con walk/chase
 // va caricato anche qui per potersi muovere.
 static std::vector<AnimatedModel> g_wsRigged;
+// Griglia di navigazione per gli NPC. Definita qui perché i puntatori del
+// runtime Lua vengono impostati molto prima della funzione che la costruisce.
+static NavGrid g_nav;
+static void rebuildNavGrid();
 static int g_selectedModel = -1;
 static int g_selectedSound = -1;
 static char g_soundPathBuf[512] = {};
@@ -1292,6 +1296,8 @@ static void bindLuaServices() {
     g_lua.particles = &g_particles;
     g_lua.net = &g_net;
     g_lua.playerHumanoid = &g_player.humanoid;
+    g_lua.nav = &g_nav;
+    g_lua.navRebuild = &rebuildNavGrid;
     g_lua.playerPos = &g_playerPos;
     g_lua.playerYaw = &g_playerYaw;
 }
@@ -2505,6 +2511,20 @@ static bool modelWorldAabb(int index, glm::vec3& outMin, glm::vec3& outMax) {
         outMax = glm::max(outMax, w);
     }
     return true;
+}
+
+/** Ricostruisce la griglia di navigazione dagli ostacoli attuali. */
+static void rebuildNavGrid() {
+    std::vector<glm::vec3> mins(g_world.models.size());
+    std::vector<glm::vec3> maxs(g_world.models.size());
+    for (int i = 0; i < (int)g_world.models.size(); ++i) {
+        if (!modelWorldAabb(i, mins[(size_t)i], maxs[(size_t)i])) {
+            // Non caricato: box degenere, così non blocca nulla.
+            mins[(size_t)i] = glm::vec3(0.f);
+            maxs[(size_t)i] = glm::vec3(0.f);
+        }
+    }
+    g_nav.build(g_world, mins, maxs);
 }
 
 static void setupRiggedModel(size_t index, WorkspaceModel& m, bool fileHasBones) {

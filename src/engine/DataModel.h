@@ -9,6 +9,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,13 @@ struct WorkspaceModel {
     ModelAnimClip anim;
     /** Tracce caricate dal file: walk, patrol, chase... comandate da Lua. */
     ModelAnimator animator;
+    /**
+     * Nome tuo → nome nel file. Blender esporta "Armature|ChasingAction": se
+     * lo script cerca quello, basta rinominare l'azione per romperlo. Con
+     * l'alias lo script dice "chase" e l'associazione si aggiusta in un punto
+     * solo. Vuoto = si usa la ricerca per sottostringa.
+     */
+    std::map<std::string, std::string> clipAlias;
     /** True se il file importato ha uno scheletro: deciso al caricamento. */
     bool rigged = false;
     /**

@@ -8,6 +8,7 @@ extern "C" {
 
 #include "DataModel.h"
 #include "Humanoid.h"
+#include "NavGrid.h"
 #include "SoundService.h"
 #include "Animator.h"
 #include "LightingService.h"
@@ -56,6 +57,10 @@ public:
     /** Player in Play/Test — danno da esplosione (opzionale). */
     Humanoid* playerHumanoid = nullptr;
     glm::vec3* playerPos = nullptr;
+    /** Griglia di navigazione, posseduta dal motore. Null = niente FindPath. */
+    NavGrid* nav = nullptr;
+    /** Richiamata dal motore per ricostruire la griglia quando la scena cambia. */
+    void (*navRebuild)() = nullptr;
     float* playerYaw = nullptr;   // gradi, direzione sguardo (per mira/pistola)
     std::string lastError;
     bool ok = false;
@@ -1083,6 +1088,12 @@ private:
         lua_setfield(L, -2, "GetChildren");
         lua_pushcfunction(L, luaWorkspaceSetPartPos);
         lua_setfield(L, -2, "SetPartPosition");
+        lua_pushcfunction(L, luaWorkspaceFindPath);
+        lua_setfield(L, -2, "FindPath");
+        lua_pushcfunction(L, luaWorkspaceRebuildNav);
+        lua_setfield(L, -2, "RebuildNav");
+        lua_pushcfunction(L, luaWorkspaceIsBlocked);
+        lua_setfield(L, -2, "IsBlocked");
         lua_pushcfunction(L, luaWorkspaceRaycast);
         lua_setfield(L, -2, "Raycast");
         lua_setglobal(L, "workspace");
@@ -2305,10 +2316,25 @@ private:
     static int luaAnimatorLoad(lua_State* ls) {
         WorkspaceModel* m = liveModel(ls, 1);
         if (!m) return 0;
-        const char* clip = luaL_checkstring(ls, 2);
+        const std::string wanted = luaL_checkstring(ls, 2);
+
+        // L'alias vince sul nome grezzo: uno script scritto su "chase"
+        // sopravvive a un riesporto che rinomina l'azione.
+        std::string clip = wanted;
+        auto it = m->clipAlias.find(wanted);
+        if (it != m->clipAlias.end() && !it->second.empty()) clip = it->second;
+
         const int modelIndex = intField(ls, 1, "__modelIndex");
         pushAnimTrack(ls, modelIndex, m->animator.load(clip));
         return 1;
+    }
+
+    /** model:SetClipAlias("chase", "Armature|ChasingAction") */
+    static int luaModelSetClipAlias(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        m->clipAlias[luaL_checkstring(ls, 2)] = luaL_checkstring(ls, 3);
+        return 0;
     }
 
     static int luaAnimatorStopAll(lua_State* ls) {
@@ -2383,6 +2409,7 @@ private:
         lua_pushcfunction(ls, luaModelSetYaw);        lua_setfield(ls, -2, "SetYaw");
         lua_pushcfunction(ls, luaModelSetCanCollide); lua_setfield(ls, -2, "SetCanCollide");
         lua_pushcfunction(ls, luaModelGetCanCollide); lua_setfield(ls, -2, "GetCanCollide");
+        lua_pushcfunction(ls, luaModelSetClipAlias);  lua_setfield(ls, -2, "SetClipAlias");
 
         pushAnimator(ls, modelIndex);
         lua_setfield(ls, -2, "Animator");
@@ -2394,6 +2421,54 @@ private:
         }
         lua_pushstring(ls, "Model");
         lua_setfield(ls, -2, "ClassName");
+    }
+
+    /**
+     * Workspace:FindPath(da, a) -> lista di Vector3, oppure nil.
+     * La griglia si ricostruisce da sola alla prima chiamata: chi scrive lo
+     * script non deve ricordarsi di inizializzare niente.
+     */
+    static int luaWorkspaceFindPath(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->nav) { lua_pushnil(ls); return 1; }
+
+        const int base = lua_istable(ls, 1) ? 2 : 1;
+        glm::vec3 from(0.f), to(0.f);
+        if (!readVec3Arg(ls, base, from) || !readVec3Arg(ls, base + 1, to))
+            return luaL_error(ls, "FindPath(Vector3 da, Vector3 a)");
+
+        if (!rt->nav->ready() && rt->navRebuild) rt->navRebuild();
+
+        const std::vector<glm::vec3> path = rt->nav->findPath(from, to);
+        if (path.empty()) { lua_pushnil(ls); return 1; }
+
+        lua_newtable(ls);
+        for (size_t i = 0; i < path.size(); ++i) {
+            pushVec3(ls, path[i].x, path[i].y, path[i].z);
+            lua_rawseti(ls, -2, (int)i + 1);
+        }
+        return 1;
+    }
+
+    /** Da chiamare dopo aver costruito o spostato ostacoli. */
+    static int luaWorkspaceRebuildNav(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (rt && rt->navRebuild) rt->navRebuild();
+        return 0;
+    }
+
+    /** True se quel punto è dentro un ostacolo: utile per scegliere uno spawn. */
+    static int luaWorkspaceIsBlocked(lua_State* ls) {
+        auto* rt = fromState(ls);
+        glm::vec3 p(0.f);
+        const int base = lua_istable(ls, 1) ? 2 : 1;
+        if (!rt || !rt->nav || !readVec3Arg(ls, base, p)) {
+            lua_pushboolean(ls, 0);
+            return 1;
+        }
+        if (!rt->nav->ready() && rt->navRebuild) rt->navRebuild();
+        lua_pushboolean(ls, rt->nav->worldBlocked(p.x, p.z) ? 1 : 0);
+        return 1;
     }
 
     static int luaWorkspaceFind(lua_State* ls) {
