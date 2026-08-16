@@ -311,17 +311,20 @@ public:
                 r6ApplyKeyToHumanoid(h, k, blend);
                 return;
             }
-            // fallback procedurale (stesso contenuto di classic_jump)
+            // fallback procedurale (stesso contenuto di classic_jump).
+            // Usa `blend`, non `w`: jumpArmBlend sale da 0 a 1 nei primi
+            // centesimi di volo, ed è quello che fa entrare le braccia
+            // gradualmente invece di farle scattare a piena escursione.
             float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
             humanoidJumpPose(h, jL, jR, jl, jr);
             for (auto& p : h.parts) {
-                if (p.name == "Left Leg") p.rotX = jl * w;
-                else if (p.name == "Right Leg") p.rotX = jr * w;
+                if (p.name == "Left Leg") p.rotX = jl * blend;
+                else if (p.name == "Right Leg") p.rotX = jr * blend;
                 else if (p.name == "Left Arm") {
-                    p.rotX = jL * w;
+                    p.rotX = jL * blend;
                     p.rotZ = 0.f;
                 } else if (p.name == "Right Arm") {
-                    p.rotX = jR * w;
+                    p.rotX = jR * blend;
                     p.rotZ = 0.f;
                 }
             }
