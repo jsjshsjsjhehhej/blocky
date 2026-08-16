@@ -2493,6 +2493,18 @@ static void reloadWorkspaceModelMeshes() {
                 if (m.rigged) {
                     std::printf("[Model] '%s': %d clip animate disponibili\n",
                                 m.name.c_str(), g_wsRigged[i].clipCount());
+
+                    // Un modello animato deve animarsi appena importato: chi lo
+                    // mette nella scena si aspetta di vederlo muoversi, non di
+                    // dover prima scrivere uno script. Gli script poi possono
+                    // fermare questa traccia e comandarne altre.
+                    if (m.animator.tracks.empty()) {
+                        const int id = m.animator.load(g_wsRigged[i].activeClipName());
+                        if (AnimTrack* t = m.animator.get(id)) {
+                            t->looped = true;
+                            t->playing = true;
+                        }
+                    }
                 }
             }
         }
