@@ -86,6 +86,47 @@ struct Bone {
     void update(float t) {
         localTransform = interpPosition(t) * interpRotation(t) * interpScale(t);
     }
+
+    /**
+     * Componenti separate invece della matrice già composta: per fondere due
+     * clip bisogna interpolare le rotazioni come quaternioni. Mescolare le
+     * matrici direttamente storce e schiaccia il modello a metà transizione.
+     */
+    void sample(float t, glm::vec3& outPos, glm::quat& outRot, glm::vec3& outScale) const {
+        if (positions.empty()) outPos = glm::vec3(0.0f);
+        else if (positions.size() == 1) outPos = positions[0].position;
+        else {
+            int i = keyIndex(positions, t), n = i + 1;
+            outPos = glm::mix(positions[i].position, positions[n].position,
+                              scaleFactor(positions[i].time, positions[n].time, t));
+        }
+
+        if (rotations.empty()) outRot = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        else if (rotations.size() == 1) outRot = glm::normalize(rotations[0].orientation);
+        else {
+            int i = keyIndex(rotations, t), n = i + 1;
+            outRot = glm::normalize(glm::slerp(rotations[i].orientation, rotations[n].orientation,
+                                               scaleFactor(rotations[i].time, rotations[n].time, t)));
+        }
+
+        if (scales.empty()) outScale = glm::vec3(1.0f);
+        else if (scales.size() == 1) outScale = scales[0].scale;
+        else {
+            int i = keyIndex(scales, t), n = i + 1;
+            outScale = glm::mix(scales[i].scale, scales[n].scale,
+                                scaleFactor(scales[i].time, scales[n].time, t));
+        }
+    }
+};
+
+/** Una clip animata del file: walk, patrol, chase... */
+struct SkinnedClip {
+    std::string name;
+    float duration = 0.0f;
+    float ticksPerSecond = 25.0f;
+    std::vector<Bone> bones;
+
+    bool valid() const { return duration > 0.0f && !bones.empty(); }
 };
 
 // Nodo della gerarchia (copia leggera dell'albero di Assimp)
@@ -109,11 +150,15 @@ public:
     std::vector<SubMesh> meshes;
     glm::mat4 globalInverse{ 1.0f };
 
-    std::vector<Bone> bones;   // canali animati
+    /** Tutte le clip del file. Un mostro con walk/patrol/chase ne ha tre. */
+    std::vector<SkinnedClip> clips;
     NodeData rootNode;
-    float duration = 0.0f;
-    float ticksPerSecond = 25.0f;
     float currentTime = 0.0f;
+
+    // --- Transizione fra clip -------------------------------------------
+    // Cambiare posa di colpo si vede: la fusione dura pochi decimi e toglie
+    // lo scatto senza che il cambio di stato sembri in ritardo.
+    float blendSeconds = 0.18f;
 
     std::map<std::string, glm::mat4> nodeGlobal; // posa globale corrente per nome nodo
     glm::vec3 bbMin{ 0.0f }, bbMax{ 0.0f };
@@ -158,9 +203,17 @@ public:
         computeBindBounds(cpuVerts); // bounding box sulla geometria realmente renderizzata
 
         loaded = true;
-        std::printf("[AnimatedModel] '%s': %zu mesh, %zu ossa, %.2fs | bbox y[%.1f..%.1f]\n",
-                    path.c_str(), meshes.size(), bones.size(),
-                    duration / ticksPerSecond, bbMin.y, bbMax.y);
+
+        // Elencare le clip trovate serve: se il mostro non cambia posa, la
+        // prima cosa da sapere è come le ha chiamate l'esportatore.
+        std::string clipList;
+        for (const SkinnedClip& c : clips) {
+            if (!clipList.empty()) clipList += ", ";
+            clipList += c.name;
+        }
+        std::printf("[AnimatedModel] '%s': %zu mesh, %d clip [%s] | attiva '%s' | bbox y[%.1f..%.1f]\n",
+                    path.c_str(), meshes.size(), clipCount(),
+                    clipList.c_str(), activeClipName().c_str(), bbMin.y, bbMax.y);
         return true;
     }
 
@@ -178,12 +231,83 @@ public:
         return t;
     }
 
+    // ---- Clip -----------------------------------------------------------
+
+    int clipCount() const { return (int)clips.size(); }
+
+    std::vector<std::string> clipNames() const {
+        std::vector<std::string> n;
+        n.reserve(clips.size());
+        for (const SkinnedClip& c : clips) n.push_back(c.name);
+        return n;
+    }
+
+    const SkinnedClip* activeClip() const {
+        if (activeIndex < 0 || activeIndex >= (int)clips.size()) return nullptr;
+        return &clips[(size_t)activeIndex];
+    }
+
+    const std::string& activeClipName() const {
+        static const std::string none;
+        const SkinnedClip* c = activeClip();
+        return c ? c->name : none;
+    }
+
+    /**
+     * Cerca per sottostringa senza distinguere maiuscole: gli esportatori
+     * antepongono quasi sempre il nome dell'armatura, quindi "chase" deve
+     * trovare anche "Armature|ChasingAction".
+     */
+    int findClip(const std::string& needle) const {
+        const std::string want = toLowerCopy(needle);
+        int loose = -1;
+        for (size_t i = 0; i < clips.size(); ++i) {
+            const std::string have = toLowerCopy(clips[i].name);
+            if (have == want) return (int)i;                       // esatto vince
+            if (loose < 0 && have.find(want) != std::string::npos) loose = (int)i;
+        }
+        return loose;
+    }
+
+    /** Passa a una clip per nome. False se non esiste: il chiamante decide. */
+    bool setClip(const std::string& name, bool restart = true) {
+        const int idx = findClip(name);
+        if (idx < 0) return false;
+        return setClip(idx, restart);
+    }
+
+    bool setClip(int index, bool restart = true) {
+        if (index < 0 || index >= (int)clips.size()) return false;
+        if (index == activeIndex) return true;
+
+        // La clip che lasciamo continua a essere campionata durante la fusione.
+        previousIndex = activeIndex;
+        previousTime = currentTime;
+        blendLeft = (previousIndex >= 0) ? blendSeconds : 0.0f;
+
+        activeIndex = index;
+        if (restart) currentTime = 0.0f;
+        return true;
+    }
+
     void update(float dt) {
         if (!loaded) return;
-        if (!bones.empty() && duration > 0.0f) {
-            currentTime += ticksPerSecond * dt;
-            currentTime = fmodf(currentTime, duration);
+
+        if (const SkinnedClip* c = activeClip()) {
+            if (c->valid()) {
+                currentTime = fmodf(currentTime + c->ticksPerSecond * dt, c->duration);
+            }
         }
+
+        if (blendLeft > 0.0f) {
+            blendLeft = std::max(0.0f, blendLeft - dt);
+            if (const SkinnedClip* p = previousClip()) {
+                if (p->valid())
+                    previousTime = fmodf(previousTime + p->ticksPerSecond * dt, p->duration);
+            }
+            if (blendLeft <= 0.0f) previousIndex = -1;
+        }
+
         nodeGlobal.clear();
         buildPose(&rootNode, glm::mat4(1.0f)); // calcola la posa globale di ogni nodo
     }
@@ -342,40 +466,62 @@ private:
         }
     }
 
+    /** Carica *tutte* le clip del file, non solo una. */
     void loadAnimation(const aiScene* scene) {
         if (scene->mNumAnimations == 0) return;
 
-        int chosen = 0, bestScore = -1;
+        clips.reserve(scene->mNumAnimations);
+
         for (unsigned a = 0; a < scene->mNumAnimations; ++a) {
-            const aiAnimation* an = scene->mAnimations[a];
-            std::string nm = an->mName.C_Str();
-            for (char& c : nm) c = (char)tolower((unsigned char)c);
-            int score = (an->mDuration > 0.0) ? (int)an->mNumChannels : -1;
+            const aiAnimation* anim = scene->mAnimations[a];
+
+            SkinnedClip clip;
+            clip.name = anim->mName.C_Str();
+            if (clip.name.empty()) clip.name = "clip" + std::to_string(a);
+            clip.duration = (float)anim->mDuration;
+            clip.ticksPerSecond = anim->mTicksPerSecond != 0.0 ? (float)anim->mTicksPerSecond : 25.0f;
+
+            clip.bones.reserve(anim->mNumChannels);
+            for (unsigned c = 0; c < anim->mNumChannels; ++c) {
+                const aiNodeAnim* ch = anim->mChannels[c];
+                Bone bone;
+                bone.name = ch->mNodeName.C_Str();
+                for (unsigned k = 0; k < ch->mNumPositionKeys; ++k)
+                    bone.positions.push_back({ aiToGlm(ch->mPositionKeys[k].mValue), (float)ch->mPositionKeys[k].mTime });
+                for (unsigned k = 0; k < ch->mNumRotationKeys; ++k)
+                    bone.rotations.push_back({ aiToGlm(ch->mRotationKeys[k].mValue), (float)ch->mRotationKeys[k].mTime });
+                for (unsigned k = 0; k < ch->mNumScalingKeys; ++k)
+                    bone.scales.push_back({ aiToGlm(ch->mScalingKeys[k].mValue), (float)ch->mScalingKeys[k].mTime });
+                clip.bones.push_back(std::move(bone));
+            }
+            clips.push_back(std::move(clip));
+        }
+
+        // Clip iniziale: stessa scelta di prima, così i modelli già in uso
+        // partono esattamente come partivano.
+        int chosen = 0, bestScore = -1;
+        for (size_t i = 0; i < clips.size(); ++i) {
+            const std::string nm = toLowerCopy(clips[i].name);
+            int score = clips[i].valid() ? (int)clips[i].bones.size() : -1;
             if (nm.find("walk") != std::string::npos) score += 1000;
-            if (score > bestScore) { bestScore = score; chosen = (int)a; }
+            if (score > bestScore) { bestScore = score; chosen = (int)i; }
         }
-
-        const aiAnimation* anim = scene->mAnimations[chosen];
-        duration = (float)anim->mDuration;
-        ticksPerSecond = anim->mTicksPerSecond != 0.0 ? (float)anim->mTicksPerSecond : 25.0f;
-
-        bones.reserve(anim->mNumChannels);
-        for (unsigned c = 0; c < anim->mNumChannels; ++c) {
-            const aiNodeAnim* ch = anim->mChannels[c];
-            Bone bone;
-            bone.name = ch->mNodeName.C_Str();
-            for (unsigned k = 0; k < ch->mNumPositionKeys; ++k)
-                bone.positions.push_back({ aiToGlm(ch->mPositionKeys[k].mValue), (float)ch->mPositionKeys[k].mTime });
-            for (unsigned k = 0; k < ch->mNumRotationKeys; ++k)
-                bone.rotations.push_back({ aiToGlm(ch->mRotationKeys[k].mValue), (float)ch->mRotationKeys[k].mTime });
-            for (unsigned k = 0; k < ch->mNumScalingKeys; ++k)
-                bone.scales.push_back({ aiToGlm(ch->mScalingKeys[k].mValue), (float)ch->mScalingKeys[k].mTime });
-            bones.push_back(std::move(bone));
-        }
+        activeIndex = chosen;
     }
 
-    Bone* findBone(const std::string& name) {
-        for (Bone& b : bones)
+    static std::string toLowerCopy(std::string s) {
+        for (char& c : s) c = (char)tolower((unsigned char)c);
+        return s;
+    }
+
+    const SkinnedClip* previousClip() const {
+        if (previousIndex < 0 || previousIndex >= (int)clips.size()) return nullptr;
+        return &clips[(size_t)previousIndex];
+    }
+
+    static const Bone* findBoneIn(const SkinnedClip* clip, const std::string& name) {
+        if (!clip) return nullptr;
+        for (const Bone& b : clip->bones)
             if (b.name == name) return &b;
         return nullptr;
     }
@@ -383,13 +529,39 @@ private:
     // Calcola la posa globale di ogni nodo (con override dell'animazione)
     void buildPose(const NodeData* node, const glm::mat4& parent) {
         glm::mat4 local = node->transformation;
-        if (Bone* b = findBone(node->name)) {
-            b->update(currentTime);
-            local = b->localTransform;
+
+        if (const Bone* b = findBoneIn(activeClip(), node->name)) {
+            glm::vec3 pos, scl;
+            glm::quat rot;
+            b->sample(currentTime, pos, rot, scl);
+
+            // In transizione: fondi con la posa della clip precedente.
+            if (blendLeft > 0.0f && blendSeconds > 0.0f) {
+                if (const Bone* prev = findBoneIn(previousClip(), node->name)) {
+                    glm::vec3 p2, s2;
+                    glm::quat r2;
+                    prev->sample(previousTime, p2, r2, s2);
+                    const float w = 1.0f - (blendLeft / blendSeconds);  // 0 = vecchia, 1 = nuova
+                    pos = glm::mix(p2, pos, w);
+                    rot = glm::normalize(glm::slerp(r2, rot, w));
+                    scl = glm::mix(s2, scl, w);
+                }
+            }
+
+            local = glm::translate(glm::mat4(1.0f), pos)
+                  * glm::mat4_cast(rot)
+                  * glm::scale(glm::mat4(1.0f), scl);
         }
+
         glm::mat4 global = parent * local;
         nodeGlobal[node->name] = global;
         for (const NodeData& child : node->children)
             buildPose(&child, global);
     }
+
+private:
+    int activeIndex = -1;
+    int previousIndex = -1;
+    float previousTime = 0.0f;
+    float blendLeft = 0.0f;
 };
