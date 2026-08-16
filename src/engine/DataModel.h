@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnimTrack.h"
 #include "ModelAnim.h"
 #include "PartMaterial.h"
 #include "PartShape.h"
@@ -75,6 +76,10 @@ struct WorkspaceModel {
     glm::vec3 tint{1, 1, 1};
     ModelRigInfo rig;
     ModelAnimClip anim;
+    /** Tracce caricate dal file: walk, patrol, chase... comandate da Lua. */
+    ModelAnimator animator;
+    /** True se il file importato ha uno scheletro: deciso al caricamento. */
+    bool rigged = false;
 };
 
 /**

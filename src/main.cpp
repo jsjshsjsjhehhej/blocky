@@ -137,6 +137,10 @@ static WorkspacePart g_xformBefore{}; // snapshot begin drag
 static bool g_xformTrack = false;
 static std::vector<uint8_t> g_touching;
 static std::vector<StaticMesh> g_wsMeshes; // mesh per g_world.models
+// Versione animata, popolata solo per i modelli con scheletro: StaticMesh
+// appiattisce la geometria e butta le ossa, quindi un mostro con walk/chase
+// va caricato anche qui per potersi muovere.
+static std::vector<AnimatedModel> g_wsRigged;
 static int g_selectedModel = -1;
 static int g_selectedSound = -1;
 static char g_soundPathBuf[512] = {};
@@ -2468,29 +2472,88 @@ static void applyMapTemplate(int kind) {
 
 static void reloadWorkspaceModelMeshes() {
     g_wsMeshes.clear();
+    g_wsRigged.clear();
     g_wsMeshes.reserve(g_world.models.size());
-    for (const auto& m : g_world.models) {
+    g_wsRigged.resize(g_world.models.size());
+
+    for (size_t i = 0; i < g_world.models.size(); ++i) {
+        auto& m = g_world.models[i];
+
         StaticMesh mesh;
         mesh.exactImport = true; // modelli del mondo: submesh e materiali intatti
         if (!m.sourcePath.empty())
             mesh.load(m.sourcePath);
+
+        // StaticMesh rileva già lo scheletro ma non lo usa: se c'è, carichiamo
+        // il file una seconda volta come modello animato.
+        m.rigged = false;
+        if (mesh.hasBones && !m.sourcePath.empty()) {
+            if (g_wsRigged[i].load(m.sourcePath)) {
+                m.rigged = g_wsRigged[i].clipCount() > 0;
+                if (m.rigged) {
+                    std::printf("[Model] '%s': %d clip animate disponibili\n",
+                                m.name.c_str(), g_wsRigged[i].clipCount());
+                }
+            }
+        }
+
         g_wsMeshes.push_back(std::move(mesh));
     }
 }
 
-static void drawWorkspaceModels(GLuint meshP, const glm::mat4& view, const glm::mat4& proj,
-                                const glm::vec3& sun) {
+static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& view,
+                                const glm::mat4& proj, const glm::vec3& sun) {
     if (g_wsMeshes.size() != g_world.models.size())
         reloadWorkspaceModelMeshes();
+
+    // Delta locale: la funzione non riceve dt e non vale la pena cambiare
+    // la firma di mezzo renderer per farlo arrivare fin qui.
+    static double lastAnimTime = glfwGetTime();
+    const double nowAnim = glfwGetTime();
+    const float animDt = std::min((float)(nowAnim - lastAnimTime), 0.05f);
+    lastAnimTime = nowAnim;
+
     for (int i = 0; i < (int)g_world.models.size(); ++i) {
         if (i >= (int)g_wsMeshes.size() || !g_wsMeshes[i].loaded) continue;
-        const auto& m = g_world.models[i];
+        auto& m = g_world.models[i];
         glm::mat4 model = glm::translate(glm::mat4(1.f), m.position)
                         * partRotationMatrix(m.rotation)
                         * glm::scale(glm::mat4(1.f), m.scale);
         glm::vec3 tint = m.tint;
         if (i == g_selectedModel)
             tint = glm::mix(tint, glm::vec3(1.f, 0.85f, 0.2f), 0.3f);
+
+        // --- Modello animato: la traccia in riproduzione comanda la posa ---
+        const int track = m.animator.dominant();
+        if (m.rigged && track >= 0 && i < (int)g_wsRigged.size() && g_wsRigged[i].loaded) {
+            AnimTrack* t = m.animator.get(track);
+            AnimatedModel& rig = g_wsRigged[i];
+
+            if (t && rig.activeClipName() != t->clipName)
+                rig.setClip(t->clipName);
+
+            m.animator.advance(animDt);
+            rig.update(animDt * (t ? std::max(0.f, t->speed) : 1.f));
+
+            // correction porta gli export Z-up nel nostro mondo Y-up.
+            const glm::mat4 skinModel = model * rig.correction;
+
+            glUseProgram(skinP);
+            glUniformMatrix4fv(glGetUniformLocation(skinP,"uModel"),1,GL_FALSE,glm::value_ptr(skinModel));
+            glUniformMatrix4fv(glGetUniformLocation(skinP,"uView"),1,GL_FALSE,glm::value_ptr(view));
+            glUniformMatrix4fv(glGetUniformLocation(skinP,"uProj"),1,GL_FALSE,glm::value_ptr(proj));
+            glUniform3fv(glGetUniformLocation(skinP,"uSun"),1,glm::value_ptr(sun));
+            glUniform3fv(glGetUniformLocation(skinP,"uCamPos"),1,glm::value_ptr(g_renderCamPos));
+            glUniform1f(glGetUniformLocation(skinP,"uEmissive"), 0.f);
+            glUniform1f(glGetUniformLocation(skinP,"uSpecular"), 0.12f);
+            glUniform1f(glGetUniformLocation(skinP,"uRoughness"), 0.75f);
+            glUniform1f(glGetUniformLocation(skinP,"uAlpha"), 1.f);
+            glUniform1i(glGetUniformLocation(skinP,"uMaterial"), (int)PartMaterial::Plastic);
+            uploadDynamicLights(skinP);
+            rig.draw(skinP);
+            continue;   // disegnato animato: salta la versione statica
+        }
+
         glUseProgram(meshP);
         glUniformMatrix4fv(glGetUniformLocation(meshP,"uModel"),1,GL_FALSE,glm::value_ptr(model));
         glUniformMatrix4fv(glGetUniformLocation(meshP,"uView"),1,GL_FALSE,glm::value_ptr(view));
@@ -3615,7 +3678,7 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
     drawScaleHandles(vao, partP, view, proj, sun);
     drawMoveHandles(vao, partP, view, proj, sun);
     drawRotateHandles(vao, partP, view, proj, sun);
-    drawWorkspaceModels(meshP, view, proj, sun);
+    drawWorkspaceModels(meshP, skinP, view, proj, sun);
 
     // Avatar animato R6 (walk + jump arms). GLB opzionale solo se richiesto e a terra.
     bool drawGlb = useGlb && avatarGlb && avatarGlb->loaded
