@@ -224,11 +224,19 @@ public:
             active = AnimClip::Walk;
         // Il salto ha SEMPRE priorita' quando sei in aria: prima scattava solo
         // partendo da Idle, quindi saltando mentre camminavi restava la walk.
-        if (!h.grounded && !hasCustomClip)
+        //
+        // Una clip custom *loopata* e' uno stato (una camminata importata da
+        // Blender), e il salto deve poterla scavalcare. Una one-shot e' un
+        // gesto che va lasciato finire. Prima bastava avere una custom
+        // qualsiasi per bloccare il salto: con una camminata importata il
+        // personaggio continuava a camminare in aria.
+        const bool customOneShot = hasCustomClip && !customFinished && !customClip.looped;
+        if (!h.grounded && !customOneShot)
             active = AnimClip::Jump;
 
         // Custom one-shot ha priorità finché non finisce
-        if (hasCustomClip && clip == AnimClip::Custom && !customFinished) {
+        if (hasCustomClip && clip == AnimClip::Custom && !customFinished
+            && active != AnimClip::Jump) {
             float dur = std::max(0.05f, customClip.duration);
             customPhase += dt / dur;
             if (customClip.looped) {
