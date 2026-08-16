@@ -150,6 +150,49 @@ static std::vector<AnimatedModel> g_wsRigged;
 static NavGrid g_nav;
 static void rebuildNavGrid();
 
+// F3 in gioco: mostra perché l'Animator sta scegliendo una clip invece di
+// un'altra. Serve quando "il salto non si vede" e non si sa se il problema
+// sia la fisica, lo stato o la clip.
+static bool g_showAnimDebug = false;
+
+static void drawAnimDebugPanel() {
+    if (!g_showAnimDebug) return;
+
+    const auto& h = g_player.humanoid;
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::SetNextWindowPos({12, 90}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Diagnostica animazioni (F3)", &g_showAnimDebug,
+                     ImGuiWindowFlags_AlwaysAutoResize)) {
+
+        ImGui::Text("Clip attiva      : %s", animClipName(g_animator.lastActive));
+        ImGui::Separator();
+
+        // Se grounded resta vero mentre sali, il problema e' la fisica.
+        ImGui::TextColored(h.grounded ? ImVec4{1, 0.6f, 0.3f, 1} : ImVec4{0.4f, 1, 0.5f, 1},
+                           "grounded        : %s", h.grounded ? "SI (a terra)" : "NO (in aria)");
+        ImGui::Text("velocityY       : %.2f", h.velocityY);
+        ImGui::Text("jumpAnimTime    : %.3f s", h.jumpAnimTime);
+        ImGui::Text("jumpArmBlend    : %.3f", h.jumpArmBlend);
+        ImGui::Separator();
+
+        // Se una custom loopata resta attiva, il salto viene scavalcato.
+        ImGui::Text("animator.playing: %s", g_animator.playing ? "si" : "NO");
+        ImGui::Text("customClip      : %s%s", g_animator.hasCustomClip ? "si" : "no",
+                    g_animator.hasCustomClip
+                        ? (g_animator.customClip.looped ? " (loopata)" : " (one-shot)") : "");
+        ImGui::Text("jumpOverride    : %s", g_animator.hasJumpOverride
+                        ? (g_animator.jumpOverride.valid() ? "si (valida)" : "si (NON valida)")
+                        : "no (posa procedurale)");
+        ImGui::Separator();
+
+        for (const auto& p : h.parts) {
+            if (!p.isLimb) continue;
+            ImGui::Text("%-10s rotX %7.2f  rotZ %7.2f", p.name.c_str(), p.rotX, p.rotZ);
+        }
+    }
+    ImGui::End();
+}
+
 // --- Inoltro porta sul router -------------------------------------------
 // Il dialogo con il router può richiedere qualche secondo: farlo sul thread
 // principale bloccherebbe il gioco all'avvio della partita.
@@ -8649,6 +8692,7 @@ static void drawPlayingHud(GLFWwindow* win) {
     drawChatBubbleHud();
     drawSpeechBubbles();
     drawFpCrosshair();
+    drawAnimDebugPanel();
     drawWorldLabels();
     if (!g_playMenuOpen)
         drawInventoryHud();
@@ -9461,6 +9505,12 @@ int main() {
                 }
                 f5Was = f5;
                 f1Was = f1;
+
+                // F3 = pannello diagnostico animazioni
+                static bool f3Was = false;
+                const bool f3 = kbOk && glfwGetKey(win, GLFW_KEY_F3) == GLFW_PRESS;
+                if (f3 && !f3Was) g_showAnimDebug = !g_showAnimDebug;
+                f3Was = f3;
             }
 
             if (inPlayMove) {

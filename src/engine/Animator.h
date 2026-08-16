@@ -67,6 +67,8 @@ public:
     /** Clip one-shot / custom da script (Shoot, Emote, ...). */
     R6WalkClip customClip;
     bool hasCustomClip = false;
+    /** Clip realmente scelta nell'ultimo apply(): serve a diagnosticare. */
+    AnimClip lastActive = AnimClip::Idle;
     float customPhase = 0.f;
     bool customFinished = false;
 
@@ -263,6 +265,7 @@ public:
                 active = AnimClip::Walk;
         }
 
+        lastActive = active;
         float w = std::clamp(weight, 0.f, 1.f);
 
         // Solo walk loopate e non-tool come override camminata
