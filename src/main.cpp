@@ -43,6 +43,10 @@
 #include "platform/CrashHandler.h"
 #include "platform/EngineConfig.h"
 #include "platform/GamepadInput.h"
+#include "platform/PortMap.h"
+
+#include <atomic>
+#include <thread>
 #include "render/BeveledCube.h"
 #include "render/PartMeshes.h"
 #include "render/Texture2D.h"
@@ -145,6 +149,64 @@ static std::vector<AnimatedModel> g_wsRigged;
 // runtime Lua vengono impostati molto prima della funzione che la costruisce.
 static NavGrid g_nav;
 static void rebuildNavGrid();
+
+// --- Inoltro porta sul router -------------------------------------------
+// Il dialogo con il router può richiedere qualche secondo: farlo sul thread
+// principale bloccherebbe il gioco all'avvio della partita.
+static std::atomic<bool> g_upnpBusy{false};
+static std::atomic<bool> g_upnpDone{false};
+static std::string g_upnpExternalIp;   // leggere solo con g_upnpDone == true
+static std::string g_upnpError;
+static int g_upnpPort = 0;
+
+static void openPortAsync(int port) {
+    if (g_upnpBusy.load()) return;
+    g_upnpBusy.store(true);
+    g_upnpDone.store(false);
+    g_upnpPort = port;
+
+    std::thread([port]() {
+        PortMap::Result res = PortMap::open(port, "Blocky");
+        g_upnpExternalIp = res.externalIp;
+        g_upnpError = res.mapped ? std::string() : res.error;
+        // done per ultimo: pubblica le stringhe già scritte.
+        g_upnpDone.store(true);
+        g_upnpBusy.store(false);
+    }).detach();
+}
+
+/** Toglie l'inoltro quando si smette di ospitare. */
+/**
+ * Riversa l'esito dell'inoltro nella riga di stato, una volta sola.
+ * L'IP pubblico è l'informazione che serve davvero all'host: senza, la porta
+ * è aperta ma non sa cosa dire agli amici.
+ */
+static void pollPortMapStatus(char* statusOut, size_t statusSize) {
+    static bool reported = false;
+    if (!g_upnpDone.load()) { reported = false; return; }
+    if (reported) return;
+    reported = true;
+
+    if (!g_upnpError.empty()) {
+        std::snprintf(statusOut, statusSize,
+                      "Porta non aperta: %s — serve il port forwarding manuale",
+                      g_upnpError.c_str());
+    } else if (!g_upnpExternalIp.empty()) {
+        std::snprintf(statusOut, statusSize,
+                      "Server aperto — gli amici si collegano a %s:%d",
+                      g_upnpExternalIp.c_str(), g_upnpPort);
+    } else {
+        std::snprintf(statusOut, statusSize, "Porta %d aperta sul router", g_upnpPort);
+    }
+}
+
+static void closePortIfOpen() {
+    if (g_upnpPort <= 0) return;
+    const int port = g_upnpPort;
+    g_upnpPort = 0;
+    g_upnpDone.store(false);
+    std::thread([port]() { PortMap::close(port); }).detach();
+}
 static int g_selectedModel = -1;
 static int g_selectedSound = -1;
 static char g_soundPathBuf[512] = {};
@@ -3905,6 +3967,10 @@ static void finishLoading() {
     } else {
         // PLAY = auto multiplayer: join a chi è già in partita, altrimenti sei tu l'host
         g_net.startAutoMatch(27015, gi, uname, maxP);
+        // Se siamo noi a ospitare, chiedi al router di inoltrare la porta:
+        // senza, gli amici fuori dalla rete di casa non ci raggiungono.
+        if (g_net.role == NetRole::Host)
+            openPortAsync(27015);
     }
     if (g_net.role == NetRole::Client)
         g_playerPos.z = 4.f;
@@ -4142,6 +4208,7 @@ static void returnToMenu(GLFWwindow* win) {
     g_menu.shopItems = std::move(shopItems);
     g_menu.shopSeeded = shopSeeded;
     g_net.shutdown();
+    closePortIfOpen();
     g_remoteBodies.clear();
     g_selectedPart = -1;
     g_studioTesting = false;
@@ -9508,6 +9575,9 @@ int main() {
             // Multiplayer LAN: invia/ricevi trasformazioni
             if (g_screen == AppScreen::Playing && g_net.role != NetRole::Offline) {
                 g_net.poll((float)glfwGetTime());
+                // L'inoltro porta risponde dopo qualche secondo, su un altro
+                // thread: qui si raccoglie l'esito quando è pronto.
+                pollPortMapStatus(g_menu.netStatus, sizeof(g_menu.netStatus));
                 // Il registro degli script vive nel runtime Lua: qui lo si
                 // travasa alla rete solo quando cambia, cosi' un chunk
                 // iniettato a meta' partita finisce nel report successivo.
@@ -9555,6 +9625,7 @@ int main() {
                     // sparisce dal binario, cosi' non si legge nulla sui server.
                     LOG_SEC("gate", "negato codice=%d", reasonCode);
                     g_net.shutdown();
+                    closePortIfOpen();
                     returnToMenu(win);
                 }
             }
@@ -9810,6 +9881,7 @@ int main() {
     persistFastExit();
     g_sounds.stopAll();
     g_net.shutdown();
+    closePortIfOpen();
     // Skip destroy GL pesanti: il processo sta uscendo (OS libera tutto)
     g_lua.shutdown();
     ImGui_ImplOpenGL3_Shutdown();
