@@ -320,7 +320,11 @@ public:
             break;
         }
         case AnimClip::Jump: {
-            float blend = std::clamp(h.jumpArmBlend, 0.f, 1.f) * w;
+            // In aria la posa deve vedersi: jumpArmBlend serve ad ammorbidire
+            // l'entrata, non a poter annullare il salto se resta a zero.
+            float ease = std::clamp(h.jumpArmBlend, 0.f, 1.f);
+            if (!h.grounded) ease = std::max(ease, 0.75f);
+            const float blend = ease * w;
             if (hasJumpOverride && jumpOverride.valid()) {
                 R6WalkKey k = r6SampleClip(jumpOverride, h.jumpAnimTime);
                 r6ApplyKeyToHumanoid(h, k, blend);

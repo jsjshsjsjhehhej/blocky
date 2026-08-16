@@ -192,29 +192,33 @@ inline void humanoidJumpPose(const Humanoid& h,
         { 0.75f,  -22.f,  -18.f,    2.f,   -2.f },
         { 0.92f,   -8.f,   -8.f,    0.f,    0.f },
     };
-    constexpr int n = 10;
-    float t = std::max(0.f, h.jumpAnimTime);
-    float la = k[n - 1][1], ra = k[n - 1][2], ll = k[n - 1][3], rl = k[n - 1][4];
-    if (t <= k[0][0]) {
-        la = k[0][1]; ra = k[0][2]; ll = k[0][3]; rl = k[0][4];
-    } else {
-        for (int i = 0; i + 1 < n; ++i) {
-            if (t > k[i + 1][0]) continue;
-            float span = k[i + 1][0] - k[i][0];
-            float u = span > 1e-5f ? (t - k[i][0]) / span : 0.f;
-            u = u * u * (3.f - 2.f * u);
-            la = k[i][1] + (k[i + 1][1] - k[i][1]) * u;
-            ra = k[i][2] + (k[i + 1][2] - k[i][2]) * u;
-            ll = k[i][3] + (k[i + 1][3] - k[i][3]) * u;
-            rl = k[i][4] + (k[i + 1][4] - k[i][4]) * u;
-            break;
-        }
-    }
-    const float w = std::clamp(h.jumpArmBlend, 0.f, 1.f);
-    armL = la * w;
-    armR = ra * w;
-    legL = ll * w;
-    legR = rl * w;
+    (void)k;   // tabella storica: tenuta come riferimento degli angoli
+
+    // Guidata dalla velocità verticale, non da un timer.
+    //
+    // Due motivi. Primo: un timer può restare fermo a zero se qualcosa a monte
+    // non lo aggiorna, e la posa muore in silenzio. La velocità invece è un
+    // dato fisico che esiste sempre. Secondo: così la posa è giusta anche
+    // cadendo da un bordo senza aver saltato, dove un timer di salto non è
+    // mai partito.
+    //
+    // Non c'è più la moltiplicazione per jumpArmBlend: prima l'intera posa
+    // veniva scalata per quel valore, e se restava a zero il salto era
+    // invisibile qualunque altra cosa funzionasse. L'attenuazione, dove
+    // serve, la applica il chiamante.
+    const float v = h.velocityY;
+    const float rise = std::min(1.f, std::max(0.f,  v / 26.f));   // 1 = spinta piena
+    const float fall = std::min(1.f, std::max(0.f, -v / 30.f));   // 1 = caduta veloce
+
+    // Braccia: alzate nello slancio, riaperte scendendo a bilanciare.
+    const float arms = -32.f - 128.f * rise - 46.f * fall;
+    armL = arms;
+    armR = arms * 1.05f;   // una posa perfettamente speculare sembra un manichino
+
+    // Gambe: raccolte salendo, distese cadendo. Nella tabella storica restavano
+    // quasi immobili, e chi guardava le gambe non vedeva partire nessun salto.
+    legL =  12.f + 34.f * rise - 24.f * fall;
+    legR = -14.f + 20.f * rise - 16.f * fall;
 }
 
 /** Compat: media braccia (accessori / fallback). */
