@@ -317,6 +317,15 @@ set_target_properties(BlockyServer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     OUTPUT_NAME "BlockyServer")
 
+# Controllo asset pre-release: esce != 0 se trova errori, così può fermare
+# uno script di packaging prima che il pacchetto venga creato.
+add_executable(asset_audit src/tools/asset_audit.cpp)
+target_include_directories(asset_audit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if (WIN32)
+    # Statico come gli altri target: deve girare su una macchina senza MinGW.
+    target_link_options(asset_audit PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 add_executable(test_lua src/tools/test_lua.cpp)
 target_include_directories(test_lua PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # LuaRuntime.h non è più headless: tira dentro R6WalkAnim.h (assimp),
