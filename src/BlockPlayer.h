@@ -115,21 +115,30 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
 
         float rx = p.rotX;
         float rz = p.rotZ;
-        // Fallback walk solo a terra: in salto rotX=0 è valido (gambe ferme)
-        bool jumping = !humanoid.grounded || jb > 0.05f;
-        bool animDriven = (std::fabs(p.rotX) + std::fabs(p.rotZ)) > 0.01f;
-        if (!animDriven && !jumping) {
+
+        const bool jumping = !humanoid.grounded || jb > 0.05f;
+        const bool animDriven = (std::fabs(p.rotX) + std::fabs(p.rotZ)) > 0.01f;
+
+        // Stare in aria è uno stato fisico, e la posa deve rifletterlo comunque.
+        // Prima la posa di salto veniva messa solo se nessuno aveva scritto le
+        // rotazioni: bastava che a monte restasse una camminata (importata o
+        // loopata) perché il personaggio camminasse a mezz'aria. Ora in aria
+        // comanda il salto, e si cede il passo solo se l'ha già applicato
+        // l'Animator — che può avere una clip di salto importata, migliore
+        // della posa procedurale.
+        if (jumping && !humanoid.poseIsJump) {
+            if (p.name == "Left Leg") rx = jl;
+            else if (p.name == "Right Leg") rx = jr;
+            else if (p.name == "Left Arm") rx = jL;
+            else if (p.name == "Right Arm") rx = jR;
+            if (p.isLimb) rz = 0.f;
+        } else if (!animDriven && !jumping) {
             if (p.name == "Left Leg") rx = walkLeg;
             else if (p.name == "Right Leg") rx = -walkLeg;
             else if (p.name == "Left Arm")
                 rx = walkArm;
             else if (p.name == "Right Arm")
                 rx = (rightArmHold != 0.f) ? rightArmHold : -walkArm;  // tiene oggetto
-        } else if (!animDriven && jumping) {
-            if (p.name == "Left Leg") rx = jl;
-            else if (p.name == "Right Leg") rx = jr;
-            else if (p.name == "Left Arm") rx = jL;
-            else if (p.name == "Right Arm") rx = jR;
         }
 
         drawPart(ctx, drawCube, root, c, p.size, p.color, p.pivot, rx, rz);

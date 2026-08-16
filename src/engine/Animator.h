@@ -197,7 +197,9 @@ public:
     }
 
     void apply(Humanoid& h, float dt, bool isWalking) {
-        if (!playing) return;
+        // Se l'Animator è fermo non scrive nulla, quindi non ha messo nessuna
+        // posa di salto: il disegno deve saperlo per metterla lui.
+        if (!playing) { h.poseIsJump = false; return; }
         time += dt;
 
         // Sync walk override da libreria se impostata (mai tool/pistola)
@@ -266,6 +268,8 @@ public:
         }
 
         lastActive = active;
+        // Dichiara al disegno se la posa di questo frame è quella di salto.
+        h.poseIsJump = (active == AnimClip::Jump);
         float w = std::clamp(weight, 0.f, 1.f);
 
         // Solo walk loopate e non-tool come override camminata

@@ -35,6 +35,13 @@ struct Humanoid {
     float velocityY = 0.f;
     bool  grounded  = true;
     float jumpArmBlend = 0.f;
+    /**
+     * True se chi ha scritto le rotazioni questo frame ha applicato una posa
+     * di salto. Serve al disegno per sapere se deve metterla lui: in aria la
+     * posa di salto deve vedersi comunque, anche se a monte qualcosa ha
+     * scritto una camminata.
+     */
+    bool poseIsJump = false;
     /** Tempo dall'inizio salto (secondi) — guida i keyframe braccia/gambe. */
     float jumpAnimTime = 0.f;
 
