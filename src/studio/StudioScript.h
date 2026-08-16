@@ -24,6 +24,7 @@
 #endif
 
 #include "engine/LuaRuntime.h"
+#include "platform/CrashHandler.h"
 #include "studio/StudioIcons.h"
 #include "studio/StudioPanels.h"   // panelTitle
 #include "studio/StudioState.h"
@@ -139,6 +140,15 @@ struct ScriptEditor {
         if (code.empty()) {
             s.output.add(LogLevel::Warn, "Script vuoto");
             return;
+        }
+
+        // Breadcrumb prima di eseguire: se lo script fa crashare il motore,
+        // il report deve dire quale script stava girando.
+        {
+            std::string crumb = "esegue script";
+            if (const WorkspacePart* p = s.selectedPart()) crumb += " di " + p->name;
+            crumb += " (" + std::to_string(code.size()) + " byte)";
+            CrashHandler::note(crumb.c_str());
         }
 
         s.output.add(LogLevel::Script, "--- esecuzione ---");

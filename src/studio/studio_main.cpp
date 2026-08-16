@@ -25,6 +25,8 @@
 #include "engine/BlockyProject.h"
 #include "engine/Humanoid.h"
 #include "engine/PlaceExporter.h"
+#include "engine/SceneIntegrity.h"
+#include "platform/CrashHandler.h"
 #include "studio/StudioPanels.h"
 #include "studio/StudioRibbon.h"
 #include "studio/StudioScript.h"
@@ -86,6 +88,38 @@ std::string windowTitle(const StudioState& s) {
     std::string t = "Blocky Studio — " + s.world.placeName;
     if (s.dirty) t += " *";
     return t;
+}
+
+/**
+ * Verifica il place e riversa i rilievi nell'Output.
+ * `autoRepair` corregge il correggibile: usato al caricamento, dove un valore
+ * rotto non è colpa dell'utente e fermarlo non aiuterebbe nessuno.
+ */
+void runIntegrityCheck(StudioState& s, bool autoRepair) {
+    SceneIntegrity::Result res = SceneIntegrity::check(s.world);
+
+    if (res.clean()) {
+        s.output.info("Integrità scena: nessun problema (%d parts)", (int)s.world.parts.size());
+        return;
+    }
+
+    for (const SceneIntegrity::Issue& i : res.issues) {
+        const LogLevel level = (i.severity == SceneIntegrity::Severity::Error) ? LogLevel::Error
+                             : (i.severity == SceneIntegrity::Severity::Warn) ? LogLevel::Warn
+                             : LogLevel::Info;
+        s.output.add(level, "[%s] %s — %s", i.rule.c_str(), i.subject.c_str(), i.detail.c_str());
+    }
+
+    s.output.add(res.errors ? LogLevel::Error : LogLevel::Warn,
+                 "Integrità scena: %d errori, %d avvisi", res.errors, res.warnings);
+
+    if (autoRepair && res.repairable > 0) {
+        const int fixed = SceneIntegrity::repair(s.world);
+        if (fixed > 0) {
+            s.dirty = true;
+            s.output.info("Corretti %d valori automaticamente", fixed);
+        }
+    }
 }
 
 void savePlace(StudioState& s) {
@@ -337,6 +371,13 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
         ribbonEndGroup("Mostra");
 
         ribbonBeginGroup();
+        if (ribbonBigButton("v_check", Icon::Anchor, "Verifica"))
+            runIntegrityCheck(s, false);
+        if (ribbonBigButton("v_fix", Icon::Undo, "Ripara"))
+            runIntegrityCheck(s, true);
+        ribbonEndGroup("Integrità");
+
+        ribbonBeginGroup();
         ribbonBeginStack();
         if (ribbonSmallButton("v_home", Icon::Camera, "Reset camera"))
             s.output.info("Camera riportata all'origine");
@@ -386,11 +427,21 @@ void drawMenuBar(StudioState& s, bool& running) {
             s.output.info("Nuovo place: Baseplate");
         }
         if (ImGui::BeginMenu("Template")) {
-            if (ImGui::MenuItem("Obby"))   { s.world.loadObbyPlace();   s.undo.clear(); s.selectNone(); }
-            if (ImGui::MenuItem("Arena"))  { s.world.loadArenaPlace();  s.undo.clear(); s.selectNone(); }
-            if (ImGui::MenuItem("Parco"))  { s.world.loadParkPlace();   s.undo.clear(); s.selectNone(); }
-            if (ImGui::MenuItem("Città"))  { s.world.loadCityPlace();   s.undo.clear(); s.selectNone(); }
-            if (ImGui::MenuItem("Garden")) { s.world.loadGardenPlace(); s.undo.clear(); s.selectNone(); }
+            // Ogni caricamento passa dal controllo d'integrità: un place
+            // scritto da una build diversa è il caso in cui serve davvero.
+            auto loadTemplate = [&](const char* label, void (DataModel::*loader)()) {
+                if (!ImGui::MenuItem(label)) return;
+                CrashHandler::note((std::string("carica template: ") + label).c_str());
+                (s.world.*loader)();
+                s.undo.clear();
+                s.selectNone();
+                runIntegrityCheck(s, true);
+            };
+            loadTemplate("Obby",   &DataModel::loadObbyPlace);
+            loadTemplate("Arena",  &DataModel::loadArenaPlace);
+            loadTemplate("Parco",  &DataModel::loadParkPlace);
+            loadTemplate("Città",  &DataModel::loadCityPlace);
+            loadTemplate("Garden", &DataModel::loadGardenPlace);
             ImGui::EndMenu();
         }
         ImGui::Separator();
@@ -434,6 +485,11 @@ void drawMenuBar(StudioState& s, bool& running) {
 } // namespace
 
 int main() {
+    // Prima di tutto: un crash durante l'inizializzazione è quello che
+    // lascia meno indizi, ed è proprio quello che va registrato.
+    CrashHandler::install("BlockyStudio", "1.0");
+    CrashHandler::note("avvio");
+
     if (!glfwInit()) {
         std::fprintf(stderr, "glfwInit fallita\n");
         return 1;
