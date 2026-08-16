@@ -2470,6 +2470,41 @@ static void applyMapTemplate(int kind) {
     g_exportMsg = std::string("Mappa: ") + g_world.placeName;
 }
 
+/**
+ * Prepara la versione animata di un modello del mondo.
+ *
+ * Chiamata da entrambe le strade che aggiungono modelli — l'import da UI e il
+ * ricaricamento in blocco — perché l'import inserisce la mesh a mano in
+ * g_wsMeshes e quindi non passa mai dal ricaricamento.
+ */
+static void setupRiggedModel(size_t index, WorkspaceModel& m, bool fileHasBones) {
+    if (g_wsRigged.size() <= index) g_wsRigged.resize(index + 1);
+
+    m.rigged = false;
+    if (!fileHasBones || m.sourcePath.empty()) return;
+
+    // StaticMesh rileva lo scheletro ma appiattisce la geometria: per animare
+    // serve una seconda lettura del file come modello con ossa.
+    if (!g_wsRigged[index].load(m.sourcePath)) return;
+
+    m.rigged = g_wsRigged[index].clipCount() > 0;
+    if (!m.rigged) return;
+
+    std::printf("[Model] '%s': %d clip animate disponibili\n",
+                m.name.c_str(), g_wsRigged[index].clipCount());
+
+    // Un modello animato deve animarsi appena importato: chi lo mette nella
+    // scena si aspetta di vederlo muoversi, non di dover prima scrivere uno
+    // script. Gli script poi possono fermare questa traccia e comandarne altre.
+    if (m.animator.tracks.empty()) {
+        const int id = m.animator.load(g_wsRigged[index].activeClipName());
+        if (AnimTrack* t = m.animator.get(id)) {
+            t->looped = true;
+            t->playing = true;
+        }
+    }
+}
+
 static void reloadWorkspaceModelMeshes() {
     g_wsMeshes.clear();
     g_wsRigged.clear();
@@ -2484,31 +2519,7 @@ static void reloadWorkspaceModelMeshes() {
         if (!m.sourcePath.empty())
             mesh.load(m.sourcePath);
 
-        // StaticMesh rileva già lo scheletro ma non lo usa: se c'è, carichiamo
-        // il file una seconda volta come modello animato.
-        m.rigged = false;
-        if (mesh.hasBones && !m.sourcePath.empty()) {
-            if (g_wsRigged[i].load(m.sourcePath)) {
-                m.rigged = g_wsRigged[i].clipCount() > 0;
-                if (m.rigged) {
-                    std::printf("[Model] '%s': %d clip animate disponibili\n",
-                                m.name.c_str(), g_wsRigged[i].clipCount());
-
-                    // Un modello animato deve animarsi appena importato: chi lo
-                    // mette nella scena si aspetta di vederlo muoversi, non di
-                    // dover prima scrivere uno script. Gli script poi possono
-                    // fermare questa traccia e comandarne altre.
-                    if (m.animator.tracks.empty()) {
-                        const int id = m.animator.load(g_wsRigged[i].activeClipName());
-                        if (AnimTrack* t = m.animator.get(id)) {
-                            t->looped = true;
-                            t->playing = true;
-                        }
-                    }
-                }
-            }
-        }
-
+        setupRiggedModel(i, m, mesh.hasBones);
         g_wsMeshes.push_back(std::move(mesh));
     }
 }
@@ -2649,6 +2660,10 @@ static void insertImportedModel() {
     wm.rig.fileHasBones = mesh.hasBones; // dal primo load — niente secondo Assimp
     wm.rig.simpleRig = false;
     g_wsMeshes.push_back(std::move(mesh));
+    // Senza questa riga il modello entra nella scena ma resta statico: il
+    // ricaricamento in blocco non scatta, perché le due liste sono allineate.
+    setupRiggedModel(g_world.models.size() - 1, wm, wm.rig.fileHasBones);
+
     g_selectedPart = -1;
     g_selectedSound = -1;
     int idx = (int)g_world.models.size() - 1;
