@@ -80,6 +80,12 @@ struct WorkspaceModel {
     ModelAnimator animator;
     /** True se il file importato ha uno scheletro: deciso al caricamento. */
     bool rigged = false;
+    /**
+     * Blocca il player. Default false: i modelli finora non collidevano, e
+     * renderli solidi d'ufficio incastrerebbe il player dentro quelli
+     * decorativi dei place già salvati. Si accende quando serve.
+     */
+    bool canCollide = false;
 };
 
 /**

@@ -2230,6 +2230,172 @@ private:
         return 0;
     }
 
+    // ---------------------------------------------------------- Model / Animator
+
+    static int intField(lua_State* ls, int selfIdx, const char* key) {
+        lua_getfield(ls, selfIdx, key);
+        const int v = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+        lua_pop(ls, 1);
+        return v;
+    }
+
+    static WorkspaceModel* liveModel(lua_State* ls, int selfIdx) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return nullptr;
+        const int i = intField(ls, selfIdx, "__modelIndex");
+        if (i < 0 || i >= (int)rt->workspace->models.size()) return nullptr;
+        return &rt->workspace->models[(size_t)i];
+    }
+
+    /** Traccia: la si tiene in una variabile e la si comanda quando serve. */
+    static int luaTrackPlay(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        const int id = intField(ls, 1, "__trackId");
+        if (AnimTrack* t = m->animator.get(id)) {
+            // Le altre tracce si fermano: due animazioni del corpo insieme
+            // darebbero una posa mescolata, non una transizione.
+            for (AnimTrack& other : m->animator.tracks) other.playing = false;
+            t->playing = true;
+        }
+        return 0;
+    }
+
+    static int luaTrackStop(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        m->animator.stop(intField(ls, 1, "__trackId"));
+        return 0;
+    }
+
+    static int luaTrackIsPlaying(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        const AnimTrack* t = m ? m->animator.get(intField(ls, 1, "__trackId")) : nullptr;
+        lua_pushboolean(ls, t && t->playing);
+        return 1;
+    }
+
+    static int luaTrackAdjustSpeed(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        if (AnimTrack* t = m->animator.get(intField(ls, 1, "__trackId")))
+            t->speed = std::max(0.f, (float)luaL_optnumber(ls, 2, 1.0));
+        return 0;
+    }
+
+    static int luaTrackSetLooped(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        if (AnimTrack* t = m->animator.get(intField(ls, 1, "__trackId")))
+            t->looped = lua_toboolean(ls, 2) != 0;
+        return 0;
+    }
+
+    static void pushAnimTrack(lua_State* ls, int modelIndex, int trackId) {
+        lua_newtable(ls);
+        lua_pushinteger(ls, modelIndex); lua_setfield(ls, -2, "__modelIndex");
+        lua_pushinteger(ls, trackId);    lua_setfield(ls, -2, "__trackId");
+        lua_pushcfunction(ls, luaTrackPlay);        lua_setfield(ls, -2, "Play");
+        lua_pushcfunction(ls, luaTrackStop);        lua_setfield(ls, -2, "Stop");
+        lua_pushcfunction(ls, luaTrackIsPlaying);   lua_setfield(ls, -2, "IsPlaying");
+        lua_pushcfunction(ls, luaTrackAdjustSpeed); lua_setfield(ls, -2, "AdjustSpeed");
+        lua_pushcfunction(ls, luaTrackSetLooped);   lua_setfield(ls, -2, "SetLooped");
+    }
+
+    static int luaAnimatorLoad(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        const char* clip = luaL_checkstring(ls, 2);
+        const int modelIndex = intField(ls, 1, "__modelIndex");
+        pushAnimTrack(ls, modelIndex, m->animator.load(clip));
+        return 1;
+    }
+
+    static int luaAnimatorStopAll(lua_State* ls) {
+        if (WorkspaceModel* m = liveModel(ls, 1)) m->animator.stopAll();
+        return 0;
+    }
+
+    static void pushAnimator(lua_State* ls, int modelIndex) {
+        lua_newtable(ls);
+        lua_pushinteger(ls, modelIndex); lua_setfield(ls, -2, "__modelIndex");
+        lua_pushcfunction(ls, luaAnimatorLoad);    lua_setfield(ls, -2, "LoadAnimation");
+        lua_pushcfunction(ls, luaAnimatorStopAll); lua_setfield(ls, -2, "StopAll");
+    }
+
+    static int luaModelGetPosition(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        pushVec3(ls, m->position.x, m->position.y, m->position.z);
+        return 1;
+    }
+
+    static int luaModelSetPosition(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        glm::vec3 p = m->position;
+        if (!readVec3Arg(ls, 2, p))
+            return luaL_error(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
+        m->position = p;
+        return 0;
+    }
+
+    static int luaModelSetRotation(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        glm::vec3 r = m->rotation;
+        if (!readVec3Arg(ls, 2, r))
+            return luaL_error(ls, "SetRotation(Vector3) oppure SetRotation(x,y,z)");
+        m->rotation = r;
+        return 0;
+    }
+
+    /** Yaw comodo per un NPC che deve guardare dove cammina. */
+    static int luaModelSetYaw(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        m->rotation.y = (float)luaL_checknumber(ls, 2);
+        return 0;
+    }
+
+    static int luaModelSetCanCollide(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        if (!m) return 0;
+        m->canCollide = lua_toboolean(ls, 2) != 0;
+        return 0;
+    }
+
+    static int luaModelGetCanCollide(lua_State* ls) {
+        WorkspaceModel* m = liveModel(ls, 1);
+        lua_pushboolean(ls, m && m->canCollide);
+        return 1;
+    }
+
+    static void pushLiveModel(lua_State* ls, int modelIndex) {
+        auto* rt = fromState(ls);
+        lua_newtable(ls);
+        lua_pushinteger(ls, modelIndex);
+        lua_setfield(ls, -2, "__modelIndex");
+
+        lua_pushcfunction(ls, luaModelGetPosition);   lua_setfield(ls, -2, "GetPosition");
+        lua_pushcfunction(ls, luaModelSetPosition);   lua_setfield(ls, -2, "SetPosition");
+        lua_pushcfunction(ls, luaModelSetRotation);   lua_setfield(ls, -2, "SetRotation");
+        lua_pushcfunction(ls, luaModelSetYaw);        lua_setfield(ls, -2, "SetYaw");
+        lua_pushcfunction(ls, luaModelSetCanCollide); lua_setfield(ls, -2, "SetCanCollide");
+        lua_pushcfunction(ls, luaModelGetCanCollide); lua_setfield(ls, -2, "GetCanCollide");
+
+        pushAnimator(ls, modelIndex);
+        lua_setfield(ls, -2, "Animator");
+
+        if (rt && rt->workspace && modelIndex >= 0
+            && modelIndex < (int)rt->workspace->models.size()) {
+            lua_pushstring(ls, rt->workspace->models[(size_t)modelIndex].name.c_str());
+            lua_setfield(ls, -2, "Name");
+        }
+        lua_pushstring(ls, "Model");
+        lua_setfield(ls, -2, "ClassName");
+    }
+
     static int luaWorkspaceFind(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace) return 0;
@@ -2237,6 +2403,14 @@ private:
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
             if (rt->workspace->parts[i].name == name) {
                 pushLivePart(ls, i);
+                return 1;
+            }
+        }
+        // Poi fra i modelli importati: per uno script "Mostro" è un oggetto
+        // della scena, non gli importa di che tipo sia.
+        for (int i = 0; i < (int)rt->workspace->models.size(); ++i) {
+            if (rt->workspace->models[i].name == name) {
+                pushLiveModel(ls, i);
                 return 1;
             }
         }
@@ -2250,6 +2424,10 @@ private:
         int i = 1;
         for (int pi = 0; pi < (int)rt->workspace->parts.size(); ++pi) {
             pushLivePart(ls, pi);
+            lua_rawseti(ls, -2, i++);
+        }
+        for (int mi = 0; mi < (int)rt->workspace->models.size(); ++mi) {
+            pushLiveModel(ls, mi);
             lua_rawseti(ls, -2, i++);
         }
         return 1;

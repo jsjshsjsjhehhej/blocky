@@ -2477,6 +2477,36 @@ static void applyMapTemplate(int kind) {
  * ricaricamento in blocco — perché l'import inserisce la mesh a mano in
  * g_wsMeshes e quindi non passa mai dal ricaricamento.
  */
+/**
+ * AABB in spazio mondo di un modello importato.
+ * Trasforma gli otto vertici del box locale e ne riprende min/max, così una
+ * rotazione produce un volume che contiene davvero la mesh.
+ */
+static bool modelWorldAabb(int index, glm::vec3& outMin, glm::vec3& outMax) {
+    if (index < 0 || index >= (int)g_world.models.size()) return false;
+    if (index >= (int)g_wsMeshes.size() || !g_wsMeshes[index].loaded) return false;
+
+    const auto& m = g_world.models[index];
+    const glm::vec3 lo = g_wsMeshes[index].boundsMin;
+    const glm::vec3 hi = g_wsMeshes[index].boundsMax;
+
+    const glm::mat4 xf = glm::translate(glm::mat4(1.f), m.position)
+                       * partRotationMatrix(m.rotation)
+                       * glm::scale(glm::mat4(1.f), m.scale);
+
+    outMin = glm::vec3(1e30f);
+    outMax = glm::vec3(-1e30f);
+    for (int c = 0; c < 8; ++c) {
+        const glm::vec3 corner((c & 1) ? hi.x : lo.x,
+                               (c & 2) ? hi.y : lo.y,
+                               (c & 4) ? hi.z : lo.z);
+        const glm::vec3 w = glm::vec3(xf * glm::vec4(corner, 1.f));
+        outMin = glm::min(outMin, w);
+        outMax = glm::max(outMax, w);
+    }
+    return true;
+}
+
 static void setupRiggedModel(size_t index, WorkspaceModel& m, bool fileHasBones) {
     if (g_wsRigged.size() <= index) g_wsRigged.resize(index + 1);
 
@@ -3113,6 +3143,16 @@ static void resolvePlayerAxis(int axis) {
         if (!part.canCollide) continue;
         glm::vec3 bmin, bmax;
         partWorldAabb(part, bmin, bmax);
+        pushOut(bmin, bmax);
+    }
+
+    // Modelli importati: stesso trattamento, ma solo se accesi a mano.
+    // Il volume è l'AABB della mesh trasformata, non la geometria vera: per un
+    // muro o una cassa basta, per una scala non ci si sale.
+    for (int i = 0; i < (int)g_world.models.size(); ++i) {
+        if (!g_world.models[i].canCollide) continue;
+        glm::vec3 bmin, bmax;
+        if (!modelWorldAabb(i, bmin, bmax)) continue;
         pushOut(bmin, bmax);
     }
 }
