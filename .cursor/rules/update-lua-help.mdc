@@ -1,0 +1,15 @@
+---
+description: Aggiorna LuaHelp.txt ogni volta che aggiungi/modifichi API Blocky
+alwaysApply: true
+---
+
+# Aggiorna LuaHelp quando aggiungi qualcosa
+
+Quando aggiungi o cambi API, proprietà Part, Particles, Humanoid, Label/UI, boom, materiali, o comportamenti scriptabili in **RobloxEngine**:
+
+1. Aggiorna **sempre** `LuaHelp.txt` nello stesso intervento (sezione API + esempio se utile).
+2. Scrivi solo API **reali** — niente Roblox inventato (`TweenService`, `ScreenGui`, `TextLabel` UI, ecc. se non esistono).
+3. Se esiste, allinea anche `assets/web/lua.html` e/o `assets/scripts/lua_api_completo.lua`.
+4. In `LuaHelp.txt` aggiorna la data in cima.
+
+Label 3D (Studio) ≠ TextLabel UI (non esiste ancora in Lua).

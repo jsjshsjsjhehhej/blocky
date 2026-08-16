@@ -1,0 +1,66 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "pc-release",
+      "displayName": "Blocky PC Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-pc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ROBLOX_TARGET": "PC",
+        "ROBLOX_PREFER_VULKAN": "OFF"
+      }
+    },
+    {
+      "name": "pc-vulkan",
+      "displayName": "Blocky PC Vulkan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-vk",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ROBLOX_TARGET": "PC",
+        "ROBLOX_PREFER_VULKAN": "ON"
+      }
+    },
+    {
+      "name": "mobile-gles",
+      "displayName": "Blocky Mobile GLES profile",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-mobile",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ROBLOX_TARGET": "MOBILE",
+        "ROBLOX_OPTIMIZE_SIZE": "ON",
+        "GARDEN_GLES": "ON"
+      }
+    },
+    {
+      "name": "ios-metal",
+      "displayName": "Blocky iOS Metal",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ios",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ROBLOX_TARGET": "IOS"
+      }
+    },
+    {
+      "name": "ps5",
+      "displayName": "Blocky PS5",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ps5",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ROBLOX_TARGET": "PS5"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "pc-release", "configurePreset": "pc-release", "targets": ["Roblox"] },
+    { "name": "mobile-gles", "configurePreset": "mobile-gles", "targets": ["Roblox"] },
+    { "name": "ios-metal", "configurePreset": "ios-metal", "targets": ["Roblox"] },
+    { "name": "ps5", "configurePreset": "ps5", "targets": ["Roblox"] }
+  ]
+}

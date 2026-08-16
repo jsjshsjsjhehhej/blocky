@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blocky — Walking Animation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0b1a2e;
+      --paper: #e8f1fb;
+      --blue: #1a6fd4;
+      --blue-deep: #0d3d7a;
+      --mint: #2ec4a0;
+      --sun: #f0c14a;
+      --glass: rgba(255, 255, 255, 0.14);
+      --line: rgba(255, 255, 255, 0.22);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      min-height: 100%;
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      color: #f4f8ff;
+      background:
+        radial-gradient(1200px 700px at 10% -10%, #2a7fff 0%, transparent 55%),
+        radial-gradient(900px 600px at 100% 20%, #0a3a6e 0%, transparent 50%),
+        linear-gradient(165deg, #071526 0%, #0e2a4d 45%, #123a5c 100%);
+      background-attachment: fixed;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+      animation: drift 28s linear infinite;
+    }
+
+    @keyframes drift {
+      from { background-position: 0 0, 0 0; }
+      to { background-position: 48px 48px, 48px 48px; }
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(46, 196, 160, 0.35); }
+      50% { transform: scale(1.02); box-shadow: 0 0 0 12px rgba(46, 196, 160, 0); }
+    }
+
+    .wrap {
+      width: min(920px, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 2.5rem 0 4rem;
+    }
+
+    header.hero {
+      animation: rise 0.7s ease both;
+      margin-bottom: 2.5rem;
+    }
+
+    .brand {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      font-size: clamp(2.6rem, 8vw, 4.2rem);
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+      background: linear-gradient(120deg, #fff 20%, #9cc8ff 70%, #2ec4a0);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .tagline {
+      margin-top: 0.85rem;
+      max-width: 34rem;
+      font-size: 1.05rem;
+      line-height: 1.5;
+      color: rgba(232, 241, 251, 0.82);
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+
+    .btn {
+      appearance: none;
+      border: 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 0.95rem;
+      padding: 0.85rem 1.25rem;
+      border-radius: 999px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn:active { transform: translateY(0); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--mint), #1a9e7e);
+      color: #04241c;
+      animation: pulse 2.8s ease infinite;
+    }
+
+    .btn-ghost {
+      background: var(--glass);
+      color: #fff;
+      border: 1px solid var(--line);
+      backdrop-filter: blur(8px);
+    }
+
+    section {
+      animation: rise 0.8s ease both;
+      animation-delay: 0.12s;
+      margin-top: 1.75rem;
+    }
+
+    h2 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 700;
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.85rem;
+    }
+
+    .steps {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 1rem;
+      padding: 1.1rem 1.2rem;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.04));
+      border: 1px solid var(--line);
+      backdrop-filter: blur(10px);
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .step:hover {
+      border-color: rgba(46, 196, 160, 0.45);
+      transform: translateX(4px);
+    }
+
+    .num {
+      width: 2.2rem;
+      height: 2.2rem;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      background: var(--blue);
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .step h3 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .step p {
+      color: rgba(232, 241, 251, 0.78);
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }
+
+    code, .mono {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.86em;
+      background: rgba(0, 0, 0, 0.28);
+      padding: 0.12em 0.4em;
+      border-radius: 6px;
+      color: var(--sun);
+    }
+
+    .parts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-top: 0.55rem;
+    }
+    .chip {
+      font-size: 0.78rem;
+      padding: 0.28rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(26, 111, 212, 0.35);
+      border: 1px solid rgba(156, 200, 255, 0.35);
+    }
+
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--line);
+      color: rgba(232, 241, 251, 0.55);
+      font-size: 0.85rem;
+      animation: rise 0.9s ease both;
+      animation-delay: 0.2s;
+    }
+
+    .note {
+      margin-top: 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 14px;
+      background: rgba(240, 193, 74, 0.12);
+      border: 1px solid rgba(240, 193, 74, 0.35);
+      color: #ffe9a8;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div class="brand">BLOCKY</div>
+      <p class="tagline">
+        Walking Animation — scarica il Player R6 default, animarlo in Blender,
+        poi rilascialo nel Catalog con il nome che vuoi.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#passi">Inizia i passi</a>
+        <a class="btn btn-ghost" href="#nomi">Nomi parti R6</a>
+      </div>
+    </header>
+
+    <section id="passi">
+      <h2>Flusso completo</h2>
+      <div class="steps">
+        <article class="step">
+          <div class="num">1</div>
+          <div>
+            <h3>Scarica il Player R6 default</h3>
+            <p>
+              In <strong>Blocky Game Engine → Avatar Catalog</strong> premi
+              <span class="mono">Scarica modello Player R6</span>.
+              Ottieni un <span class="mono">.obj</span> beveled (come in Studio) + MTL + LEGGIMI.
+            </p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="num">2</div>
+          <div>
+            <h3>Apri in Blender</h3>
+            <p>
+              File → Import → Wavefront (.obj). Tieni i nomi delle parti
+              (o rinomina con spazi: <span class="mono">Left Arm</span>, ecc.).
+            </p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="num">3</div>
+          <div>
+            <h3>Crea l’Action WalkingAnimation</h3>
+            <p>
+              Anima braccia e gambe (rotazione X = swing). L’Action deve chiamarsi
+              esattamente <span class="mono">WalkingAnimation</span>.
+            </p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="num">4</div>
+          <div>
+            <h3>Esporta GLB / FBX</h3>
+            <p>
+              Esporta <strong>con animazioni</strong> attive. Poi in Catalog:
+              <span class="mono">Importa WalkingAnimation</span>.
+            </p>
+          </div>
+        </article>
+        <article class="step">
+          <div class="num">5</div>
+          <div>
+            <h3>Rilascia con il tuo nome</h3>
+            <p>
+              Scegli il nome pubblico (es. “Cool Walk”) e premi
+              <span class="mono">Rilascia Walking Animation</span>.
+              Si equipaggia in Play e appare nello Shop come [Walk].
+            </p>
+          </div>
+        </article>
+      </div>
+
+      <p class="note">
+        L’import e il rilascio restano in Studio (dialog file nativi).
+        Questa pagina è la guida web — aprila quando ti serve il flusso chiaro.
+      </p>
+    </section>
+
+    <section id="nomi">
+      <h2>Nomi parti R6</h2>
+      <div class="step">
+        <div class="num">R6</div>
+        <div>
+          <h3>Oggetti nel modello</h3>
+          <p>Usa questi nomi (con underscore nell’OBJ, oppure con spazi in Blender):</p>
+          <div class="parts">
+            <span class="chip">Head</span>
+            <span class="chip">Torso</span>
+            <span class="chip">Left_Arm / Left Arm</span>
+            <span class="chip">Right_Arm / Right Arm</span>
+            <span class="chip">Left_Leg / Left Leg</span>
+            <span class="chip">Right_Leg / Right Leg</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Blocky · solo runtime Blocky · Walking Animation web guide
+    </footer>
+  </div>
+</body>
+</html>

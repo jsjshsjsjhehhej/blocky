@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blocky — Script Lua</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #06131f;
+      --fog: #d7e8f7;
+      --blue: #1a7ae8;
+      --blue-deep: #0a4a9a;
+      --mint: #2ec4a0;
+      --sun: #f0c14a;
+      --coral: #e85a3c;
+      --line: rgba(255, 255, 255, 0.16);
+      --panel: rgba(8, 28, 52, 0.72);
+      --code: #0a1624;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      min-height: 100%;
+      font-family: "IBM Plex Sans", sans-serif;
+      color: var(--fog);
+      background:
+        radial-gradient(1100px 640px at 8% -8%, #2a86ff 0%, transparent 52%),
+        radial-gradient(900px 520px at 100% 8%, #0d4e78 0%, transparent 48%),
+        radial-gradient(700px 500px at 70% 100%, #0c3a2e 0%, transparent 45%),
+        linear-gradient(168deg, #06101c 0%, #0c2340 48%, #0f3050 100%);
+      background-attachment: fixed;
+      line-height: 1.5;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.35;
+      background-image:
+        radial-gradient(circle at 50% 50%, rgba(255,255,255,0.07) 1.2px, transparent 1.4px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(180deg, #000 0%, transparent 78%);
+    }
+
+    a { color: var(--mint); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* —— Hero: one composition —— */
+    .hero {
+      position: relative;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: grid;
+      align-items: end;
+      overflow: hidden;
+      padding: clamp(1.25rem, 3vw, 2rem);
+      padding-bottom: clamp(2.5rem, 8vh, 5rem);
+    }
+
+    .hero-bg {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      background:
+        linear-gradient(180deg, transparent 35%, rgba(6, 16, 28, 0.92) 100%),
+        radial-gradient(ellipse 80% 55% at 70% 40%, rgba(46, 196, 160, 0.18), transparent 60%);
+    }
+
+    .stud-field {
+      position: absolute;
+      inset: -8% -5% 18% 35%;
+      z-index: 1;
+      perspective: 900px;
+      transform-style: preserve-3d;
+    }
+
+    .block {
+      position: absolute;
+      width: clamp(72px, 12vw, 140px);
+      aspect-ratio: 1;
+      border-radius: 10px;
+      background: linear-gradient(145deg, #3aa0ff, #1258b8 55%, #0a3d85);
+      box-shadow:
+        inset 0 2px 0 rgba(255,255,255,0.28),
+        inset 0 -8px 16px rgba(0,0,0,0.28);
+      transform: rotateX(52deg) rotateZ(-18deg);
+      animation: floatY 5.5s ease-in-out infinite;
+    }
+
+    .block::before,
+    .block::after {
+      content: "";
+      position: absolute;
+      width: 28%;
+      height: 28%;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #9fd0ff, #2a7fd4 70%);
+      box-shadow: inset 0 -2px 4px rgba(0,0,0,0.25);
+      top: 18%;
+    }
+    .block::before { left: 18%; }
+    .block::after { right: 18%; }
+
+    .block .stud {
+      position: absolute;
+      width: 28%;
+      height: 28%;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #9fd0ff, #2a7fd4 70%);
+      box-shadow: inset 0 -2px 4px rgba(0,0,0,0.25);
+      left: 36%;
+      bottom: 18%;
+    }
+
+    .block.b1 { top: 12%; left: 8%; animation-delay: 0s; }
+    .block.b2 {
+      top: 28%; left: 38%;
+      width: clamp(96px, 16vw, 180px);
+      background: linear-gradient(145deg, #5aefc8, #1a9a78 55%, #0d6a52);
+      animation-delay: -1.4s;
+    }
+    .block.b2::before,
+    .block.b2::after,
+    .block.b2 .stud {
+      background: radial-gradient(circle at 35% 30%, #c8ffe8, #2ec4a0 70%);
+    }
+    .block.b3 {
+      top: 8%; left: 62%;
+      background: linear-gradient(145deg, #ffd56a, #d4a020 55%, #9a7010);
+      animation-delay: -2.6s;
+    }
+    .block.b3::before,
+    .block.b3::after,
+    .block.b3 .stud {
+      background: radial-gradient(circle at 35% 30%, #fff0b8, #f0c14a 70%);
+    }
+    .block.b4 {
+      top: 48%; left: 22%;
+      width: clamp(60px, 10vw, 110px);
+      background: linear-gradient(145deg, #ff8a6e, #c43a28 55%, #8a2418);
+      animation-delay: -0.8s;
+    }
+    .block.b4::before,
+    .block.b4::after,
+    .block.b4 .stud {
+      background: radial-gradient(circle at 35% 30%, #ffc4b4, #e85a3c 70%);
+    }
+
+    @keyframes floatY {
+      0%, 100% { translate: 0 0; }
+      50% { translate: 0 -18px; }
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 2;
+      max-width: 36rem;
+      animation: riseIn 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+
+    @keyframes riseIn {
+      from { opacity: 0; transform: translateY(28px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .brand {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      font-size: clamp(3.4rem, 11vw, 6.5rem);
+      line-height: 0.92;
+      letter-spacing: -0.04em;
+      color: #fff;
+      text-shadow: 0 4px 40px rgba(26, 122, 232, 0.35);
+    }
+
+    .hero h1 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 600;
+      font-size: clamp(1.35rem, 3.2vw, 1.85rem);
+      margin-top: 1rem;
+      color: var(--fog);
+      max-width: 18ch;
+      line-height: 1.2;
+    }
+
+    .hero p.lead {
+      margin-top: 0.75rem;
+      font-size: 1.05rem;
+      color: rgba(215, 232, 247, 0.78);
+      max-width: 34ch;
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.75rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.85rem 1.35rem;
+      font-family: "IBM Plex Sans", sans-serif;
+      font-weight: 600;
+      font-size: 0.95rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease;
+    }
+
+    .btn:hover { transform: translateY(-2px); text-decoration: none; }
+
+    .btn-primary {
+      background: var(--mint);
+      color: #042218;
+    }
+    .btn-primary:hover { background: #45dbb4; }
+
+    .btn-ghost {
+      background: transparent;
+      color: #fff;
+      border: 1px solid var(--line);
+    }
+    .btn-ghost:hover { background: rgba(255,255,255,0.08); }
+
+    /* —— Sections —— */
+    main {
+      position: relative;
+      z-index: 2;
+      padding: 0 clamp(1.25rem, 4vw, 3rem) 4rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    section {
+      padding: 3.5rem 0 1rem;
+      border-top: 1px solid var(--line);
+      animation: riseIn 0.7s ease both;
+    }
+
+    section h2 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      font-size: clamp(1.6rem, 3vw, 2.1rem);
+      letter-spacing: -0.02em;
+      color: #fff;
+      margin-bottom: 0.4rem;
+    }
+
+    section > .sub {
+      color: rgba(215, 232, 247, 0.7);
+      margin-bottom: 1.5rem;
+      max-width: 48ch;
+    }
+
+    .start-steps {
+      display: grid;
+      gap: 0.65rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.9rem;
+      color: rgba(215, 232, 247, 0.9);
+    }
+
+    .start-steps span {
+      display: block;
+      padding: 0.85rem 1rem;
+      background: var(--panel);
+      border-left: 3px solid var(--blue);
+      border-radius: 0 8px 8px 0;
+      backdrop-filter: blur(8px);
+    }
+
+    .start-steps strong { color: var(--sun); font-weight: 600; }
+
+    /* API nav — interaction container */
+    .api-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .api-nav button {
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--fog);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+
+    .api-nav button:hover,
+    .api-nav button.active {
+      background: rgba(46, 196, 160, 0.15);
+      border-color: var(--mint);
+      color: #fff;
+    }
+
+    .api-panel {
+      display: none;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1.25rem 1.35rem;
+      backdrop-filter: blur(10px);
+    }
+
+    .api-panel.active { display: block; animation: riseIn 0.35s ease both; }
+
+    .api-panel h3 {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-size: 1.15rem;
+      color: var(--mint);
+      margin-bottom: 0.75rem;
+    }
+
+    .api-list {
+      list-style: none;
+      display: grid;
+      gap: 0.55rem;
+    }
+
+    .api-list li {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      padding: 0.55rem 0.65rem;
+      background: rgba(0, 0, 0, 0.22);
+      border-radius: 6px;
+      color: #c8dcec;
+    }
+
+    .api-list code {
+      color: var(--sun);
+      font-family: inherit;
+    }
+
+    .api-list .hint {
+      display: block;
+      margin-top: 0.2rem;
+      font-family: "IBM Plex Sans", sans-serif;
+      font-size: 0.8rem;
+      color: rgba(215, 232, 247, 0.55);
+    }
+
+    /* Code sample */
+    .code-wrap {
+      position: relative;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .code-wrap header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.8rem;
+      color: rgba(215, 232, 247, 0.55);
+    }
+
+    .code-wrap pre {
+      margin: 0;
+      padding: 1.1rem 1.2rem 1.4rem;
+      overflow-x: auto;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+      line-height: 1.55;
+      color: #d4e6f7;
+    }
+
+    .kw { color: #7dd3fc; }
+    .fn { color: #f0c14a; }
+    .str { color: #86efac; }
+    .cm { color: #6b8499; }
+    .num { color: #fda4af; }
+
+    .copy-btn {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.35rem 0.7rem;
+      border-radius: 5px;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--fog);
+      cursor: pointer;
+    }
+    .copy-btn:hover { border-color: var(--mint); color: var(--mint); }
+
+    /* Pads legend */
+    .pads {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.65rem;
+    }
+
+    .pad {
+      padding: 0.9rem 0.85rem;
+      border-radius: 10px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #06131f;
+      min-height: 4.5rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      transition: transform 0.2s ease;
+    }
+    .pad:hover { transform: translateY(-3px); }
+    .pad small {
+      font-weight: 500;
+      font-size: 0.75rem;
+      opacity: 0.75;
+      margin-top: 0.25rem;
+    }
+
+    .pad-explode { background: linear-gradient(145deg, #ff8a6e, #e85a3c); }
+    .pad-sparks { background: linear-gradient(145deg, #ffe08a, #f0c14a); }
+    .pad-smoke { background: linear-gradient(145deg, #b8c0cc, #7a8494); color: #fff; }
+    .pad-coins { background: linear-gradient(145deg, #ffd76a, #e0a820); }
+    .pad-burst { background: linear-gradient(145deg, #7ec8ff, #2a8fd4); color: #fff; }
+    .pad-speed { background: linear-gradient(145deg, #6ef0a8, #2ec4a0); }
+    .pad-jump { background: linear-gradient(145deg, #b89cff, #7a4de0); color: #fff; }
+    .pad-nojump { background: linear-gradient(145deg, #5a6270, #3a404c); color: #fff; }
+    .pad-reset { background: linear-gradient(145deg, #f0f4f8, #c8d4e0); }
+
+    footer {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem clamp(1.25rem, 4vw, 3rem) 3rem;
+      border-top: 1px solid var(--line);
+      color: rgba(215, 232, 247, 0.45);
+      font-size: 0.85rem;
+    }
+
+    footer strong { color: rgba(215, 232, 247, 0.75); }
+
+    @media (max-width: 720px) {
+      .stud-field { inset: -4% -10% 42% 0; opacity: 0.85; }
+      .hero { align-items: end; }
+      .hero-copy { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="stud-field" aria-hidden="true">
+      <div class="block b1"><span class="stud"></span></div>
+      <div class="block b2"><span class="stud"></span></div>
+      <div class="block b3"><span class="stud"></span></div>
+      <div class="block b4"><span class="stud"></span></div>
+    </div>
+    <div class="hero-copy">
+      <p class="brand">Blocky</p>
+      <h1>Script Lua del motore</h1>
+      <p class="lead">Tutta l’API di gioco: parti, particelle, humanoid, eventi e rete.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#api">Apri l’API</a>
+        <a class="btn btn-ghost" href="#esempio">Vedi esempio</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="avvio">
+      <h2>Come avviala</h2>
+      <p class="sub">In Studio la lingua gira solo in Test — non in edit.</p>
+      <div class="start-steps">
+        <span><strong>1.</strong> Apri Blocky Game Engine</span>
+        <span><strong>2.</strong> View → Script → spunta <strong>API completa (Test)</strong></span>
+        <span><strong>3.</strong> Premi <strong>Test (F5)</strong> e tocca i pad a z=12</span>
+        <span><strong>File:</strong> assets/scripts/lua_api_completo.lua</span>
+      </div>
+    </section>
+
+    <section id="api">
+      <h2>Riferimento API</h2>
+      <p class="sub">Seleziona un gruppo. Sintassi stile Roblox, sandbox senza io/os.</p>
+      <div class="api-nav" role="tablist" aria-label="Sezioni API">
+        <button type="button" class="active" data-tab="tipi">Tipi</button>
+        <button type="button" data-tab="workspace">Workspace</button>
+        <button type="button" data-tab="part">Part</button>
+        <button type="button" data-tab="game">Game</button>
+        <button type="button" data-tab="humanoid">Humanoid</button>
+        <button type="button" data-tab="task">Task</button>
+        <button type="button" data-tab="eventi">Eventi</button>
+        <button type="button" data-tab="altro">Altro</button>
+        <button type="button" data-tab="sicurezza">Sicurezza</button>
+      </div>
+
+      <div class="api-panel active" id="tab-tipi" role="tabpanel">
+        <h3>Tipi / costruttori</h3>
+        <ul class="api-list">
+          <li><code>Vector3.new(x, y, z)</code><span class="hint">Tabella {x,y,z} — anche .X .Y .Z in lettura</span></li>
+          <li><code>Color3.new(r, g, b)</code><span class="hint">Canali 0…1</span></li>
+          <li><code>Instance.new("Part")</code></li>
+          <li><code>Instance.new("Sound")</code></li>
+          <li><code>Instance.new("BindableEvent", "Nome")</code></li>
+          <li><code>Instance.new("RemoteEvent", "Nome")</code></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-workspace" role="tabpanel">
+        <h3>Workspace</h3>
+        <ul class="api-list">
+          <li><code>workspace:Add(part)</code><span class="hint">Aggiunge e restituisce Part live</span></li>
+          <li><code>workspace:FindFirstChild(name)</code><span class="hint">Part live oppure nil</span></li>
+          <li><code>workspace:GetChildren()</code><span class="hint">Lista snapshot delle parti</span></li>
+          <li><code>workspace:SetPartPosition(name, Vector3)</code></li>
+          <li><code>workspace:Raycast(origin, dir, maxDist?)</code><span class="hint">→ {Instance, Position, Distance} o nil</span></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-part" role="tabpanel">
+        <h3>Part live</h3>
+        <ul class="api-list">
+          <li><code>.Name .Position .Size .CanCollide .ClassName</code></li>
+          <li><code>:SetPosition(v)</code> · <code>:GetPosition()</code> · <code>:Destroy()</code> · <code>:Explode([n])</code></li>
+          <li><code>.Touched:Connect(fn)</code><span class="hint">fn(other, partName) quando il player entra nell’AABB</span></li>
+          <li><code>script.Parent</code><span class="hint">Solo negli script attaccati a una Part</span></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-game" role="tabpanel">
+        <h3>Game / servizi</h3>
+        <ul class="api-list">
+          <li><code>game.RunService.Heartbeat:Connect(fn)</code><span class="hint">fn(dt) ogni frame</span></li>
+          <li><code>game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")</code></li>
+          <li><code>game.SoundService:Play(path [, looped])</code> · <code>:Stop()</code></li>
+          <li><code>game.Animator:Play("Wave"|"Walk"|"Dance"|"Idle"|id)</code></li>
+          <li><code>game.Animator:SetWalkAnim(id)</code> · <code>SetJumpAnim(id)</code> · <code>Stop()</code> · <code>List()</code></li>
+          <li><code>game.Particles:Emit / Sparks / Smoke / Coins / Explode(pos [, count] [, color])</code></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-humanoid" role="tabpanel">
+        <h3>Humanoid / input</h3>
+        <ul class="api-list">
+          <li><code>Humanoid.SetJumpEnabled(bool)</code> · <code>SetWalkEnabled</code></li>
+          <li><code>Humanoid.SetWalkSpeed(n)</code> · <code>SetJumpPower(n)</code></li>
+          <li><code>Humanoid.Get()</code><span class="hint">→ JumpEnabled, WalkEnabled, WalkSpeed, JumpPower</span></li>
+          <li><code>UserInputService.DisableJump()</code> / <code>EnableJump()</code></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-task" role="tabpanel">
+        <h3>task (facile, ordinato)</h3>
+        <ul class="api-list">
+          <li><code>task.spawn(function() ... end)</code><span class="hint">Avvia una routine</span></li>
+          <li><code>task.wait(secondi)</code><span class="hint">Solo dentro task.spawn / task.delay</span></li>
+          <li><code>task.delay(sec, function)</code><span class="hint">Esegue dopo N secondi</span></li>
+          <li><code>wait(sec)</code><span class="hint">Alias di task.wait</span></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-eventi" role="tabpanel">
+        <h3>Eventi</h3>
+        <ul class="api-list">
+          <li><code>Events.Create / Connect / Fire / DisconnectAll</code></li>
+          <li><code>BindableEvent:Fire(...)</code> · <code>.Event:Connect(fn)</code></li>
+          <li><code>RemoteEvent:FireServer(string)</code> · <code>:FireAllClients(string)</code></li>
+          <li><code>.OnServerEvent:Connect</code> · <code>.OnClientEvent:Connect</code><span class="hint">Payload = stringa; LAN Host/Client</span></li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-sicurezza" role="tabpanel">
+        <h3>Anti-executor / sandbox</h3>
+        <ul class="api-list">
+          <li>Bloccati: <code>load require io os debug rawset setmetatable string.dump</code></li>
+          <li>API <code>game</code> / <code>workspace</code> congelata (non sovrascrivibile)</li>
+          <li>Clamp: WalkSpeed ≤ 28 · JumpPower ≤ 70 · Particles ≤ 128</li>
+          <li>Play: preferisce <code>.bbc</code> sigillato (BBCS)</li>
+          <li>Budget istruzioni + limite Heartbeat / Touched</li>
+        </ul>
+      </div>
+
+      <div class="api-panel" id="tab-altro" role="tabpanel">
+        <h3>Altro</h3>
+        <ul class="api-list">
+          <li><code>print(...)</code></li>
+          <li><code>AnimateFrame(frame, Vector3)</code><span class="hint">Keyframe su Model</span></li>
+          <li><code>pcall(fn)</code></li>
+          <li>Guida: <code>assets/scripts/scripting_guide.lua</code></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="pad">
+      <h2>Pad della demo</h2>
+      <p class="sub">Con API completa attiva, cammina sulla riga a z=12.</p>
+      <div class="pads">
+        <div class="pad pad-explode">Esplodi<small>Sparks + burst + Destroy</small></div>
+        <div class="pad pad-sparks">Sparks<small>Scintille</small></div>
+        <div class="pad pad-smoke">Fumo<small>Smoke</small></div>
+        <div class="pad pad-coins">Monete<small>Coins + Bindable</small></div>
+        <div class="pad pad-burst">Burst<small>Emit colorato</small></div>
+        <div class="pad pad-speed">Speed<small>WalkSpeed 28 max</small></div>
+        <div class="pad pad-jump">Jump<small>JumpPower 70 max</small></div>
+        <div class="pad pad-nojump">No jump<small>DisableJump</small></div>
+        <div class="pad pad-reset">Reset<small>Raycast + Remote</small></div>
+      </div>
+    </section>
+
+    <section id="esempio">
+      <h2>Esempio esplosione</h2>
+      <p class="sub">Tocca la Part → particelle e sparisce.</p>
+      <div class="code-wrap">
+        <header>
+          <span>explode_part.lua</span>
+          <button type="button" class="copy-btn" id="copyBtn">Copia</button>
+        </header>
+        <pre id="codeSample"><span class="cm">-- Blocco esplosivo · Test (F5)</span>
+<span class="kw">local</span> part = script.Parent
+<span class="kw">local</span> esploso = <span class="kw">false</span>
+
+part.Touched:<span class="fn">Connect</span>(<span class="kw">function</span>()
+    <span class="kw">if</span> esploso <span class="kw">then return end</span>
+    esploso = <span class="kw">true</span>
+    <span class="fn">print</span>(<span class="str">"BOOM!"</span>, part.Name)
+    part:<span class="fn">Explode</span>()
+<span class="kw">end</span>)</pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <strong>Blocky</strong> · documentazione Script Lua · file sorgente
+    <code style="font-family:IBM Plex Mono,monospace;font-size:0.8em"> assets/scripts/lua_api_completo.lua</code>
+  </footer>
+
+  <script>
+    const nav = document.querySelector(".api-nav");
+    nav.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-tab]");
+      if (!btn) return;
+      nav.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelectorAll(".api-panel").forEach((p) => p.classList.remove("active"));
+      document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+    });
+
+    document.getElementById("copyBtn").addEventListener("click", async () => {
+      const text = document.getElementById("codeSample").innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        const b = document.getElementById("copyBtn");
+        b.textContent = "Copiato";
+        setTimeout(() => { b.textContent = "Copia"; }, 1600);
+      } catch (_) {}
+    });
+  </script>
+</body>
+</html>

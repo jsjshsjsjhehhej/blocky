@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blocky — Download</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;1,9..40,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #0c1a2e;
+      --paper: #e8f1fb;
+      --blue: #1a6fe0;
+      --blue-deep: #0d4bb5;
+      --green: #1aad4e;
+      --gold: #e8b84a;
+      --mute: #5a6f88;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      font-family: "DM Sans", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #9ec5ff 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #7ed0a0 0%, transparent 45%),
+        linear-gradient(165deg, #b8d4f5 0%, #eef5fc 42%, #d4e8f8 100%);
+      overflow-x: hidden;
+    }
+
+    .grid {
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(26, 111, 224, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(26, 111, 224, 0.06) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse at 50% 30%, black 20%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    header {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.25rem 2rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .logo {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      font-size: 1.55rem;
+      letter-spacing: -0.03em;
+      color: var(--blue-deep);
+      text-decoration: none;
+    }
+
+    .logo span { color: var(--green); }
+
+    nav a {
+      color: var(--mute);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-left: 1.5rem;
+    }
+    nav a:hover { color: var(--blue); }
+
+    main {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem 2rem 4rem;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 3rem;
+      align-items: center;
+      min-height: calc(100vh - 80px);
+    }
+
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; gap: 2rem; padding-top: 1rem; }
+      nav a:not(.dl-nav) { display: none; }
+    }
+
+    .brand {
+      font-family: "Bricolage Grotesque", sans-serif;
+      font-weight: 800;
+      font-size: clamp(3.2rem, 8vw, 5.5rem);
+      line-height: 0.95;
+      letter-spacing: -0.04em;
+      color: var(--blue-deep);
+      margin-bottom: 0.75rem;
+      animation: rise 0.7s ease-out both;
+    }
+
+    .brand em {
+      font-style: normal;
+      color: var(--green);
+    }
+
+    .tag {
+      font-size: 1.15rem;
+      color: var(--mute);
+      max-width: 28rem;
+      line-height: 1.5;
+      margin-bottom: 1.75rem;
+      animation: rise 0.7s 0.1s ease-out both;
+    }
+
+    .cta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      animation: rise 0.7s 0.2s ease-out both;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-family: "DM Sans", sans-serif;
+      font-weight: 600;
+      font-size: 1.05rem;
+      padding: 0.95rem 1.6rem;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s;
+    }
+
+    .btn-primary {
+      background: var(--blue);
+      color: #fff;
+      box-shadow: 0 10px 28px rgba(26, 111, 224, 0.35);
+    }
+    .btn-primary:hover {
+      background: var(--blue-deep);
+      transform: translateY(-2px);
+      box-shadow: 0 14px 32px rgba(13, 75, 181, 0.4);
+    }
+
+    .btn-google {
+      background: #fff;
+      color: var(--ink);
+      border: 1.5px solid rgba(12, 26, 46, 0.12);
+      box-shadow: 0 4px 16px rgba(12, 26, 46, 0.06);
+    }
+    .btn-google:hover {
+      border-color: var(--blue);
+      transform: translateY(-2px);
+    }
+
+    .btn svg { width: 20px; height: 20px; flex-shrink: 0; }
+
+    .meta {
+      margin-top: 1.25rem;
+      font-size: 0.88rem;
+      color: var(--mute);
+      animation: rise 0.7s 0.3s ease-out both;
+    }
+    .meta strong { color: var(--ink); font-weight: 600; }
+
+    .visual {
+      position: relative;
+      animation: float 5s ease-in-out infinite;
+    }
+
+    .stage {
+      aspect-ratio: 1;
+      max-width: 420px;
+      margin: 0 auto;
+      border-radius: 24px;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.15) 100%);
+      border: 1px solid rgba(255,255,255,0.65);
+      box-shadow:
+        0 30px 60px rgba(13, 75, 181, 0.18),
+        inset 0 1px 0 rgba(255,255,255,0.8);
+      display: grid;
+      place-items: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stage::before {
+      content: "";
+      position: absolute;
+      inset: 18% 12% auto;
+      height: 55%;
+      background: linear-gradient(180deg, #7eb6ff 0%, #3d8aef 100%);
+      border-radius: 12px;
+      opacity: 0.35;
+      filter: blur(2px);
+    }
+
+    .avatar {
+      position: relative;
+      width: 140px;
+      height: 200px;
+      filter: drop-shadow(0 12px 20px rgba(12, 26, 46, 0.25));
+    }
+
+    .avatar .head {
+      position: absolute;
+      left: 35px; top: 8px;
+      width: 70px; height: 70px;
+      background: #f4f6f8;
+      border-radius: 8px;
+    }
+    .avatar .eye {
+      position: absolute;
+      top: 28px;
+      width: 10px; height: 10px;
+      background: #111;
+      border-radius: 2px;
+    }
+    .avatar .eye.l { left: 48px; }
+    .avatar .eye.r { left: 82px; }
+    .avatar .smile {
+      position: absolute;
+      left: 52px; top: 52px;
+      width: 36px; height: 14px;
+      border: 3px solid #111;
+      border-top: none;
+      border-radius: 0 0 18px 18px;
+    }
+    .avatar .torso {
+      position: absolute;
+      left: 30px; top: 82px;
+      width: 80px; height: 72px;
+      background: var(--blue);
+      border-radius: 6px;
+    }
+    .avatar .arm {
+      position: absolute;
+      top: 86px;
+      width: 28px; height: 70px;
+      background: #f4f6f8;
+      border-radius: 5px;
+    }
+    .avatar .arm.l { left: 2px; }
+    .avatar .arm.r { right: 2px; }
+    .avatar .leg {
+      position: absolute;
+      top: 152px;
+      width: 32px; height: 48px;
+      background: var(--green);
+      border-radius: 5px;
+    }
+    .avatar .leg.l { left: 36px; }
+    .avatar .leg.r { left: 72px; }
+
+    .badge {
+      position: absolute;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      background: var(--gold);
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 6px;
+      letter-spacing: 0.04em;
+    }
+
+    footer {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 1.5rem;
+      font-size: 0.85rem;
+      color: var(--mute);
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid" aria-hidden="true"></div>
+
+  <header>
+    <a class="logo" href="#">BLOCKY<span>.</span></a>
+    <nav>
+      <a href="#features">Funzioni</a>
+      <a class="dl-nav" href="#download">Download</a>
+    </nav>
+  </header>
+
+  <main>
+    <section>
+      <h1 class="brand">BLOCKY<em>.</em></h1>
+      <p class="tag">
+        Il tuo engine blocky: Studio, Catalog avatar, Shop e giochi pubblicati.
+        Scarica per Windows e inizia a costruire.
+      </p>
+
+      <div class="cta" id="download">
+        <!-- Download diretto (file locale / release) -->
+        <a class="btn btn-primary" id="direct-dl" href="Blocky.exe" download="Blocky.exe">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M12 3v12M7 11l5 5 5-5M5 19h14" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Scarica per Windows
+        </a>
+
+        <!--
+          GOOGLE DRIVE: sostituisci l'URL sotto con il link di condivisione del tuo file.
+          Esempio Drive: https://drive.google.com/uc?export=download&id=FILE_ID
+        -->
+        <a class="btn btn-google"
+           id="google-drive-link"
+           href="https://drive.google.com/uc?export=download&id=INSERISCI_FILE_ID"
+           target="_blank"
+           rel="noopener">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="#4285F4" d="M12.01 2L4.5 15h5.2l7.5-13z"/>
+            <path fill="#34A853" d="M4.5 15L1 21h7.7l3.5-6z"/>
+            <path fill="#FBBC04" d="M16.3 8.5L12.01 2 8.7 8.5z"/>
+            <path fill="#EA4335" d="M16.3 8.5L12.2 15H23l-3.5-6.5z"/>
+            <path fill="#188038" d="M8.7 15l-3.5 6H23l-3.5-6z"/>
+          </svg>
+          Scarica da Google Drive
+        </a>
+      </div>
+
+      <p class="meta">
+        <strong>Windows 10/11</strong> · OpenGL · ~ build <span id="ver">1.0</span>
+        · Login salvato · Studio + Test + Pubblica
+      </p>
+    </section>
+
+    <aside class="visual" aria-hidden="true">
+      <div class="stage">
+        <div class="avatar">
+          <div class="head"></div>
+          <div class="eye l"></div>
+          <div class="eye r"></div>
+          <div class="smile"></div>
+          <div class="torso"></div>
+          <div class="arm l"></div>
+          <div class="arm r"></div>
+          <div class="leg l"></div>
+          <div class="leg r"></div>
+        </div>
+        <span class="badge">FREE</span>
+      </div>
+    </aside>
+  </main>
+
+  <section id="features" style="max-width:1100px;margin:0 auto 3rem;padding:0 2rem;position:relative;z-index:1">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem">
+      <div style="background:rgba(255,255,255,0.55);border:1px solid rgba(255,255,255,0.8);border-radius:14px;padding:1.25rem">
+        <strong style="font-family:'Bricolage Grotesque',sans-serif;font-size:1.15rem;color:var(--blue-deep)">Studio</strong>
+        <p style="color:var(--mute);margin-top:0.4rem;font-size:0.95rem">Costruisci, testa (F5) e pubblica i tuoi giochi.</p>
+      </div>
+      <div style="background:rgba(255,255,255,0.55);border:1px solid rgba(255,255,255,0.8);border-radius:14px;padding:1.25rem">
+        <strong style="font-family:'Bricolage Grotesque',sans-serif;font-size:1.15rem;color:var(--blue-deep)">Catalog</strong>
+        <p style="color:var(--mute);margin-top:0.4rem;font-size:0.95rem">Importa GLB/FBX/OBJ e mettili nello Shop.</p>
+      </div>
+      <div style="background:rgba(255,255,255,0.55);border:1px solid rgba(255,255,255,0.8);border-radius:14px;padding:1.25rem">
+        <strong style="font-family:'Bricolage Grotesque',sans-serif;font-size:1.15rem;color:var(--blue-deep)">Play</strong>
+        <p style="color:var(--mute);margin-top:0.4rem;font-size:0.95rem">Shift Lock, collisioni Part, respawn nel vuoto.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Blocky Engine · Pagina download · Carica <code>Blocky.exe</code> su Google Drive e aggiorna il link
+  </footer>
+
+  <script>
+    // Se la pagina è in /docs, punta a ../build/bin/Blocky.exe
+    const direct = document.getElementById("direct-dl");
+    if (direct && /\/docs\//i.test(location.pathname.replace(/\\/g, "/"))) {
+      direct.href = "../build/bin/Blocky.exe";
+    }
+    const drive = document.getElementById("google-drive-link");
+    if (drive && drive.href.includes("INSERISCI_FILE_ID")) {
+      drive.addEventListener("click", (e) => {
+        e.preventDefault();
+        alert("1) Carica Blocky.exe su Google Drive\n2) Condividi → Chiunque con il link\n3) Copia l'ID dal link e sostituisci INSERISCI_FILE_ID in download.html");
+      });
+    }
+  </script>
+</body>
+</html>

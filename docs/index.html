@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Blocky</title>
+<meta name="description" content="Engine per costruire, scriptare in Lua e giocare. Studio, runtime e server LAN per Windows." />
+<style>
+  /* ---- Token: chiaro = la baseplate ---------------------------------- */
+  :root {
+    --ground:     #c4c8c1;
+    --ground-2:   #b4b9b1;
+    --stud-hi:    rgba(255,255,255,.50);
+    --stud-lo:    rgba(0,0,0,.10);
+    --surface:    #f4f5f2;
+    --surface-2:  #e9ebe6;
+    --ink:        #171b20;
+    --ink-soft:   #59616c;
+    --ink-faint:  #858d97;
+    --line:       #cfd3cc;
+    --shadow:     rgba(23,27,32,.22);
+
+    --blue:   #2456c8;
+    --green:  #1f8b3d;
+    --amber:  #a86a06;
+    --red:    #c2381f;
+
+    --radius: 3px;
+    --tap: 44px;
+    --measure: 65ch;
+
+    --display: "Segoe UI", ui-sans-serif, system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", monospace;
+  }
+
+  /* ---- Token: scuro = la viewport dello Studio ------------------------ */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:    #13171d;
+      --ground-2:  #0e1216;
+      --stud-hi:   rgba(255,255,255,.055);
+      --stud-lo:   rgba(0,0,0,.30);
+      --surface:   #1b212a;
+      --surface-2: #222933;
+      --ink:       #e7eaee;
+      --ink-soft:  #9aa3af;
+      --ink-faint: #6d7681;
+      --line:      #2f3843;
+      --shadow:    rgba(0,0,0,.55);
+
+      --blue:  #6fa4ff;
+      --green: #5ecb79;
+      --amber: #e0ab4b;
+      --red:   #f0705a;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:    #13171d;
+    --ground-2:  #0e1216;
+    --stud-hi:   rgba(255,255,255,.055);
+    --stud-lo:   rgba(0,0,0,.30);
+    --surface:   #1b212a;
+    --surface-2: #222933;
+    --ink:       #e7eaee;
+    --ink-soft:  #9aa3af;
+    --ink-faint: #6d7681;
+    --line:      #2f3843;
+    --shadow:    rgba(0,0,0,.55);
+
+    --blue:  #6fa4ff;
+    --green: #5ecb79;
+    --amber: #e0ab4b;
+    --red:   #f0705a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: var(--body);
+    color: var(--ink);
+    background-color: var(--ground);
+    /* Gli studs della baseplate: due gradienti radiali sfalsati fanno il
+       rilievo del cilindro senza una sola immagine. */
+    background-image:
+      radial-gradient(circle at 50% 44%, var(--stud-hi) 0 5px, transparent 5.5px),
+      radial-gradient(circle at 50% 56%, var(--stud-lo) 0 5px, transparent 5.5px);
+    background-size: 28px 28px, 28px 28px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { width: min(1120px, 92vw); margin-inline: auto; }
+
+  /* ---- Intestazione --------------------------------------------------- */
+  .top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; padding-block: 22px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; text-decoration: none; color: inherit; }
+  .brand b {
+    font-family: var(--display);
+    font-weight: 800; font-size: 1.32rem; letter-spacing: .13em;
+  }
+  .top nav { display: flex; gap: 6px; }
+  .top nav a {
+    font-size: .87rem; color: var(--ink-soft); text-decoration: none;
+    padding: 9px 13px; border-radius: var(--radius);
+  }
+  .top nav a:hover { color: var(--ink); background: var(--surface); }
+  .top nav a:focus-visible, .brand:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+  /* ---- Superficie comune: una Part appoggiata sulla piastra ------------ */
+  .slab {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    /* Ombra netta, non sfocata: il sole dell'engine è quasi a picco. */
+    box-shadow: 0 3px 0 var(--shadow);
+  }
+
+  /* ---- Hero ----------------------------------------------------------- */
+  .hero { padding: clamp(28px, 5vw, 52px); margin-block: 8px 42px; }
+  .hero-grid { display: grid; gap: clamp(28px, 4vw, 48px); grid-template-columns: 1fr; align-items: center; }
+  @media (min-width: 880px) { .hero-grid { grid-template-columns: 1.15fr .85fr; } }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: .74rem; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(2.5rem, 6.4vw, 4.1rem);
+    font-weight: 800; line-height: 1.02; letter-spacing: -.022em;
+    text-wrap: balance; margin: 0 0 18px;
+  }
+  .lede {
+    font-size: 1.12rem; color: var(--ink-soft);
+    max-width: var(--measure); margin: 0 0 26px;
+  }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+    min-height: var(--tap); padding: 0 22px;
+    font: inherit; font-weight: 600; text-decoration: none;
+    border-radius: var(--radius); border: 1px solid transparent;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn-main {
+    background: var(--blue); color: #fff;
+    border-color: color-mix(in srgb, var(--blue) 70%, #000);
+    box-shadow: 0 3px 0 color-mix(in srgb, var(--blue) 62%, #000);
+  }
+  .btn-main:hover { transform: translateY(-1px); box-shadow: 0 4px 0 color-mix(in srgb, var(--blue) 62%, #000); }
+  .btn-main:active { transform: translateY(2px); box-shadow: 0 1px 0 color-mix(in srgb, var(--blue) 62%, #000); }
+  .btn-ghost { background: var(--surface-2); color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover { border-color: var(--ink-faint); }
+  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+  .meta {
+    font-family: var(--mono); font-size: .8rem; color: var(--ink-faint);
+    margin: 18px 0 0; display: flex; flex-wrap: wrap; gap: 6px 14px;
+  }
+
+  .stack { display: grid; place-items: center; }
+  .stack svg { width: min(320px, 78%); height: auto; display: block; }
+
+  /* ---- Sezioni -------------------------------------------------------- */
+  section { margin-bottom: 42px; }
+  .head { margin: 0 0 18px; }
+  .head h2 {
+    font-family: var(--display); font-size: 1.42rem; font-weight: 800;
+    letter-spacing: -.01em; margin: 0 0 5px;
+  }
+  .head p { margin: 0; color: var(--ink-soft); font-size: .95rem; max-width: var(--measure); }
+
+  .cards { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 720px) { .cards { grid-template-columns: repeat(3, 1fr); } }
+
+  .card { padding: 22px; display: flex; flex-direction: column; gap: 12px; position: relative; overflow: hidden; }
+  /* Il bordo superiore è la faccia illuminata della Part: il colore
+     identifica il ruolo, non decora. */
+  .card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; background: var(--tone); }
+  .card--play   { --tone: var(--blue); }
+  .card--build  { --tone: var(--green); }
+  .card--server { --tone: var(--amber); }
+
+  .card h3 { font-family: var(--display); font-size: 1.06rem; font-weight: 700; margin: 4px 0 0; }
+  .card p { margin: 0; color: var(--ink-soft); font-size: .92rem; flex: 1; }
+  .card .file {
+    font-family: var(--mono); font-size: .76rem; color: var(--tone);
+    letter-spacing: .02em; word-break: break-all;
+  }
+
+  .grid6 { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  @media (min-width: 620px) { .grid6 { grid-template-columns: repeat(2, 1fr); } }
+  @media (min-width: 940px) { .grid6 { grid-template-columns: repeat(3, 1fr); } }
+  .feat { background: var(--surface); padding: 20px; }
+  .feat h4 { font-size: .97rem; font-weight: 700; margin: 0 0 6px; }
+  .feat p { margin: 0; color: var(--ink-soft); font-size: .89rem; }
+
+  .specs { padding: 22px clamp(20px, 3vw, 30px); }
+  .specs dl { display: grid; gap: 0; margin: 0; }
+  @media (min-width: 620px) { .specs dl { grid-template-columns: max-content 1fr; column-gap: 28px; } }
+  .specs dt {
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-faint);
+    padding: 11px 0 2px; border-top: 1px solid var(--line);
+  }
+  .specs dd { margin: 0; padding: 11px 0 2px; font-variant-numeric: tabular-nums; }
+  @media (min-width: 620px) { .specs dd { border-top: 1px solid var(--line); } }
+  .specs dt:first-of-type, .specs dd:first-of-type { border-top: 0; }
+
+  .note {
+    margin-top: 16px; padding: 13px 16px;
+    background: var(--surface-2); border-left: 3px solid var(--amber);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: .88rem; color: var(--ink-soft);
+  }
+  .note code { font-family: var(--mono); font-size: .85em; color: var(--ink); }
+
+  footer {
+    border-top: 1px solid var(--line); margin-top: 8px;
+    padding-block: 26px 40px; color: var(--ink-faint); font-size: .84rem;
+    display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="top">
+    <a class="brand" href="#">
+      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+        <polygon points="16,3 29,10 16,17 3,10" fill="var(--blue)" />
+        <polygon points="3,10 16,17 16,29 3,22" fill="var(--blue)" opacity=".62" />
+        <polygon points="29,10 29,22 16,29 16,17" fill="var(--blue)" opacity=".38" />
+      </svg>
+      <b>BLOCKY</b>
+    </a>
+    <nav>
+      <a href="#download">Download</a>
+      <a href="#funzioni">Funzioni</a>
+      <a href="#requisiti">Requisiti</a>
+    </nav>
+  </header>
+
+  <div class="slab hero">
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Engine · Windows</p>
+        <h1>Costruisci un mondo, scrivilo in Lua, giocalo.</h1>
+        <p class="lede">
+          Blocky è un engine completo: un editor per posare le Part e scriverne il
+          comportamento, un runtime per giocarci, e un server per farlo in LAN
+          con altri. Un solo download, nessun account.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-main" href="#download">Scarica per Windows</a>
+          <a class="btn btn-ghost" href="#funzioni">Cosa c'è dentro</a>
+        </div>
+        <p class="meta">
+          <span>Windows 10 / 11</span><span>·</span>
+          <span>OpenGL 3.3</span><span>·</span>
+          <span>build 1.0</span>
+        </p>
+      </div>
+
+      <div class="stack" aria-hidden="true">
+        <svg viewBox="0 0 240 210">
+          <!-- Tre Part impilate: stessa proiezione isometrica delle icone dello Studio -->
+          <g>
+            <polygon points="120,96 190,134 120,172 50,134" fill="var(--green)" />
+            <polygon points="50,134 120,172 120,196 50,158" fill="var(--green)" opacity=".55" />
+            <polygon points="190,134 190,158 120,196 120,172" fill="var(--green)" opacity=".32" />
+          </g>
+          <g>
+            <polygon points="120,52 190,90 120,128 50,90" fill="var(--blue)" />
+            <polygon points="50,90 120,128 120,152 50,114" fill="var(--blue)" opacity=".55" />
+            <polygon points="190,90 190,114 120,152 120,128" fill="var(--blue)" opacity=".32" />
+          </g>
+          <g>
+            <polygon points="120,8 190,46 120,84 50,46" fill="var(--amber)" />
+            <polygon points="50,46 120,84 120,108 50,70" fill="var(--amber)" opacity=".55" />
+            <polygon points="190,46 190,70 120,108 120,84" fill="var(--amber)" opacity=".32" />
+            <!-- Gli studs sulla faccia superiore -->
+            <ellipse cx="102" cy="37" rx="11" ry="6" fill="#fff" opacity=".42" />
+            <ellipse cx="138" cy="37" rx="11" ry="6" fill="#fff" opacity=".42" />
+            <ellipse cx="120" cy="56" rx="11" ry="6" fill="#fff" opacity=".42" />
+          </g>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <section id="download">
+    <div class="head">
+      <h2>Download</h2>
+      <p>Tre eseguibili, nessun installer. Scompatta e avvia.</p>
+    </div>
+
+    <div class="cards">
+      <article class="slab card card--play">
+        <span class="file">Blocky.exe</span>
+        <h3>Gioca</h3>
+        <p>Hub con i giochi pubblicati, avatar e negozio. Il client con cui si gioca e basta.</p>
+        <a class="btn btn-main" href="#requisiti">Scarica</a>
+      </article>
+
+      <article class="slab card card--build">
+        <span class="file">BlockyStudio.exe</span>
+        <h3>Crea</h3>
+        <p>Editor con viewport 3D, gizmo, Explorer, proprietà e console Lua integrata.</p>
+        <a class="btn btn-main" href="#requisiti">Scarica</a>
+      </article>
+
+      <article class="slab card card--server">
+        <span class="file">BlockyServer.exe</span>
+        <h3>Ospita</h3>
+        <p>Server dedicato per giocare in rete locale. Si avvia da riga di comando.</p>
+        <a class="btn btn-main" href="#requisiti">Scarica</a>
+      </article>
+    </div>
+
+    <p class="note">
+      I pulsanti non puntano ancora a un file. Quando pubblichi la release,
+      sostituisci gli <code>href="#requisiti"</code> con l'URL dei binari.
+    </p>
+  </section>
+
+  <section id="funzioni">
+    <div class="head">
+      <h2>Cosa c'è dentro</h2>
+      <p>Quello che l'engine fa oggi, non quello che farà.</p>
+    </div>
+
+    <div class="grid6">
+      <div class="feat">
+        <h4>Editor 3D</h4>
+        <p>Posa le Part nella viewport, spostale con il gizmo a tre assi, allineale con lo snap in studs.</p>
+      </div>
+      <div class="feat">
+        <h4>Scripting Lua</h4>
+        <p>Ogni Part può avere il suo script. Sandbox con budget di istruzioni: un ciclo infinito non blocca l'editor.</p>
+      </div>
+      <div class="feat">
+        <h4>Avatar R6</h4>
+        <p>Personaggio a sei parti con camminata, salto e ragdoll. Accessori importabili da GLB, FBX e OBJ.</p>
+      </div>
+      <div class="feat">
+        <h4>Materiali</h4>
+        <p>Plastica, legno, metallo, vetro, ghiaccio, mattoni, erba e Neon. Studs sulla faccia superiore.</p>
+      </div>
+      <div class="feat">
+        <h4>Luci e cielo</h4>
+        <p>Sole con ora del giorno regolabile, foschia e fino a otto PointLight dinamiche per scena.</p>
+      </div>
+      <div class="feat">
+        <h4>Multiplayer LAN</h4>
+        <p>Server dedicato sulla rete di casa. Nessun account, nessun servizio esterno, nessun dato che esce.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="requisiti">
+    <div class="head">
+      <h2>Requisiti</h2>
+    </div>
+
+    <div class="slab specs">
+      <dl>
+        <dt>Sistema</dt>
+        <dd>Windows 10 o 11, 64 bit</dd>
+
+        <dt>Grafica</dt>
+        <dd>Scheda compatibile OpenGL 3.3</dd>
+
+        <dt>Spazio</dt>
+        <dd>circa 40 MB</dd>
+
+        <dt>Rete</dt>
+        <dd>Serve solo per il multiplayer LAN</dd>
+
+        <dt>Licenza</dt>
+        <dd>Gratuito</dd>
+      </dl>
+
+      <p class="note">
+        Windows può mostrare l'avviso di SmartScreen al primo avvio: succede a
+        tutti gli eseguibili non firmati. <strong>Altre info → Esegui comunque</strong>.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Blocky Engine</span>
+    <span>Costruito in C++ e OpenGL</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

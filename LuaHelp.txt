@@ -1,0 +1,189 @@
+================================================================================
+BLOCKY LUA — Prompt per Copilot / AI  (+ esempi corretti)
+================================================================================
+Usa QUESTO file come contesto. Non inventare API Roblox (TweenService, ScreenGui,
+TextLabel UI, DataStore, ecc. se non sono elencate QUI).
+Aggiornato: 2026-07-25 (Animator SetJumpAnim + BlockyPlayerAnim)
+================================================================================
+
+Blocky Lua = Lua 5.4 + API stile Roblox (Blocky Game Engine).
+Script solo in Test (F5) / Play. Su una Part: local part = script.Parent
+
+================================================================================
+LABEL (3D) vs TextLabel UI
+================================================================================
+SI  Label = testo 3D nel mondo (billboard). Inserisci da Studio → Label.
+    Proprietà: Name, Text, Position, Color, FontScale, Billboard, ShowBackground.
+    OGGI: solo editor Studio (non ancora API Lua per creare/modificare Label).
+
+NO  TextLabel / ScreenGui / BillboardGui — NON esistono in Blocky (niente HUD 2D Lua).
+
+================================================================================
+PART — proprietà e metodi
+================================================================================
+part.Name / part.ClassName
+part.Position / part.Size / part.Orientation (= Rotation)
+  → Vector3 con .X .Y .Z e operatori + - * (scalare) e -unario
+part.Color / part.BrickColor = Color3.new(r,g,b) | Color3.fromRGB(r,g,b)
+part.Material = "Plastic"|"SmoothPlastic"|"Neon"|"Metal"|"Glass"|"Wood"|
+                "Concrete"|"Grass"|"Sand"|"Fabric"|"Ice"|"ForceField"
+part.Emissive = 1              -- NUMERO 0..2+ (true viene coercito a 1)
+part.PointLight = true
+part.LightRange / part.LightBrightness
+part.CanCollide = true|false
+part.CanDestroy = true|false   -- Destroy/spada/danni a catena
+part.Health / part.MaxHealth   -- Health (MaxHealth aggiornato se serve)
+
+part:SetPosition(Vector3|x,y,z)
+part:GetPosition() → Vector3
+part:Destroy()
+part:Explode([n])              -- flash + danno player (falloff) + Destroy
+                               -- LEGGERO: niente pioggia particelle (anti-freeze)
+                               -- n default 16; vicino = più danno
+part.Touched:Connect(function(other) ... end)
+
+Studio (non Lua):
+  BoomOnTouch = true  → in Test 1 avvicinamento = boom (raggio largo, NoCollision)
+  BoomAutoSecs = N    → esplode da solo dopo N secondi in Test (0 = solo tocco)
+  Toolbar Boom: auto 3s + CanCollide off. Parti "Explode*" ereditano questo.
+
+================================================================================
+PARTICLES
+================================================================================
+game.Particles:Coins(pos, n, color)
+game.Particles.Coins:Explode(pos, n, color)   -- alias ok
+game.Particles:Smoke(pos, n, color)
+game.Particles.Smoke:Emit(pos, n, color)      -- alias ok
+game.Particles:Sparks(pos, n)
+game.Particles:Emit(pos, n, color)            -- burst generico
+game.Particles:Explode(pos, n)                -- solo FX (NON Destroy Part)
+
+================================================================================
+WORKSPACE / GAME
+================================================================================
+workspace | game.Workspace
+workspace:Add({ Name, Position, Size, Color, Material, ... }) → Part live
+workspace:FindFirstChild(name) → Part live | nil
+workspace:GetChildren() → lista Part
+workspace:SetPartPosition(name, Vector3|x,y,z)
+workspace:Raycast(origin, direction, maxDist?) → {Instance, Position, Distance}|nil
+
+game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")
+game.RunService.Heartbeat:Connect(function(dt) ... end)
+game.SoundService:Play(path, looped?)
+
+print(...)  Color3  Vector3  task.wait / task.delay (dove supportato)
+
+================================================================================
+HUMANOID (globale — NON script.Parent se lo script e' su una Part)
+================================================================================
+Humanoid.SetWalkSpeed(n)    -- clamp 0..28
+Humanoid.SetJumpPower(n)    -- clamp 0..70
+Humanoid.SetJumpEnabled(bool)
+Humanoid.SetWalkEnabled(bool)
+Humanoid.Get() → stato
+
+================================================================================
+ANIMATOR — walk / jump / one-shot (file %APPDATA%/Blocky/anims/*.r6anim.json)
+================================================================================
+Formato BlockyPlayerAnim v2 (un file per tutte le anim player):
+  kind: walk | jump | idle | emote | tool
+  timeMode: phase (t 0..1 walk) | seconds (t in sec, tipico jump)
+  keys: [{t, la, ra, ll, rl}]  -- rotX gradi arti R6
+
+game.Animator:Play("Id")           -- built-in Idle/Walk/Jump/Wave/Dance OPPURE clip libreria
+game.Animator:Stop()               -- torna Idle
+game.Animator:SetWalkAnim("Id")    -- override camminata (default walk)
+game.Animator:SetJumpAnim("Id")    -- override salto (default classic_jump)
+game.Animator:List()               -- tabella nomi clip registrate
+
+-- Esempio place script:
+game.Animator:SetWalkAnim("FancyWalk")
+game.Animator:SetJumpAnim("classic_jump")
+game.Animator:Play("Shoot")        -- one-shot tool/emote
+
+================================================================================
+1) Part che lampeggia e ruota (Heartbeat)
+================================================================================
+local part = script.Parent
+local t = 0
+
+game.RunService.Heartbeat:Connect(function(dt)
+    t = t + dt
+    part.Color = Color3.new(
+        (math.sin(t * 2) + 1) / 2,
+        (math.sin(t * 3) + 1) / 2,
+        (math.sin(t * 4) + 1) / 2)
+    local o = part.Orientation
+    part.Orientation = Vector3.new(o.X, o.Y + dt * 45, o.Z)
+end)
+
+================================================================================
+2) Bomba — Explode leggero (SOLO LUA)
+================================================================================
+local part = script.Parent
+part.CanDestroy = true
+part.CanCollide = false
+
+local esploso = false
+part.Touched:Connect(function()
+    if esploso then return end
+    esploso = true
+    print("BOOM!")
+    part:Explode(16)  -- flash + danno (niente pioggia particelle)
+end)
+
+================================================================================
+3) Trappola fumo + Health
+================================================================================
+local part = script.Parent
+part.Material = "Metal"
+part.CanDestroy = true
+part.Health = 100
+
+part.Touched:Connect(function()
+    game.Particles:Smoke(part.Position, 6, Color3.fromRGB(120, 120, 120))
+    part.Health = part.Health - 25
+    if part.Health <= 0 then
+        part:Explode(16)
+    end
+end)
+
+================================================================================
+4) Piattaforma mobile
+================================================================================
+local part = script.Parent
+local dir = Vector3.new(1, 0, 0)
+local home, speed, maxDist = part.Position, 6, 10
+
+game.RunService.Heartbeat:Connect(function(dt)
+    part.Position = part.Position + dir * (speed * dt)
+    local d = part.Position - home
+    if math.sqrt(d.X*d.X + d.Y*d.Y + d.Z*d.Z) > maxDist then
+        dir = Vector3.new(-dir.X, -dir.Y, -dir.Z)
+    end
+end)
+
+================================================================================
+5) Humanoid sicuro (place script)
+================================================================================
+Humanoid.SetWalkSpeed(24)
+Humanoid.SetJumpPower(60)
+Humanoid.SetJumpEnabled(true)
+
+================================================================================
+ERRORI TIPICI
+================================================================================
+NO  part.Emissive = true           → SI  part.Emissive = 1
+NO  part:Explode() poi :Destroy()  → Explode basta
+NO  humanoid = script.Parent       → Humanoid globale
+NO  TextLabel / ScreenGui          → usa Label 3D in Studio (no API Lua ancora)
+NO  TweenService / DataStore       → non esistono
+NO  inventare API Roblox           → solo quello in QUESTO file
+================================================================================
+PER CHI AGGIORNA IL MOTORE
+================================================================================
+Ogni nuova API / proprietà / comportamento Lua o Studio rilevante per gli script
+DEVE essere documentato QUI (LuaHelp.txt) nello stesso cambiamento.
+Opzionale: allinea anche assets/web/lua.html e assets/scripts/lua_api_completo.lua.
+================================================================================

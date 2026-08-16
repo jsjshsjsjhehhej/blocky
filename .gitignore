@@ -1,0 +1,51 @@
+# --- Build -------------------------------------------------------------
+# Contengono anche le dipendenze scaricate da FetchContent (assimp, glfw,
+# imgui, lua): centinaia di MB che si rigenerano da soli con cmake.
+build/
+build-pc/
+build-vk/
+build-mobile/
+build-ios/
+out/
+
+# --- Artefatti del compilatore -----------------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.map
+
+# --- CMake --------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeUserPresets.json
+compile_commands.json
+
+# --- Gradle (progetti Android affiancati) -------------------------------
+.gradle/
+local.properties
+
+# --- Editor e IDE -------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.user
+*.swp
+*~
+
+# --- Sistema ------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Dati locali del motore --------------------------------------------
+# Recuperi temporanei e log: utili sul momento, inutili nella storia.
+_recover/
+*.log
+crash/

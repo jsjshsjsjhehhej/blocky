@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blocky Bucks — Acquisto</title>
+  <style>
+    :root { --bg:#0f1419; --card:#1a2332; --gold:#f0b429; --txt:#e8eef5; --mut:#8aa0b5; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; font-family: "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, #243044, var(--bg));
+      color: var(--txt); display: flex; align-items: center; justify-content: center; padding: 24px;
+    }
+    .card {
+      width: min(440px, 100%); background: var(--card); border-radius: 16px;
+      padding: 28px 26px; box-shadow: 0 20px 50px rgba(0,0,0,.45);
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; color: var(--gold); }
+    .sub { color: var(--mut); margin: 0 0 20px; font-size: .92rem; line-height: 1.4; }
+    .pack {
+      background: rgba(255,255,255,.04); border-radius: 12px; padding: 14px 16px;
+    }
+    .price { color: var(--gold); font-weight: 600; }
+    button {
+      width: 100%; margin-top: 10px; border: 0; border-radius: 10px; padding: 12px 14px;
+      font-size: 1rem; font-weight: 600; cursor: pointer;
+      background: linear-gradient(180deg, #f6c84a, #d4920f); color: #1a1200;
+    }
+    .code-box {
+      margin-top: 16px; padding: 12px; border-radius: 10px; background: #0b1018;
+      font-family: ui-monospace, Consolas, monospace; display: none;
+      border: 1px dashed rgba(240,180,41,.45);
+    }
+    .hint { font-size: .8rem; color: var(--mut); margin-top: 14px; line-height: 1.45; }
+    a { color: #7eb6ff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Blocky Bucks</h1>
+    <p class="sub">Pay-link demo. In produzione metti i tuoi
+      <a href="https://stripe.com/payments/payment-links" target="_blank" rel="noopener">Stripe Payment Links</a>
+      in <code>%APPDATA%\Blocky\bucks_store.json</code>.
+    </p>
+    <div class="pack">
+      <div><strong id="title">Pack</strong></div>
+      <div class="price" id="price">—</div>
+      <div class="sub" id="bucksLine" style="margin:8px 0 0">—</div>
+      <button type="button" id="payBtn">Simula pagamento (demo)</button>
+      <div class="code-box" id="codeBox">
+        Codice da riscattare in Shop:<br /><span id="codeVal"></span>
+      </div>
+    </div>
+    <p class="hint">Demo: <code>BB-100-DEMO01</code>, <code>BB-500-DEMO01</code>, <code>BB-1200-DEMO1</code></p>
+  </div>
+  <script>
+    const q = new URLSearchParams(location.search);
+    const pack = q.get("pack") || "b100";
+    const bucks = parseInt(q.get("bucks") || "100", 10) || 100;
+    const titles = {
+      b100: ["100 Blocky Bucks", "€0.99"],
+      b500: ["500 Blocky Bucks", "€3.99"],
+      b1200: ["1.200 Blocky Bucks", "€7.99"],
+      b3000: ["3.000 Blocky Bucks", "€14.99"]
+    };
+    const t = titles[pack] || [pack + " Blocky Bucks", "—"];
+    document.getElementById("title").textContent = t[0];
+    document.getElementById("price").textContent = t[1];
+    document.getElementById("bucksLine").textContent = bucks + " B$ dopo il riscatto in Shop";
+    const demoCodes = { 100: "BB-100-DEMO01", 500: "BB-500-DEMO01", 1200: "BB-1200-DEMO1", 3000: "BB-1200-DEMO1" };
+    document.getElementById("payBtn").onclick = () => {
+      document.getElementById("codeVal").textContent = demoCodes[bucks] || "BB-100-DEMO01";
+      document.getElementById("codeBox").style.display = "block";
+    };
+  </script>
+</body>
+</html>
