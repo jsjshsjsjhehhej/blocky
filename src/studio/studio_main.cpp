@@ -484,7 +484,9 @@ void drawMenuBar(StudioState& s, bool& running) {
 
 } // namespace
 
-int main() {
+/** Era `int main()`: rinominata per vivere dentro libblocky.dll insieme al
+ *  resto dell'engine — vedi engine/BlockyApi.cpp per il wrapper esportato. */
+int Blocky_RunEditorImpl() {
     // Prima di tutto: un crash durante l'inizializzazione è quello che
     // lascia meno indizi, ed è proprio quello che va registrato.
     CrashHandler::install("BlockyStudio", "1.0");

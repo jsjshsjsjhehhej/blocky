@@ -75,15 +75,33 @@
 #include <windows.h>
 #endif
 
-#ifdef BLOCKY_GAME_ENGINE
-static constexpr bool kIsGameEngine = true;
-static constexpr const char* kAppBrand = "Blocky Game Engine";
-static constexpr const char* kAppShort = "Game Engine";
-#else
-static constexpr bool kIsGameEngine = false;
-static constexpr const char* kAppBrand = "Blocky";
-static constexpr const char* kAppShort = "Blocky";
-#endif
+// Prima di libblocky.dll questi erano tre costanti di compilazione, con
+// main.cpp compilato due volte (una per BlockyGameEngine.exe, una per
+// Blocky.exe). Ora è un solo binario e la modalità la sceglie il launcher
+// a runtime, chiamando Blocky_Run() oppure Blocky_RunStudio() — vedi
+// engine/BlockyApi.cpp. Il default riflette il comportamento storico di
+// "Roblox"/Blocky.exe (nessuna define = hub/player).
+static bool kIsGameEngine = false;
+static const char* kAppBrand = "Blocky";
+static const char* kAppShort = "Blocky";
+
+/** Chiamata dai wrapper esportati prima di entrare in Blocky_RunEngine(). */
+void blockySetEngineMode(bool isGameEngine) {
+    kIsGameEngine = isGameEngine;
+    if (isGameEngine) {
+        kAppBrand = "Blocky Game Engine";
+        kAppShort = "Game Engine";
+    } else {
+        kAppBrand = "Blocky";
+        kAppShort = "Blocky";
+    }
+}
+
+/** Path messo in coda da Blocky_LoadGame(), controllato prima degli argv OS. */
+static std::string g_stagedLoadPath;
+void blockyStageLoadPath(const char* path) {
+    g_stagedLoadPath = path ? path : "";
+}
 
 static int g_w = 1280, g_h = 720;
 static float g_fps = 0.f;
@@ -8967,7 +8985,13 @@ static void updateCrashContext() {
     CrashHandler::setContext(buf);
 }
 
-int main() {
+/**
+ * Corpo dell'engine — era `int main()`. Rinominata perché ora vive dentro
+ * libblocky.dll, dove non ha senso un simbolo `main`: i tre eseguibili
+ * (Blocky.exe, BlockyGameEngine.exe, BlockyStudio.exe) sono lanciatori
+ * minimi che caricano la dll e chiamano l'export giusto — vedi BlockyApi.cpp.
+ */
+int Blocky_RunEngine() {
     CrashHandler::install(kAppBrand, "1.0");
     CrashHandler::note(kIsGameEngine ? "Avvio Game Engine" : "Avvio Blocky hub");
 
@@ -9155,7 +9179,12 @@ int main() {
     if (kIsGameEngine)
         BlockyFileAssoc::registerPlaceAssociation();
 
-    std::string launchPlace = BlockyFileAssoc::placePathFromArgs();
+    // Un path passato esplicitamente a Blocky_LoadGame() vince su quello
+    // dedotto dagli argv del processo: chi ospita la dll potrebbe non avere
+    // controllo sulla riga di comando (es. un futuro launcher web).
+    std::string launchPlace = !g_stagedLoadPath.empty()
+                             ? g_stagedLoadPath
+                             : BlockyFileAssoc::placePathFromArgs();
 
     if (kIsGameEngine) {
         // App dedicata: Home (non entra subito in Studio)

@@ -6,11 +6,23 @@ I giochi fatti con Blocky Game Engine girano su **Blocky.exe** — non c’è ex
 
 ## Prodotti
 
+L'engine vive in **`libblocky.dll`**: rendering, ImGui, Lua, netcode client.
+I tre eseguibili sotto sono lanciatori minimi (poche decine di KB) che la
+caricano a runtime e chiamano l'export giusto — vedi
+[`src/engine/BlockyApi.h`](src/engine/BlockyApi.h).
+
+| Eseguibile | Ruolo | Export chiamato |
+|------------|--------|--------|
+| **Blocky.exe** | Hub + Play (Games / Shop / Chat) | `Blocky_Run` |
+| **BlockyGameEngine.exe** | Studio classico: costruisci, scripta, pubblica | `Blocky_RunStudio` |
+| **BlockyStudio.exe** | Editor place separato (ribbon, viewport dedicata) | `Blocky_RunEditor` |
+
+Server, in [`src/blocky_servers/`](src/blocky_servers/):
+
 | Eseguibile | Ruolo |
 |------------|--------|
-| **Blocky.exe** | Hub + Play (Games / Shop / Chat) |
-| **BlockyGameEngine.exe** | Studio: costruisci, scripta, pubblica |
-| **BlockyServer.exe** | Server dedicato multiplayer LAN |
+| **BlockyServer.exe** | Server dedicato multiplayer LAN (relay di stato) |
+| **blocky_hostd.exe** | Hosting HTTP: riceve un `.zip` pubblicato, lo valida e lo serve |
 
 ## Formato professionale
 
@@ -38,19 +50,23 @@ MyGame/
 
 ```powershell
 cmake -S . -B build -G Ninja
-cmake --build build --target Roblox RobloxStudio BlockyServer
+cmake --build build --target blocky BlockyLauncher BlockyStudioLauncher BlockyEditorLauncher BlockyServer blocky_hostd
 ```
 
 Output in `build/bin/`:
-- `Blocky.exe`
-- `BlockyGameEngine.exe`
-- `BlockyServer.exe`
+- `libblocky.dll` — l'engine, deve stare accanto a ogni lanciatore
+- `Blocky.exe`, `BlockyGameEngine.exe`, `BlockyStudio.exe`
+- `BlockyServer.exe`, `blocky_hostd.exe`
 
 ## Roadmap engine pro (solo Blocky)
 
 1. **Formato progetto + game package** — fatto (base)
-2. **Separare runtime / editor** — libreria condivisa, meno `main.cpp` monolitico
-3. **Asset pipeline** — import → cache cooked (mesh/texture)
+2. **Libreria condivisa** — fatto: `main.cpp` e `studio_main.cpp` vivono in
+   `libblocky.dll`, tre lanciatori minimi la caricano. **Non fatto**: `main.cpp`
+   resta un unico file da ~9800 righe — la dll condivisa toglie la
+   duplicazione fra eseguibili, ma non lo spezza internamente.
+3. **Asset pipeline** — `game_index.json` (mesh/collider/materiali/hash),
+   `blocky_hostd` lo serve via HTTP. Cache cooked di mesh/texture non fatta.
 4. **API Lua v1** — Touched, Humanoid, Remotes LAN
 5. **Editor pro** — Explorer, undo/redo, prefab
 6. **Server autoritativo** — tick fisso + replica mondo

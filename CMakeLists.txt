@@ -225,62 +225,81 @@ function(add_roblox_icon target)
     endif()
 endfunction()
 
-# ---- Blocky Game Engine — editor / Studio (OpenGL + ImGui) ----
-add_executable(RobloxStudio src/main.cpp)
-target_include_directories(RobloxStudio PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
-target_compile_definitions(RobloxStudio PRIVATE BLOCKY_GAME_ENGINE=1)
-target_link_libraries(RobloxStudio PRIVATE glfw glm::glm glad_gl_core assimp::assimp imgui_lib render_common engine_lib)
-set_target_properties(RobloxStudio PROPERTIES OUTPUT_NAME "BlockyGameEngine")
+# ---- libblocky.dll — l'intero engine client (hub/player, Studio classico
+# dentro main.cpp, editor place separato) in un solo binario condiviso. ----
+#
+# Prima erano tre eseguibili, ognuno con la propria copia compilata di
+# main.cpp o studio_main.cpp: RobloxStudio (BLOCKY_GAME_ENGINE=1), Roblox
+# senza quella define, BlockyStudio col proprio main separato. Ora è un
+# corpo solo — GLFW, ImGui, assimp, glad vivono tutti qui — e i tre .exe
+# sotto sono lanciatori minimi che caricano questa dll a runtime e chiamano
+# l'export giusto (vedi src/engine/BlockyApi.h). Nessuna classe attraversa
+# il confine della dll, solo le funzioni C dichiarate lì.
+add_library(blocky SHARED
+    src/main.cpp
+    src/studio/studio_main.cpp
+    src/engine/BlockyApi.cpp)
+target_include_directories(blocky PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
+target_link_libraries(blocky PRIVATE glfw glm::glm glad_gl_core assimp::assimp imgui_lib render_common engine_lib)
+set_target_properties(blocky PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "blocky")   # esplicito: alcuni generatori (MSVC) non prefissano "lib" da soli
 if (WIN32)
-    # GUI app: niente finestra terminale nera in background
-    set_target_properties(RobloxStudio PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(RobloxStudio PRIVATE opengl32 comdlg32 shell32 winmm xinput ws2_32 dbghelp psapi)
-    target_link_options(RobloxStudio PRIVATE -mwindows -static -static-libgcc -static-libstdc++)
+    target_link_libraries(blocky PRIVATE opengl32 comdlg32 shell32 winmm xinput ws2_32 dbghelp psapi)
+    target_link_options(blocky PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
-copy_assets(RobloxStudio)
+copy_assets(blocky)   # una volta sola: i tre lanciatori finiscono nella stessa build/bin/
 
-# ---- Blocky Studio — editor place (eseguibile separato) ----
-# Target distinto da RobloxStudio: condivide gli header di src/engine ma ha il
-# proprio main, così l'editor evolve senza toccare BlockyGameEngine.
-add_executable(BlockyStudio src/studio/studio_main.cpp)
-target_include_directories(BlockyStudio PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
-# assimp serve perché LuaRuntime.h include R6WalkAnim.h (import clip da Blender).
-target_link_libraries(BlockyStudio PRIVATE glfw glm::glm glad_gl_core assimp::assimp imgui_lib render_common engine_lib)
-set_target_properties(BlockyStudio PROPERTIES OUTPUT_NAME "BlockyStudio")
+# ---- Blocky.exe — lanciatore hub/player ----
+add_executable(BlockyLauncher src/tools/blocky_launcher.cpp)
+add_dependencies(BlockyLauncher blocky)
+set_target_properties(BlockyLauncher PROPERTIES OUTPUT_NAME "Blocky")
 if (WIN32)
-    set_target_properties(BlockyStudio PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(BlockyStudio PRIVATE opengl32 comdlg32 shell32 winmm ws2_32 dbghelp)
-    target_link_options(BlockyStudio PRIVATE -mwindows -static -static-libgcc -static-libstdc++)
+    set_target_properties(BlockyLauncher PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(BlockyLauncher PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
-copy_assets(BlockyStudio)
-add_roblox_icon(RobloxStudio)
+add_roblox_icon(BlockyLauncher)
 
-# Blocky PC — Vulkan + stud texture sulle superfici
+# ---- BlockyGameEngine.exe — lanciatore Studio classico (dentro main.cpp) ----
+add_executable(BlockyStudioLauncher src/tools/blocky_studio_launcher.cpp)
+add_dependencies(BlockyStudioLauncher blocky)
+set_target_properties(BlockyStudioLauncher PROPERTIES OUTPUT_NAME "BlockyGameEngine")
+if (WIN32)
+    set_target_properties(BlockyStudioLauncher PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(BlockyStudioLauncher PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+add_roblox_icon(BlockyStudioLauncher)
+
+# ---- BlockyStudio.exe — lanciatore editor place separato ----
+# Stessa icona di default assente che aveva il vecchio target BlockyStudio:
+# comportamento preesistente, non un'omissione di questa modifica.
+add_executable(BlockyEditorLauncher src/tools/blocky_editor_launcher.cpp)
+add_dependencies(BlockyEditorLauncher blocky)
+set_target_properties(BlockyEditorLauncher PROPERTIES OUTPUT_NAME "BlockyStudio")
+if (WIN32)
+    set_target_properties(BlockyEditorLauncher PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(BlockyEditorLauncher PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Renderer Vulkan alternativo (vk_main.cpp) — sperimentale, non condivide
+# codice con main.cpp/libblocky.dll. Prima produceva anche lui "Blocky.exe"
+# (era l'uno o l'altro, mai insieme: Vulkan se disponibile, altrimenti la
+# copia OpenGL di main.cpp). Ora "Blocky.exe" lo produce sempre BlockyLauncher
+# via libblocky.dll, quindi questo target avrebbe lo stesso nome di output:
+# rinominato per evitare la collisione. Nessuna Vulkan SDK in questo ambiente
+# stasera, quindi il ramo qui sotto non è mai stato ricompilato né verificato
+# in questa sessione — solo reso coerente col resto.
 if (HAS_VULKAN)
     add_executable(Roblox src/vk_main.cpp)
     target_include_directories(Roblox PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR} ${Vulkan_INCLUDE_DIRS})
     target_link_libraries(Roblox PRIVATE glfw glm::glm ${Vulkan_LIBRARIES} render_common)
-    set_target_properties(Roblox PROPERTIES OUTPUT_NAME "Blocky")
+    set_target_properties(Roblox PROPERTIES OUTPUT_NAME "BlockyVulkan")
     if (WIN32)
         set_target_properties(Roblox PROPERTIES WIN32_EXECUTABLE TRUE)
         target_link_options(Roblox PRIVATE -mwindows -static -static-libgcc -static-libstdc++)
     endif()
     if (TARGET vk_shaders)
         add_dependencies(Roblox vk_shaders)
-    endif()
-    copy_assets(Roblox)
-    add_roblox_icon(Roblox)
-else()
-    message(WARNING "Vulkan non trovato: Blocky.exe = OpenGL Studio (installa Vulkan SDK per backend Vulkan).")
-    add_executable(Roblox src/main.cpp)
-    target_include_directories(Roblox PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR})
-    target_link_libraries(Roblox PRIVATE glfw glm::glm glad_gl_core assimp::assimp imgui_lib render_common engine_lib)
-    set_target_properties(Roblox PROPERTIES OUTPUT_NAME "Blocky")
-    if (WIN32)
-        # GUI app: niente finestra terminale nera in background
-        set_target_properties(Roblox PROPERTIES WIN32_EXECUTABLE TRUE)
-        target_link_libraries(Roblox PRIVATE opengl32 comdlg32 shell32 winmm xinput ws2_32 dbghelp psapi)
-        target_link_options(Roblox PRIVATE -mwindows -static -static-libgcc -static-libstdc++)
     endif()
     copy_assets(Roblox)
     add_roblox_icon(Roblox)
@@ -306,7 +325,7 @@ target_include_directories(export_place PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(export_place PRIVATE engine_lib glm::glm)
 
 # Server dedicato multiplayer (console)
-add_executable(BlockyServer src/tools/blocky_server.cpp)
+add_executable(BlockyServer src/blocky_servers/blocky_server.cpp)
 target_include_directories(BlockyServer PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(BlockyServer PRIVATE glm::glm)
 if (WIN32)
@@ -329,11 +348,35 @@ endif()
 # Indice di pubblicazione: mesh/collider/materiali/luci/script/hash in un
 # solo game_index.json, cosi' il client scarica e basta.
 add_executable(build_game_index src/tools/build_game_index.cpp)
-target_include_directories(build_game_index PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(build_game_index PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${assimp_SOURCE_DIR}/contrib/zip/src)   # GamePublish.h include ZipArchive.h → zip.h;
+                                            # nessuna funzione zip_* è chiamata da qui, quindi
+                                            # serve solo l'header, non zip.c da linkare.
 target_link_libraries(build_game_index PRIVATE glm::glm)
 if (WIN32)
     target_link_options(build_game_index PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
+
+# Server di hosting: riceve un .zip pubblicato, lo valida con la stessa
+# pipeline di build_game_index e lo serve via HTTP. zip.c e' la libreria
+# kuba--/zip gia' scaricata dentro il sorgente di assimp (contrib/zip),
+# pinnata alla stessa v5.4.3 di ASSIMP_GIT_TAG sopra — non una dipendenza
+# nuova, solo codice che era gia' sul disco e non veniva compilato.
+add_executable(blocky_hostd
+    src/blocky_servers/blocky_hostd.cpp
+    ${assimp_SOURCE_DIR}/contrib/zip/src/zip.c)
+target_include_directories(blocky_hostd PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${assimp_SOURCE_DIR}/contrib/zip/src)
+target_link_libraries(blocky_hostd PRIVATE glm::glm)
+if (WIN32)
+    target_link_libraries(blocky_hostd PRIVATE ws2_32)
+    target_link_options(blocky_hostd PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+set_target_properties(blocky_hostd PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    OUTPUT_NAME "blocky_hostd")
 
 add_executable(test_lua src/tools/test_lua.cpp)
 target_include_directories(test_lua PRIVATE ${CMAKE_SOURCE_DIR}/src)

@@ -95,7 +95,11 @@
       "Bash(echo \"EXIT=$?\")",
       "Bash(./build/bin/asset_audit.exe build/bin/assets)",
       "Bash(cmake --build build --target build_game_index)",
-      "Bash(cmake --build build --target build_game_index RobloxStudio)"
+      "Bash(cmake --build build --target build_game_index RobloxStudio)",
+      "Bash(where curl.exe)",
+      "Bash(curl.exe --version)",
+      "Bash(tasklist)",
+      "Bash(taskkill //F //IM blocky_hostd.exe)"
     ]
   }
 }
