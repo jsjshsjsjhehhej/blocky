@@ -99,7 +99,8 @@
       "Bash(where curl.exe)",
       "Bash(curl.exe --version)",
       "Bash(tasklist)",
-      "Bash(taskkill //F //IM blocky_hostd.exe)"
+      "Bash(taskkill //F //IM blocky_hostd.exe)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

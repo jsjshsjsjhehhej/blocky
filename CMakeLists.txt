@@ -192,7 +192,15 @@ if (DEFINED ENV{VULKAN_SDK})
 endif()
 
 function(copy_assets target)
+    # copy_directory da sola aggiunge/sovrascrive ma non cancella mai: un
+    # file tolto da assets/ resta per sempre come copia zombie in bin/assets,
+    # invisibile finche' qualcuno non lo trova per caso (e' successo — asset
+    # scoperti stasera, spariti dal sorgente da giorni, ancora nella build).
+    # rm -rf prima della copia rende bin/assets uno specchio vero, non un
+    # accumulo: costa una copia in piu' a ogni build, ~2 MB, non si sente.
     add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf
+                $<TARGET_FILE_DIR:${target}>/assets
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 ${CMAKE_SOURCE_DIR}/assets
                 $<TARGET_FILE_DIR:${target}>/assets
