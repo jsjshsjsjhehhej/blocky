@@ -221,6 +221,29 @@ public:
         return runString(code);
     }
 
+    /** Come runPartScript, ma per uno script agganciato a un Model importato. */
+    bool runModelScript(const std::string& code, int modelIndex) {
+        if (!L || !workspace) return false;
+        if (modelIndex < 0 || modelIndex >= (int)workspace->models.size()) {
+            lastError = "Model index non valido";
+            return false;
+        }
+        bindModelScriptParent(modelIndex);
+        return runString(code);
+    }
+
+    void bindModelScriptParent(int modelIndex) {
+        if (!L) return;
+        lua_newtable(L); // script
+        pushLiveModel(L, modelIndex);
+        lua_setfield(L, -2, "Parent");
+        lua_pushglobaltable(L);
+        lua_pushstring(L, "script");
+        lua_pushvalue(L, -3);
+        lua_rawset(L, -3);
+        lua_pop(L, 2);
+    }
+
     /** Imposta global script = { Parent = live Part } (API nuova stile Roblox). */
     void bindScriptParent(int partIndex) {
         if (!L) return;

@@ -150,6 +150,12 @@ static std::vector<AnimatedModel> g_wsRigged;
 static NavGrid g_nav;
 static void rebuildNavGrid();
 
+// Dimensione (studs) a cui viene normalizzato il lato più lungo di un modello
+// importato nel mondo. Il default di StaticMesh (1.6) è tarato per gli
+// accessori dell'avatar; un mostro o un edificio nel mondo vuole una scala
+// vicina a un personaggio R6 (testa a y=4.7 circa), non a un cappello.
+static constexpr float kWorldModelTargetSize = 5.5f;
+
 // F3 in gioco: mostra perché l'Animator sta scegliendo una clip invece di
 // un'altra. Serve quando "il salto non si vede" e non si sa se il problema
 // sia la fisica, lo stato o la clip.
@@ -342,6 +348,7 @@ static int g_selectedPart = -1; // indice in g_world.parts, -1 = nessuno
 static std::string g_pendingOpenPlace;
 static char g_partNameBuf[64] = {};
 static char g_partScriptBuf[16384] = {};
+static char g_modelScriptBuf[16384] = {};
 
 static void* publisherHwnd();
 static void refreshGamesList();
@@ -2672,7 +2679,7 @@ static void reloadWorkspaceModelMeshes() {
         StaticMesh mesh;
         mesh.exactImport = true; // modelli del mondo: submesh e materiali intatti
         if (!m.sourcePath.empty())
-            mesh.load(m.sourcePath);
+            mesh.load(m.sourcePath, kWorldModelTargetSize);
 
         setupRiggedModel(i, m, mesh.hasBones);
         g_wsMeshes.push_back(std::move(mesh));
@@ -2797,7 +2804,7 @@ static void insertImportedModel() {
     mesh.exactImport = true; // import nel mondo: niente scarti, materiali come nel file
     bool ok = false;
     try {
-        ok = mesh.load(path);
+        ok = mesh.load(path, kWorldModelTargetSize);
     } catch (...) {
         ok = false;
     }
@@ -2811,7 +2818,11 @@ static void insertImportedModel() {
     std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
     std::string name = "Model" + std::to_string(g_world.nextModelIndex());
     auto& wm = g_world.addModel(name, path, insertPositionInFront());
-    wm.scale = {2, 2, 2};
+    // kWorldModelTargetSize da solo produce già una dimensione sensata:
+    // prima uno scale={2,2,2} fisso si sommava a una normalizzazione a 1.6
+    // unità (risultato 3.2), il doppio schiacciamento che rendeva tutto
+    // minuscolo. Ora è l'utente a scalare da lì, non due fattori nascosti.
+    wm.scale = {1, 1, 1};
     wm.rig.fileHasBones = mesh.hasBones; // dal primo load — niente secondo Assimp
     wm.rig.simpleRig = false;
     g_wsMeshes.push_back(std::move(mesh));
@@ -2863,6 +2874,11 @@ static void deleteSelected() {
         g_world.models.erase(g_world.models.begin() + g_selectedModel);
         if (g_selectedModel < (int)g_wsMeshes.size())
             g_wsMeshes.erase(g_wsMeshes.begin() + g_selectedModel);
+        // g_wsRigged è allineato indice-per-indice a g_world.models: senza
+        // questa riga, cancellare un modello sfasa tutti i rig successivi
+        // di uno, e il mostro sbagliato prende l'animazione di un altro.
+        if (g_selectedModel < (int)g_wsRigged.size())
+            g_wsRigged.erase(g_wsRigged.begin() + g_selectedModel);
         selectModel(-1);
         return;
     }
@@ -3010,8 +3026,16 @@ static void runAllPartScripts(bool clearFirst = true) {
         else
             std::fprintf(stderr, "[Lua] Part '%s': %s\n", p.name.c_str(), g_lua.lastError.c_str());
     }
+    for (int i = 0; i < (int)g_world.models.size(); ++i) {
+        auto& m = g_world.models[i];
+        if (m.script.empty()) continue;
+        if (g_lua.runModelScript(m.script, i))
+            ++n;
+        else
+            std::fprintf(stderr, "[Lua] Model '%s': %s\n", m.name.c_str(), g_lua.lastError.c_str());
+    }
     if (n > 0)
-        g_luaRunMsg = "Test: script Part avviati (" + std::to_string(n) + ")";
+        g_luaRunMsg = "Test: script avviati (" + std::to_string(n) + ")";
 }
 
 /** Solo in Test: place script + script dei blocchi. In editor non gira nulla. */
@@ -6908,6 +6932,16 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::PopStyleColor();
         } else if (g_selectedModel >= 0 && g_selectedModel < (int)g_world.models.size()) {
             auto& m = g_world.models[g_selectedModel];
+
+            // Il buffer dello script va risincronizzato solo al cambio di
+            // selezione: farlo ogni frame sovrascriverebbe quello che si sta
+            // digitando con il valore già salvato.
+            static int syncedModel = -1;
+            if (syncedModel != g_selectedModel) {
+                syncedModel = g_selectedModel;
+                std::snprintf(g_modelScriptBuf, sizeof(g_modelScriptBuf), "%s", m.script.c_str());
+            }
+
             ImGui::TextColored({0.45f, 0.75f, 1.f, 1.f}, "Model");
             char nameBuf[64];
             std::snprintf(nameBuf, sizeof(nameBuf), "%s", m.name.c_str());
@@ -6967,6 +7001,12 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 markPlaceDirty();
             }
             ImGui::ColorEdit3("Tint", &m.tint.x);
+            if (ImGui::Checkbox("CanCollide", &m.canCollide))
+                rebuildNavGrid();   // gli NPC devono vedere subito il nuovo ostacolo
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Il player si ferma contro il volume del modello\n"
+                                  "(un parallelepipedo, non la mesh esatta).");
+
             ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.45f, 0.20f, 1.f});
             if (ImGui::Button("Anima questo Model...", {-1, 40}))
                 beginAnimateSelectedModel();
@@ -6978,6 +7018,46 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::PopStyleColor();
             }
             ImGui::TextDisabled("1) Anima  2) Move  3) Set Frame (K)  4) Play");
+
+            ImGui::Separator();
+            ImGui::TextColored({0.9f, 0.7f, 0.2f, 1.f}, "Script del Model");
+            ImGui::TextWrapped("script.Parent e' questo Model: stessa API di FindFirstChild, "
+                               "Animator, SetClipAlias, CanCollide.");
+            if (m.script.empty()) {
+                ImGui::TextDisabled("Nessuno script.");
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.65f, 0.12f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.75f, 0.20f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, {0.1f, 0.1f, 0.1f, 1.f});
+                if (ImGui::Button("Aggiungi Script", {-1, 28})) {
+                    m.script = "-- script.Parent e' questo Model\n"
+                              "local model = script.Parent\n\n"
+                              "game:GetService(\"RunService\").Heartbeat:Connect(function(dt)\n"
+                              "end)\n";
+                    std::snprintf(g_modelScriptBuf, sizeof(g_modelScriptBuf), "%s", m.script.c_str());
+                    markPlaceDirty();
+                }
+                ImGui::PopStyleColor(3);
+            } else {
+                ImGui::InputTextMultiline("##modelscript", g_modelScriptBuf, sizeof(g_modelScriptBuf),
+                    {-1, 140}, ImGuiInputTextFlags_AllowTabInput);
+                if (ImGui::Button("Salva script", {-1, 0})) {
+                    m.script = g_modelScriptBuf;
+                    markPlaceDirty();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Apri guida"))
+                    g_showLuaGuide = true;
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.90f, 0.28f, 0.20f, 1.f});
+                if (ImGui::Button("Rimuovi script", {-1, 0})) {
+                    m.script.clear();
+                    g_modelScriptBuf[0] = 0;
+                    markPlaceDirty();
+                }
+                ImGui::PopStyleColor(2);
+            }
+
+            ImGui::Separator();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
             if (ImGui::Button("Rimuovi Model", {-1, 0})) deleteSelected();
             ImGui::PopStyleColor();

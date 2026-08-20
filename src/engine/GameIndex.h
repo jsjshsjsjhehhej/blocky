@@ -200,6 +200,17 @@ inline void appendScripts(const DataModel& world, std::vector<ScriptEntry>& out)
         s.compiled = false;   // diventa true quando il publisher sigilla il bytecode
         out.push_back(std::move(s));
     }
+    // I modelli importati possono avere script agganciati (Animator, IA di
+    // un mostro): stesso trattamento delle Part, non un caso a parte.
+    for (const WorkspaceModel& m : world.models) {
+        if (m.script.empty()) continue;
+        ScriptEntry s;
+        s.owner = m.name;
+        s.bytes = (std::uint64_t)m.script.size();
+        s.checksum = toHex(hashString(m.script));
+        s.compiled = false;
+        out.push_back(std::move(s));
+    }
 }
 
 inline LightingBlock lightingFrom(const LightingService& l) {

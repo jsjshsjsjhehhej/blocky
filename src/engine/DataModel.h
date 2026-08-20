@@ -94,6 +94,8 @@ struct WorkspaceModel {
      * decorativi dei place già salvati. Si accende quando serve.
      */
     bool canCollide = false;
+    /** Script Lua figlio, stessa API di WorkspacePart::script (vuoto = nessuno). */
+    std::string script;
 };
 
 /**

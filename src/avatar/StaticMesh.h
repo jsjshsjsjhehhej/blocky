@@ -519,7 +519,18 @@ public:
         outSubs.push_back(std::move(sm));
     }
 
-    bool load(const std::string& file) {
+    /**
+     * `targetMaxDim` è la dimensione (in studs) a cui viene normalizzato il
+     * lato più lungo della mesh. Il default 1.6 è tarato per gli accessori
+     * dell'avatar — cappelli, armi, oggetti in mano — che devono restare a
+     * scala di mano indipendentemente dalle unità del file sorgente.
+     *
+     * Un modello importato nel mondo (un mostro, un edificio, un veicolo) non
+     * deve subire la stessa compressione: schiacciare tutto a 1.6 unità è il
+     * motivo per cui gli import nel mondo sembravano minuscoli. Il chiamante
+     * passa un target più realistico — vedi importModelIntoWorld().
+     */
+    bool load(const std::string& file, float targetMaxDim = 1.6f) {
         clear();
         Assimp::Importer imp;
         imp.SetPropertyInteger(AI_CONFIG_PP_SBP_REMOVE,
@@ -627,7 +638,7 @@ public:
         glm::vec3 size = rawMax - rawMin;
         float maxDim = std::max(size.x, std::max(size.y, size.z));
         if (maxDim < 1e-5f) maxDim = 1.f;
-        float scl = 1.6f / maxDim;
+        float scl = targetMaxDim / maxDim;
         glm::vec3 center = (rawMin + rawMax) * 0.5f;
         glm::mat4 norm = glm::scale(glm::mat4(1.f), glm::vec3(scl))
                        * glm::translate(glm::mat4(1.f), -center)
