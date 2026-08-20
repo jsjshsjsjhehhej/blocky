@@ -60,6 +60,84 @@ struct GamepadState {
     float prevLt = 0.f, prevRt = 0.f;
 };
 
+/**
+ * Vibrazione.
+ *
+ * `left` è il motore pesante (rombo grave), `right` quello leggero (ronzio
+ * acuto), entrambi 0..1. `seconds` a 0 lascia acceso finché non lo si ferma:
+ * è il chiamante a doverlo spegnere, e gpRumbleTick() lo fa per lui quando la
+ * durata scade.
+ *
+ * Solo XInput: DualShock e DualSense vogliono un report HID in uscita, che
+ * cambia fra USB e Bluetooth e va scritto a parte. Meglio non vibrare che
+ * mandare byte a caso a un dispositivo.
+ */
+struct RumbleState {
+    float left = 0.f, right = 0.f;
+    float remaining = 0.f;     // secondi; <= 0 = continuo o spento
+    bool active = false;
+};
+
+inline RumbleState& gpRumble() {
+    static RumbleState r;
+    return r;
+}
+
+inline void gpApplyRumbleRaw(int xinputIndex, float left, float right) {
+#ifdef _WIN32
+    if (xinputIndex < 0 || xinputIndex > 3) return;
+    auto clamp01 = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+
+    XINPUT_VIBRATION vib{};
+    vib.wLeftMotorSpeed  = (WORD)(clamp01(left) * 65535.f);
+    vib.wRightMotorSpeed = (WORD)(clamp01(right) * 65535.f);
+    XInputSetState((DWORD)xinputIndex, &vib);
+#else
+    (void)xinputIndex; (void)left; (void)right;
+#endif
+}
+
+inline void gpSetRumble(int xinputIndex, float left, float right, float seconds = 0.f) {
+    RumbleState& r = gpRumble();
+    r.left = left;
+    r.right = right;
+    r.remaining = seconds;
+    r.active = (left > 0.001f || right > 0.001f);
+    gpApplyRumbleRaw(xinputIndex, left, right);
+}
+
+inline void gpStopRumble(int xinputIndex) {
+    RumbleState& r = gpRumble();
+    r.left = r.right = r.remaining = 0.f;
+    r.active = false;
+    gpApplyRumbleRaw(xinputIndex, 0.f, 0.f);
+}
+
+/** Da chiamare ogni frame: spegne la vibrazione quando la durata è finita. */
+inline void gpRumbleTick(int xinputIndex, float dt) {
+    RumbleState& r = gpRumble();
+    if (!r.active || r.remaining <= 0.f) return;
+    r.remaining -= dt;
+    if (r.remaining <= 0.f) gpStopRumble(xinputIndex);
+}
+
+/**
+ * Zona morta radiale con riscalatura.
+ *
+ * Applicarla per asse squadra il movimento diagonale e lascia uno scatto al
+ * bordo della soglia. Qui la si applica al vettore intero e si riespande il
+ * resto su 0..1, così il minimo movimento oltre la soglia parte da zero.
+ */
+inline void gpDeadzoneStick(float& x, float& y, float dz = 0.14f) {
+    const float mag = std::sqrt(x * x + y * y);
+    if (mag <= dz || mag <= 1e-6f) { x = 0.f; y = 0.f; return; }
+
+    const float scaled = (mag - dz) / (1.f - dz);
+    const float k = (scaled > 1.f ? 1.f : scaled) / mag;
+    x *= k;
+    y *= k;
+}
+
 inline float gpDeadzone(float v, float dz = 0.12f) {
     if (std::fabs(v) < dz) return 0.f;
     float s = (v > 0.f) ? 1.f : -1.f;
