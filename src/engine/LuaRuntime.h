@@ -61,6 +61,9 @@ public:
     NavGrid* nav = nullptr;
     /** Richiamata dal motore per ricostruire la griglia quando la scena cambia. */
     void (*navRebuild)() = nullptr;
+    /** Impostato dal motore: fa tremare la camera. magnitudeDeg = ampiezza
+     *  di picco in gradi, durationSec = quanto dura prima di spegnersi. */
+    void (*cameraShake)(float magnitudeDeg, float durationSec) = nullptr;
     float* playerYaw = nullptr;   // gradi, direzione sguardo (per mira/pistola)
     std::string lastError;
     bool ok = false;
@@ -451,6 +454,36 @@ public:
             if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Touched error: %s\n", lastError.c_str());
+                lua_pop(L, 1);
+            }
+        }
+    }
+
+    /**
+     * Fa scattare Events.Connect("ItemActivated", ...) dal lato nativo (LMB
+     * o pad X con un item equipaggiato che non è Sword). Riusa il canale
+     * Events già esistente invece di una mappa dedicata: lo script scrive
+     *
+     *   Events.Connect("ItemActivated", function(id, name)
+     *       if name == "Torcia" then ... end
+     *   end)
+     *
+     * esattamente come già farebbe per un evento suo — nessuna API nuova
+     * da imparare per usare chiavi, torce, medikit.
+     */
+    void fireItemActivated(const std::string& itemId, const std::string& itemName) {
+        if (!L) return;
+        auto it = scriptControls().events.find("ItemActivated");
+        if (it == scriptControls().events.end() || it->second.empty()) return;
+        for (int ref : it->second) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            lua_pushstring(L, itemId.c_str());
+            lua_pushstring(L, itemName.c_str());
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                lastError = safeToString(-1);
+                std::fprintf(stderr, "ItemActivated error: %s\n", lastError.c_str());
                 lua_pop(L, 1);
             }
         }
@@ -1166,6 +1199,12 @@ private:
         lua_pushcfunction(L, luaBackpackEquipped);
         lua_setfield(L, -2, "Equipped");
         lua_setglobal(L, "Backpack");
+
+        // Camera:Shake(gradi, secondi) — jumpscare, esplosioni, impatti.
+        lua_newtable(L);
+        lua_pushcfunction(L, luaCameraShake);
+        lua_setfield(L, -2, "Shake");
+        lua_setglobal(L, "Camera");
 
         // UserInputService: jump + IsKeyDown / IsSprintHeld / IsMoving
         lua_newtable(L);
@@ -2027,6 +2066,17 @@ private:
         }
         lua_pushstring(ls, name.c_str());
         return 1;
+    }
+
+    /** Camera.Shake(gradi, secondi). Valori tipici: 2-4° per un impatto,
+     *  6-10° per un jumpscare vero. Oltre ~15° la vista diventa illeggibile. */
+    static int luaCameraShake(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->cameraShake) return 0;
+        const float magnitude = (float)luaL_optnumber(ls, 1, 4.0);
+        const float duration = (float)luaL_optnumber(ls, 2, 0.3);
+        rt->cameraShake(magnitude, duration);
+        return 0;
     }
 
     /** Humanoid.GetLook() -> {X,Y,Z} versore orizzontale dove guarda il player.

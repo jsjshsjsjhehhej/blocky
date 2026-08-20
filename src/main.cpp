@@ -414,8 +414,12 @@ static bool sendPlayChat(const char* msg);
 static void drawGizmoOverlayHud();
 static void pollBackpackSwitch(GLFWwindow* win);
 static void trySwordAttack();
+static void tryUseEquippedItem();
 static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun);
+static void drawEquippedItemMesh(GLuint vao, GLuint partP, GLuint meshP,
+                                 const glm::mat4& view, const glm::mat4& proj,
+                                 const glm::vec3& sun);
 static bool playCameraActive();
 static bool equipShopItem(int idx);
 static bool unequipShopItem(int idx);
@@ -983,10 +987,56 @@ static glm::mat4 firstPersonView() {
     return glm::lookAt(eye, eye + front, glm::vec3(0.f, 1.f, 0.f));
 }
 
+// --- Camera shake -------------------------------------------------------
+// Perturba la matrice vista già calcolata invece di toccare i due percorsi
+// (prima/terza persona): un punto solo, vale per entrambi automaticamente.
+static float g_camShakeMagnitude = 0.f;   // gradi di picco dell'urto attuale
+static float g_camShakeDuration  = 0.f;   // durata totale dell'urto, per il decadimento
+static float g_camShakeRemaining = 0.f;   // secondi rimasti
+static float g_camShakeSeed = 0.f;        // fase del rumore, cosi' i tre assi non oscillano in fase
+
+static void triggerCameraShake(float magnitudeDeg, float durationSec) {
+    if (magnitudeDeg <= 0.f || durationSec <= 0.f) return;
+    // Un urto più debole non deve interrompere uno più forte già in corso —
+    // altrimenti un piccolo colpo a ripetizione cancellerebbe un jumpscare
+    // vero partito un istante prima.
+    const float currentPeak = (g_camShakeDuration > 0.f)
+        ? g_camShakeMagnitude * (g_camShakeRemaining / g_camShakeDuration) : 0.f;
+    if (magnitudeDeg < currentPeak) return;
+
+    g_camShakeMagnitude = magnitudeDeg;
+    g_camShakeDuration = durationSec;
+    g_camShakeRemaining = durationSec;
+    g_camShakeSeed = (float)glfwGetTime() * 17.f;   // ogni scossa parte da una fase diversa
+}
+
+static void tickCameraShake(float dt) {
+    if (g_camShakeRemaining > 0.f) g_camShakeRemaining = std::max(0.f, g_camShakeRemaining - dt);
+}
+
+static glm::mat4 applyCameraShake(const glm::mat4& view) {
+    if (g_camShakeRemaining <= 0.f) return view;
+
+    const float t = (float)glfwGetTime() * 24.f;   // frequenza dell'oscillazione
+    const float decay = g_camShakeRemaining / g_camShakeDuration;
+    // Decadimento quadratico: parte piena e si spegne dolcemente in coda,
+    // invece di tagliare di netto — un taglio netto si nota ed è fastidioso.
+    const float amt = glm::radians(g_camShakeMagnitude) * decay * decay;
+
+    const float rx = std::sin(t * 1.7f + g_camShakeSeed) * amt;
+    const float ry = std::sin(t * 2.3f + g_camShakeSeed * 1.3f) * amt * 0.6f;
+    const float rz = std::sin(t * 1.3f + g_camShakeSeed * 0.7f) * amt * 0.4f;
+
+    const glm::mat4 jitter = glm::rotate(glm::mat4(1.f), rx, glm::vec3(1, 0, 0))
+                            * glm::rotate(glm::mat4(1.f), ry, glm::vec3(0, 1, 0))
+                            * glm::rotate(glm::mat4(1.f), rz, glm::vec3(0, 0, 1));
+    return jitter * view;
+}
+
 /** Camera Play/Test: prima persona oppure terza (orbita / shift lock). */
 static glm::mat4 playCameraView() {
-    if (g_firstPerson) return firstPersonView();
-    return thirdPersonView();
+    glm::mat4 view = g_firstPerson ? firstPersonView() : thirdPersonView();
+    return applyCameraShake(view);
 }
 
 static void syncPlayerYawToCamera() {
@@ -1428,6 +1478,7 @@ static void bindLuaServices() {
     g_lua.playerHumanoid = &g_player.humanoid;
     g_lua.nav = &g_nav;
     g_lua.navRebuild = &rebuildNavGrid;
+    g_lua.cameraShake = &triggerCameraShake;
     g_lua.playerPos = &g_playerPos;
     g_lua.playerYaw = &g_playerYaw;
 }
@@ -3504,6 +3555,7 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
                 }
             }
             trySwordAttack();
+            tryUseEquippedItem();
         } else if (action == GLFW_RELEASE) {
             if (g_uiPressedLabel >= 0) {
                 int hit = g_playCursorLocked ? g_uiPressedLabel
@@ -3954,6 +4006,7 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
             drawAvatarAccessories(meshP, view, proj, sun,
                 g_playerPos, g_playerYaw, g_player.humanoid, vao, partP);
             drawEquippedSword(vao, partP, view, proj, sun);
+            drawEquippedItemMesh(vao, partP, meshP, view, proj, sun);
         }
         // Sempre: avatar degli altri giocatori (anche se tu sei in FP)
         if (g_remoteBodies.size() < g_net.remotes.size())
@@ -8534,6 +8587,20 @@ static bool equippedSword() {
     return it && it->tool == BackpackTool::Sword;
 }
 
+/**
+ * LMB / pad X quando l'item equipaggiato non è una Sword (che ha già il
+ * proprio trySwordAttack). Notifica lo script via Events invece di avere un
+ * comportamento nativo hardcoded: una chiave, una torcia, un medikit non
+ * sono un tipo di tool nuovo da aggiungere al motore, sono uno script che
+ * reagisce a "questo oggetto è stato usato".
+ */
+static void tryUseEquippedItem() {
+    const BackpackItem* it = equippedBackpackItem();
+    if (!it || it->tool == BackpackTool::Sword) return;
+    if (!g_lua.ok) return;
+    g_lua.fireItemActivated(it->id, it->name);
+}
+
 /** Disegna spada sul braccio destro se Sword equipaggiata. */
 static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun) {
@@ -8582,6 +8649,80 @@ static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
     drawBit({0, 0.42f, 0}, {0.55f, 0.12f, 0.18f}, guard);      // guardia
     drawBit({0, 1.35f, 0}, {0.14f, 1.6f, 0.06f}, steel);       // lama
     (void)bob;
+}
+
+// Cache delle mesh tenute in mano, per path: caricarle ogni frame sarebbe
+// un accesso a disco a 60fps per un oggetto che nel frattempo non cambia mai.
+static std::map<std::string, StaticMesh> g_heldItemMeshCache;
+
+static StaticMesh* getHeldItemMesh(const std::string& path) {
+    if (path.empty()) return nullptr;
+    auto it = g_heldItemMeshCache.find(path);
+    if (it != g_heldItemMeshCache.end())
+        return it->second.loaded ? &it->second : nullptr;
+
+    StaticMesh mesh;
+    // Scala da accessorio (come cappelli/armi del catalogo avatar), non da
+    // oggetto del mondo: una chiave o una torcia deve stare a misura di
+    // mano, non della scala scelta per un mostro o un edificio.
+    mesh.load(path);
+    auto [ins, ok] = g_heldItemMeshCache.emplace(path, std::move(mesh));
+    (void)ok;
+    return ins->second.loaded ? &ins->second : nullptr;
+}
+
+/**
+ * Disegna in mano la mesh dell'item equipaggiato (comportamento stile Roblox
+ * Tool: qualunque oggetto con un handle appare nella mano del player).
+ * Non tocca drawEquippedSword — Sword resta la sua lama fatta di cubi,
+ * questo copre tutto il resto: chiavi, torce, medikit, qualunque cosa abbia
+ * un meshPath. Se l'item non ha una mesh, resta solo la posa del braccio
+ * (armHold) già applicata altrove — non c'è nulla di sbagliato nel non
+ * vedere un oggetto fisico per un item puramente "di inventario".
+ */
+static void drawEquippedItemMesh(GLuint, GLuint partP, GLuint meshP,
+                                 const glm::mat4& view, const glm::mat4& proj,
+                                 const glm::vec3& sun) {
+    (void)partP;
+    const BackpackItem* it = equippedBackpackItem();
+    if (!it || it->tool == BackpackTool::Sword || it->meshPath.empty()) return;
+    if (g_player.humanoid.dead) return;
+
+    StaticMesh* mesh = getHeldItemMesh(it->meshPath);
+    if (!mesh) return;
+
+    const HumanoidPartDef* arm = nullptr;
+    for (const auto& p : g_player.humanoid.parts) {
+        if (p.name == "Right Arm") { arm = &p; break; }
+    }
+    if (!arm) return;
+
+    // Stessa catena braccio→polso di drawEquippedSword, senza la rotazione
+    // di swing (che è specifica della spada) — un oggetto tenuto e basta,
+    // non un'arma che colpisce.
+    float walkArm = humanoidArmSwing(g_player.humanoid);
+    float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
+    humanoidJumpPose(g_player.humanoid, jL, jR, jl, jr);
+    float rx = arm->rotX;
+    float rz = arm->rotZ;
+    bool animDriven = (std::fabs(arm->rotX) + std::fabs(arm->rotZ)) > 0.01f;
+    if (!animDriven)
+        rx = -walkArm * (1.f - g_player.humanoid.jumpArmBlend) + jR;
+
+    glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), g_playerPos),
+                                 glm::radians(g_playerYaw), glm::vec3(0, 1, 0));
+    glm::mat4 armM = glm::translate(root, arm->offset + arm->pivot);
+    if (rx != 0) armM = glm::rotate(armM, glm::radians(rx), glm::vec3(1, 0, 0));
+    if (rz != 0) armM = glm::rotate(armM, glm::radians(rz), glm::vec3(0, 0, 1));
+    armM = glm::translate(armM, -arm->pivot);
+    armM = glm::translate(armM, {0.15f, -0.85f, 0.35f});   // stesso punto di presa della spada
+
+    glUseProgram(meshP);
+    glUniformMatrix4fv(glGetUniformLocation(meshP, "uModel"), 1, GL_FALSE, glm::value_ptr(armM));
+    glUniformMatrix4fv(glGetUniformLocation(meshP, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(meshP, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
+    glUniform3fv(glGetUniformLocation(meshP, "uSun"), 1, glm::value_ptr(sun));
+    mesh->drawTextured(meshP, {1.f, 1.f, 1.f}, 1.f);
 }
 
 /** Attacca con Sword (LMB / pad X). */
@@ -9597,8 +9738,10 @@ int Blocky_RunEngine() {
                     // Sword: cooldown / anim + pad X attacca
                     if (g_swordCooldown > 0.f) g_swordCooldown = std::max(0.f, g_swordCooldown - dt);
                     if (g_swordSwing > 0.f) g_swordSwing = std::max(0.f, g_swordSwing - dt * 4.5f);
-                    if (padOk && pad.xPressed)
+                    if (padOk && pad.xPressed) {
                         trySwordAttack();
+                        tryUseEquippedItem();
+                    }
                 }
                 // F5 = Test / F1 = Stop test (edge)
                 static bool f5Was = false, f1Was = false;
@@ -9799,6 +9942,7 @@ int Blocky_RunEngine() {
                 g_lua.fireHeartbeat(dt);
                 pollPartTouched();
                 tickBoomAutoFuse(dt);
+                tickCameraShake(dt);
                 g_lua.drainRemoteEvents();
             }
         }

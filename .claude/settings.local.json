@@ -100,7 +100,9 @@
       "Bash(curl.exe --version)",
       "Bash(tasklist)",
       "Bash(taskkill //F //IM blocky_hostd.exe)",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(taskkill //F //IM Blocky.exe //IM BlockyGameEngine.exe //IM BlockyStudio.exe)",
+      "Bash(cmake --build build --target BlockyLauncher BlockyStudioLauncher BlockyEditorLauncher)"
     ]
   }
 }
