@@ -326,6 +326,15 @@ if (WIN32)
     target_link_options(asset_audit PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
+# Indice di pubblicazione: mesh/collider/materiali/luci/script/hash in un
+# solo game_index.json, cosi' il client scarica e basta.
+add_executable(build_game_index src/tools/build_game_index.cpp)
+target_include_directories(build_game_index PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(build_game_index PRIVATE glm::glm)
+if (WIN32)
+    target_link_options(build_game_index PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 add_executable(test_lua src/tools/test_lua.cpp)
 target_include_directories(test_lua PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # LuaRuntime.h non è più headless: tira dentro R6WalkAnim.h (assimp),

@@ -93,7 +93,8 @@
       "Bash(cmake --build build --target asset_audit)",
       "Bash(./build/bin/asset_audit.exe assets *)",
       "Bash(echo \"EXIT=$?\")",
-      "Bash(./build/bin/asset_audit.exe build/bin/assets)"
+      "Bash(./build/bin/asset_audit.exe build/bin/assets)",
+      "Bash(cmake --build build --target build_game_index)"
     ]
   }
 }
