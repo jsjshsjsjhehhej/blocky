@@ -1,8 +1,5 @@
 #pragma once
 
-/**
- * Associazione file .blocky → icona B + apri con Blocky Game Engine.
- */
 
 #include <string>
 #include <vector>
@@ -42,13 +39,11 @@ inline bool writeRegSz(HKEY root, const char* sub, const char* name, const char*
     return r == ERROR_SUCCESS;
 }
 
-/** Registra .blocky con icona B (icona dell'exe) e open. */
 inline void registerPlaceAssociation() {
     std::string exe = exePath();
     for (char& c : exe)
         if (c == '/') c = '\\';
 
-    // Icona: risorsa 0/1 dell'exe (app.ico = lettera B)
     std::string icon = "\"" + exe + "\",0";
     std::string cmd = "\"" + exe + "\" \"%1\"";
 
@@ -63,11 +58,9 @@ inline void registerPlaceAssociation() {
     writeRegSz(HKEY_CURRENT_USER, "Software\\Classes\\Blocky.Place\\shell\\open\\command",
                nullptr, cmd.c_str());
 
-    // Notifica Explorer
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
 
-/** Percorso .blocky passato da riga di comando / doppio click. */
 inline std::string placePathFromArgs() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -89,7 +82,7 @@ inline std::string placePathFromArgs() {
             break;
         }
         if (low.size() >= 5 && low.compare(low.size() - 5, 5, ".json") == 0) {
-            path = a; // legacy
+            path = a;
             break;
         }
     }
@@ -101,4 +94,4 @@ inline void registerPlaceAssociation() {}
 inline std::string placePathFromArgs() { return {}; }
 #endif
 
-} // namespace BlockyFileAssoc
+}

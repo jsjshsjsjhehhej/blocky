@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Senza questo permesso Android fa fallire socket() con EACCES: il
+         multiplayer LAN, il relay blk:// e ogni richiesta HTTP del motore non
+         possono nemmeno partire. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Per ricevere i broadcast con cui Blocky si fa trovare in rete locale:
+         senza, il Wi-Fi di Android li scarta prima che arrivino all app. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Blocky disegna con shader OpenGL ES 3. Dichiararlo qui fa si che lo
+         store non proponga nemmeno l app ai dispositivi che arrivano solo a
+         ES 2; chi la installa lo stesso (per esempio via adb) trova l avviso
+         che android_entry.cpp mostra all avvio. -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <!-- BlockyHostService: tiene vivo il processo mentre si ospita una
+         partita in background. FOREGROUND_SERVICE e' richiesto per QUALSIASI
+         Foreground Service da Android 9 in poi; il permesso specifico per
+         tipo (CONNECTED_DEVICE) e' richiesto in piu' da Android 14 — senza
+         entrambi, startForeground() lancia un eccezione a runtime invece di
+         limitarsi a fallire in silenzio, quindi vanno dichiarati insieme. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BlockyPreview">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="landscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="blocky" />
+        </activity>
+
+        <!-- Vedi BlockyHostService.kt: cosa tiene vivo, cosa non fa ancora.
+             android:exported="false": nessun'altra app deve poterlo avviare. -->
+        <service
+            android:name=".BlockyHostService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
+
+</manifest>

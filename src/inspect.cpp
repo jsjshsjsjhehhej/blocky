@@ -1,7 +1,3 @@
-// Strumento di diagnostica: stampa gerarchia nodi, ossa per mesh e
-// verifica la corrispondenza tra nomi delle ossa e nomi dei nodi.
-//
-// Uso: inspect <file>
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -71,7 +67,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --- Test skinning in posa di bind (senza animazione) ---
     std::printf("\n--- TEST BIND POSE: centro di ogni mesh dopo lo skinning ---\n");
     std::map<std::string, aiMatrix4x4> globalBind;
     std::function<void(const aiNode*, aiMatrix4x4)> build =
@@ -125,7 +120,6 @@ int main(int argc, char** argv) {
     std::printf("BBOX dopo SKINNING  : min(%.1f,%.1f,%.1f) max(%.1f,%.1f,%.1f)\n",
                 skMin.x, skMin.y, skMin.z, skMax.x, skMax.y, skMax.z);
 
-    // Se lo skinning in bind fosse corretto, globalBind*offset ~ identita'
     for (unsigned m = 1; m <= 1 && m < scene->mNumMeshes; ++m) {
         const aiMesh* mesh = scene->mMeshes[m];
         const aiBone* bone = mesh->mBones[0];

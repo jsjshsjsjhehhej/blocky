@@ -1,18 +1,5 @@
 #pragma once
 
-/**
- * Controllo d'integrità di un place.
- *
- * Serve al momento del caricamento: un file salvato da una build vecchia, o
- * modificato a mano, può contenere valori che mandano in crash il rendering
- * molto dopo — una size a zero produce una matrice singolare, un NaN in
- * position propaga fino alla proiezione e sporca l'intero frame.
- *
- * `check()` non modifica nulla. `repair()` corregge solo ciò che si può
- * correggere senza inventare: azzera i NaN, riporta le size sopra lo zero,
- * rinomina i duplicati. Quello che manca davvero — un asset assente — resta
- * un errore, perché sostituirlo in silenzio nasconderebbe il problema.
- */
 
 #include <cmath>
 #include <filesystem>
@@ -36,7 +23,7 @@ inline const char* severityName(Severity s) {
 
 struct Issue {
     Severity severity = Severity::Info;
-    std::string subject;   // nome della Part / Label coinvolta
+    std::string subject;
     std::string rule;
     std::string detail;
     bool repairable = false;
@@ -60,13 +47,11 @@ struct Result {
     bool loadable() const { return errors == 0; }
 };
 
-// ---------------------------------------------------------------- utilità
 
 inline bool finite3(const glm::vec3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-/** Oltre questo un float ha perso significato ed è quasi certo un bug. */
 inline constexpr float kSaneCoord = 100000.f;
 
 inline bool saneCoord(const glm::vec3& v) {
@@ -74,22 +59,10 @@ inline bool saneCoord(const glm::vec3& v) {
         && std::fabs(v.z) < kSaneCoord;
 }
 
-// ------------------------------------------------------------------ check
 
 inline Result check(const DataModel& world) {
     Result r;
 
-    // --- Baseplate ---
-    if (world.hasBaseplate) {
-        if (!finite3(world.baseplateSize) ||
-            world.baseplateSize.x <= 0.f || world.baseplateSize.y <= 0.f ||
-            world.baseplateSize.z <= 0.f) {
-            r.add(Severity::Error, "Baseplate", "size-non-valida",
-                  "dimensione nulla o non finita", true);
-        }
-    }
-
-    // --- Spawn ---
     if (!finite3(world.spawn.position)) {
         r.add(Severity::Error, "SpawnLocation", "posizione-non-finita",
               "NaN o infinito: il player nascerebbe fuori dal mondo", true);
@@ -101,7 +74,6 @@ inline Result check(const DataModel& world) {
         r.add(Severity::Error, "SpawnLocation", "yaw-non-finito", "rotazione NaN", true);
     }
 
-    // --- Part ---
     std::unordered_map<std::string, int> nameCount;
 
     for (const WorkspacePart& p : world.parts) {
@@ -165,7 +137,6 @@ inline Result check(const DataModel& world) {
                   "findPart ne troverà sempre e solo una", true);
     }
 
-    // --- Modelli: asset referenziato ma assente ---
     for (const WorkspaceModel& m : world.models) {
         if (m.sourcePath.empty()) {
             r.add(Severity::Error, m.name, "riferimento-vuoto",
@@ -178,7 +149,6 @@ inline Result check(const DataModel& world) {
                   "file non trovato: " + m.sourcePath);
     }
 
-    // --- Label ---
     for (const WorkspaceLabel& l : world.labels) {
         if (l.text.empty())
             r.add(Severity::Info, l.name, "testo-vuoto", "label senza testo");
@@ -192,7 +162,6 @@ inline Result check(const DataModel& world) {
             r.add(Severity::Warn, l.name, "scala-font-non-valida", "deve essere positiva", true);
     }
 
-    // --- Backpack: mesh referenziata ma assente ---
     for (const BackpackItem& it : world.backpack) {
         if (it.meshPath.empty()) continue;
         std::error_code ec;
@@ -208,23 +177,13 @@ inline Result check(const DataModel& world) {
     return r;
 }
 
-// ----------------------------------------------------------------- repair
 
-/** Corregge il correggibile. Ritorna quante voci ha sistemato. */
 inline int repair(DataModel& world) {
     int fixed = 0;
 
     auto fixVec = [&](glm::vec3& v, const glm::vec3& fallback) {
         if (!finite3(v) || !saneCoord(v)) { v = fallback; ++fixed; }
     };
-
-    if (world.hasBaseplate) {
-        if (!finite3(world.baseplateSize) || world.baseplateSize.x <= 0.f ||
-            world.baseplateSize.y <= 0.f || world.baseplateSize.z <= 0.f) {
-            world.baseplateSize = {120.f, 2.f, 120.f};
-            ++fixed;
-        }
-    }
 
     fixVec(world.spawn.position, {0.f, 0.f, 0.f});
     if (!std::isfinite(world.spawn.yaw)) { world.spawn.yaw = -90.f; ++fixed; }
@@ -236,7 +195,6 @@ inline int repair(DataModel& world) {
         fixVec(p.rotation, {0.f, 0.f, 0.f});
 
         if (!finite3(p.size)) { p.size = {4.f, 1.f, 2.f}; ++fixed; }
-        // Il minimo non è zero: a zero la matrice del modello non è invertibile.
         if (p.size.x <= 0.f || p.size.y <= 0.f || p.size.z <= 0.f) {
             p.size = glm::max(p.size, glm::vec3(0.05f));
             ++fixed;
@@ -271,7 +229,6 @@ inline int repair(DataModel& world) {
 
         if (p.name.empty()) { p.name = "Part"; ++fixed; }
 
-        // Nomi unici: chi arriva dopo prende un suffisso.
         int& n = used[p.name];
         if (++n > 1) {
             p.name += "_" + std::to_string(n);
@@ -293,4 +250,4 @@ inline int repair(DataModel& world) {
     return fixed;
 }
 
-} // namespace SceneIntegrity
+}

@@ -20,7 +20,6 @@
 #include "engine/GameHub.h"
 #include "engine/R6WalkAnim.h"
 
-/** Slot avatar dove attaccare un modello. */
 enum class AvatarSlot : int {
     Head = 0,
     Torso,
@@ -62,11 +61,10 @@ struct AvatarAccessory {
     std::string name = "Accessory";
     std::string sourcePath;
     StaticMesh mesh;
-    glm::vec3 offset{0, 0, 0};     // locale allo slot
-    glm::vec3 rotation{0, 0, 0};   // gradi
+    glm::vec3 offset{0, 0, 0};
+    glm::vec3 rotation{0, 0, 0};
     glm::vec3 scale{1, 1, 1};
-    glm::vec3 tint{1.f, 1.f, 1.f}; // bianco = mostra texture reali
-    /** true = sostituisce il cubo R6 di quello slot (es. braccio custom). */
+    glm::vec3 tint{1.f, 1.f, 1.f};
     bool replacesBody = false;
 };
 
@@ -74,36 +72,32 @@ struct AvatarCatalogState {
     std::vector<AvatarAccessory> items;
     int selected = -1;
 
-    /** Nascondi cubi R6 di default (anche senza mesh sostitutiva). */
     bool hideDefaultPart[(int)AvatarSlot::Count] = {};
 
-    // Publisher wizard
     bool open = false;
-    int wizardStep = 0; // 0=scegli slot, 1=import+edit
+    int wizardStep = 0;
     AvatarSlot pendingSlot = AvatarSlot::Head;
-    bool pendingAsBodyReplace = false; // import come parte custom
+    bool pendingAsBodyReplace = false;
     AccelTool tool = AccelTool::Move;
 
-    // Camera preview publisher
     float camYaw = 25.f;
     float camPitch = -18.f;
     float camDist = 14.f;
     bool orbiting = false;
 
     std::string status;
-    std::string pendingImportPath; // file scelto da Catalog / Esplora file
+    std::string pendingImportPath;
 
-    // Walking Animation (R6)
     std::vector<R6WalkClip> walkClips;
     int walkSelected = -1;
     std::string equippedWalkId;
-    R6WalkClip pendingWalk;      // appena importata, non ancora rilasciata
+    R6WalkClip pendingWalk;
     bool hasPendingWalk = false;
-    char walkNameBuf[96] = {};       // AnimationId (es. FancyWalk, Shoot)
-    char walkClipPrefBuf[96] = "WalkingAnimation"; // nome Action in Blender/Maya
-    bool previewWalk = false;    // anteprima sul personaggio in catalog
-    bool pendingAsWalkDefault = false; // solo se l'utente lo spunta (evita pistola come walk)
-    std::vector<std::string> pendingClipNames; // clip trovate nel file
+    char walkNameBuf[96] = {};
+    char walkClipPrefBuf[96] = "WalkingAnimation";
+    bool previewWalk = false;
+    bool pendingAsWalkDefault = false;
+    std::vector<std::string> pendingClipNames;
 };
 
 inline bool openModelFileDialog(std::string& outPath, void* hwndOwner = nullptr) {
@@ -122,7 +116,6 @@ inline bool openModelFileDialog(std::string& outPath, void* hwndOwner = nullptr)
     ofn.lpstrDefExt = L"glb";
     if (!GetOpenFileNameW(&ofn)) return false;
 
-    // UTF-16 → UTF-8
     int n = WideCharToMultiByte(CP_UTF8, 0, file, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return false;
     outPath.resize((size_t)n - 1);
@@ -135,7 +128,6 @@ inline bool openModelFileDialog(std::string& outPath, void* hwndOwner = nullptr)
 #endif
 }
 
-/** Offset base tipico per slot (sopra/attorno la part). */
 inline glm::vec3 defaultOffsetForSlot(AvatarSlot s) {
     switch (s) {
     case AvatarSlot::Head: return {0, 1.1f, 0};
@@ -148,7 +140,6 @@ inline glm::vec3 defaultOffsetForSlot(AvatarSlot s) {
     }
 }
 
-/** Offset per parte che SOSTITUISCE il cubo (centrata sul limb). */
 inline glm::vec3 bodyReplaceOffsetForSlot(AvatarSlot) {
     return {0.f, 0.f, 0.f};
 }
@@ -163,7 +154,6 @@ inline int avatarSlotIndexForPartName(const std::string& name) {
     return -1;
 }
 
-/** True se il cubo R6 di quella part non va disegnato. */
 inline bool catalogHidesBodyPart(const AvatarCatalogState& cat, const std::string& partName) {
     int si = avatarSlotIndexForPartName(partName);
     if (si < 0) return false;
@@ -198,7 +188,6 @@ inline glm::vec3 findPartCenter(const Humanoid& h, const char* name, float bob =
     return {0, 3, 0};
 }
 
-/** Matrice del limb (senza offset accessorio) — per gizmos Catalog. */
 inline glm::mat4 accessoryPartMatrix(const AvatarAccessory& a, const Humanoid& h,
                                      float bob, float armL, float armR, float legL, float legR) {
     const char* partName = humanoidPartForSlot(a.slot);
@@ -260,7 +249,6 @@ inline std::string blockyModelsDir() {
     return d;
 }
 
-/** Copia il modello in %APPDATA%/Blocky/models così resta dopo la publish. */
 inline std::string copyModelToLibrary(const std::string& srcPath, const std::string& displayName) {
     if (srcPath.empty()) return {};
     std::string base;
@@ -280,7 +268,6 @@ inline std::string copyModelToLibrary(const std::string& srcPath, const std::str
 
     std::string dest = blockyModelsDir() + "/" + base + ext;
 #ifdef _WIN32
-    // Se esiste già con stesso path sorgente, ok; altrimenti copia
     std::string src = srcPath;
     for (char& c : src) if (c == '/') c = '\\';
     std::string dstWin = dest;
@@ -288,7 +275,6 @@ inline std::string copyModelToLibrary(const std::string& srcPath, const std::str
     if (src != dstWin)
         CopyFileA(src.c_str(), dstWin.c_str(), FALSE);
 #else
-    // fallback: lascia path originale
     return srcPath;
 #endif
     return avatarPathSlash(dest);
@@ -333,7 +319,6 @@ inline bool loadEquippedAvatar(AvatarCatalogState& cat) {
     for (int i = 0; i < (int)AvatarSlot::Count; ++i)
         cat.hideDefaultPart[i] = false;
 
-    // hideDefaultPart:[true,false,...]
     size_t hideKey = json.find("\"hideDefaultPart\"");
     if (hideKey != std::string::npos) {
         size_t arr = json.find('[', hideKey);

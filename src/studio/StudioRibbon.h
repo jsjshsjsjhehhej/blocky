@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Ribbon a schede: barra tab in alto, sotto i comandi raggruppati con
- * l'etichetta del gruppo in fondo e un separatore verticale fra i gruppi.
- *
- * I bottoni sono InvisibleButton disegnati a mano: serve icona sopra ed
- * etichetta sotto nello stesso controllo, cosa che ImGui::Button non fa.
- */
 
 #include <imgui.h>
 #include <cstring>
@@ -24,7 +17,6 @@ constexpr float kBigButtonH = 62.f;
 constexpr float kSmallButtonW = 108.f;
 constexpr float kSmallButtonH = 18.f;
 
-/** Barra delle schede. Ritorna true se la scheda attiva è cambiata. */
 inline bool ribbonTabs(const char* const* names, int count, int& current) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 start = ImGui::GetCursorScreenPos();
@@ -49,7 +41,6 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
         const bool active = (i == current);
         if (active) {
             dl->AddRectFilled(min, max, IM_COL32(42, 48, 58, 255));
-            // Linea di accento sotto la scheda attiva.
             dl->AddRectFilled({min.x, max.y - 2.5f}, max, IM_COL32(64, 156, 255, 255));
         } else if (hovered) {
             dl->AddRectFilled(min, max, IM_COL32(36, 41, 50, 255));
@@ -75,7 +66,6 @@ inline void ribbonBeginGroup() {
     ImGui::Dummy({0.f, 4.f});
 }
 
-/** Chiude il gruppo, scrive l'etichetta centrata e tira il separatore. */
 inline void ribbonEndGroup(const char* label) {
     ImGui::EndGroup();
 
@@ -83,9 +73,6 @@ inline void ribbonEndGroup(const char* label) {
     const ImVec2 max = ImGui::GetItemRectMax();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Etichetta ancorata al fondo della ribbon, non al rettangolo del gruppo:
-    // i bottoni chiudono con SameLine, quindi qualsiasi spazio riservato dopo
-    // di loro finirebbe sulla stessa riga e il testo coprirebbe le icone.
     const float labelY = ImGui::GetWindowPos().y + kRibbonHeight - 18.f;
     const float textW = ImGui::CalcTextSize(label).x;
     dl->AddText({min.x + (max.x - min.x - textW) * 0.5f, labelY},
@@ -147,11 +134,6 @@ inline bool ribbonSmallButton(const char* id, Icon icon, const char* label,
     return pressed && enabled;
 }
 
-/**
- * Tre bottoni piccoli impilati devono stare nell'altezza di uno grande: con la
- * spaziatura normale la terza riga sfonderebbe sotto la ribbon e finirebbe
- * sopra l'etichetta del gruppo.
- */
 inline void ribbonBeginStack() {
     ImGui::BeginGroup();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.f, 2.f));
@@ -163,4 +145,4 @@ inline void ribbonEndStack() {
     ImGui::SameLine(0.f, 3.f);
 }
 
-} // namespace studio
+}

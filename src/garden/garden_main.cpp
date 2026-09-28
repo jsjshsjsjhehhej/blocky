@@ -1,12 +1,3 @@
-// GardenGame - prototipo stile "Grow a Garden" in OpenGL
-// Menu → Loading animato → Mondo 3D con player cartoony + shop
-//
-// Controlli (Playing):
-//   WASD     muovi il personaggio
-//   E        pianta / raccogli sul plot piu' vicino
-//   B        apri/chiudi shop
-//   1 / 2    compra item nello shop
-//   ESC      esci (Menu: avvia gioco)
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -38,7 +29,7 @@ struct Part {
     glm::vec3 color;
 };
 
-static constexpr float kStudTile = 4.f; // texture 4x4 stud
+static constexpr float kStudTile = 4.f;
 
 #ifndef GARDEN_GLES
 static const char* kGardenVS = kPartVS;
@@ -236,7 +227,6 @@ static void drawWorld3D(GLuint cubeVAO, GLuint partProg,
         }
     }
 
-    // Recinto decorativo stile Grow a Garden
     for (int i = -1; i <= 1; i += 2) {
         drawCube(partProg, cubeVAO,
                  glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(i * 28.0f, 1.5f, 0)), glm::vec3(1, 3, 56)),
@@ -270,7 +260,6 @@ static void drawLoadingUi(GLuint uiProg, GLuint uiVao, float sw, float sh, float
     drawUiRect(uiProg, uiVao, barX, barY, barW, sh * 0.03f, glm::vec4(0.25f, 0.25f, 0.3f, 1.0f), sw, sh);
     drawUiRect(uiProg, uiVao, barX, barY, barW * progress, sh * 0.03f,
                glm::vec4(0.3f, 0.85f, 0.45f, 1.0f), sw, sh);
-    // "Spinner" semplice
     float spin = progress * 6.283f;
     drawUiRect(uiProg, uiVao, sw * 0.48f + cosf(spin) * 40.0f, sh * 0.35f + sinf(spin) * 40.0f,
                24, 24, glm::vec4(0.95f, 0.75f, 0.2f, 1.0f), sw, sh);
@@ -289,13 +278,11 @@ static void drawShopUi(GLuint uiProg, GLuint uiVao, float sw, float sh,
                    glm::vec4(0.15f, 0.18f, 0.22f, 1.0f), sw, sh);
         drawUiRect(uiProg, uiVao, sw * 0.22f, y + sh * 0.02f, sh * 0.06f, sh * 0.06f,
                    glm::vec4(shop[i].previewColor, 1.0f), sw, sh);
-        // Indicatore tasto 1/2
         drawUiRect(uiProg, uiVao, sw * 0.72f, y + sh * 0.025f, sh * 0.05f, sh * 0.05f,
                    glm::vec4(0.3f, 0.8f, 0.4f, 1.0f), sw, sh);
         y += sh * 0.12f;
     }
 
-    // Barra monete
     drawUiRect(uiProg, uiVao, sw * 0.2f, sh * 0.78f, sw * 0.25f, sh * 0.05f,
                glm::vec4(0.85f, 0.65f, 0.1f, 1.0f), sw, sh);
 }
@@ -416,7 +403,6 @@ int main() {
                 player.yawDeg = glm::degrees(atan2f(move.z, move.x));
             }
 
-            // Limiti recinto
             player.position.x = glm::clamp(player.position.x, -26.0f, 26.0f);
             player.position.z = glm::clamp(player.position.z, -26.0f, 26.0f);
 

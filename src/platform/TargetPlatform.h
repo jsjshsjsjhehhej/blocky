@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Blocky — target di piattaforma.
- * Un solo codebase C++; le ottimizzazioni cambiano per profilo.
- *
- * Build:
- *   -DROBLOX_TARGET=PC|MOBILE|IOS|PS5|AUTO
- */
 
 #include <cstdint>
 #include <string>
@@ -20,11 +13,11 @@ enum class TargetPlatform : uint8_t {
 };
 
 enum class GfxApi : uint8_t {
-    OpenGL33 = 0, // PC desktop fallback
-    Vulkan,       // PC high-end
-    OpenGLES,     // Android / mobile
-    Metal,        // iOS / macOS (stub fino a toolchain Apple)
-    AgcPs5,       // PS5 GNM/AGC (richiede SDK Sony)
+    OpenGL33 = 0,
+    Vulkan,
+    OpenGLES,
+    Metal,
+    AgcPs5,
     Auto
 };
 
@@ -49,7 +42,6 @@ inline const char* gfxApiName(GfxApi a) {
     }
 }
 
-/** Rileva piattaforma di build (compile-time + override CMake). */
 inline TargetPlatform detectTargetPlatform() {
 #if defined(ROBLOX_TARGET_PS5)
     return TargetPlatform::PlayStation5;
@@ -66,11 +58,10 @@ inline TargetPlatform detectTargetPlatform() {
 #elif defined(_WIN32) || defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
     return TargetPlatform::PC;
 #else
-    return TargetPlatform::PC; // mai "Unknown" in UI
+    return TargetPlatform::PC;
 #endif
 }
 
-/** API grafica consigliata per la piattaforma. */
 inline GfxApi recommendedGfxApi(TargetPlatform p) {
     switch (p) {
     case TargetPlatform::PC:

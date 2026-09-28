@@ -1,9 +1,5 @@
 #pragma once
 
-/**
- * Ragdoll R6 — alla morte i cubi del player cadono con fisica leggera.
- * Niente engine fisico pieno: gravity + bounce + soft-link al torso.
- */
 
 #include "Humanoid.h"
 
@@ -19,8 +15,8 @@ struct RagdollPart {
     std::string name;
     glm::vec3 pos{0};
     glm::vec3 vel{0};
-    glm::vec3 angVel{0}; // rad/s
-    glm::vec3 euler{0};  // gradi
+    glm::vec3 angVel{0};
+    glm::vec3 euler{0};
     glm::vec3 size{1};
     glm::vec3 color{1};
 };
@@ -118,7 +114,6 @@ struct Ragdoll {
             p.euler += glm::degrees(p.angVel) * dt;
             p.angVel *= angDamp;
 
-            // Soft-link: arti restano vicini al torso (effetto floppy, non esplosione)
             if (p.name != "Torso") {
                 float maxDist = (p.name == "Head") ? 2.4f : 3.8f;
                 glm::vec3 d = torso - p.pos;
@@ -139,12 +134,10 @@ struct Ragdoll {
                 p.vel.x *= 0.72f;
                 p.vel.z *= 0.72f;
                 p.angVel *= 0.55f;
-                // Si adagia a terra
                 p.euler.x = glm::mix(p.euler.x, (p.euler.x > 0.f ? 90.f : -90.f), 0.08f);
             }
         }
 
-        // Aggiorna riferimento torso dopo il passo
         if (torsoIdx >= 0 && torsoIdx < (int)parts.size())
             torso = parts[(size_t)torsoIdx].pos;
     }

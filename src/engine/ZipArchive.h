@@ -1,19 +1,15 @@
 #pragma once
 
-/**
- * Estrazione/creazione ZIP, sopra la libreria kuba--/zip già vendorizzata
- * dentro il sorgente di assimp (contrib/zip, pinnato alla v5.4.3 in
- * CMakeLists.txt). Non è una scelta definitiva: è quella che non aggiunge
- * una dipendenza nuova stanotte. Se un domani assimp toglie quel contrib,
- * questo è l'unico file da aggiornare — il resto del motore non sa che
- * libreria c'è sotto.
- */
 
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
-#include "zip.h"   // contrib/zip/src/zip.h, aggiunto all'include path dal CMake
+#include "zip.h"
 
 namespace ZipArchive {
 
@@ -23,7 +19,6 @@ struct ExtractResult {
     std::string error;
 };
 
-/** Estrae `zipPath` dentro `destDir` (già esistente). */
 inline ExtractResult extract(const std::string& zipPath, const std::string& destDir) {
     ExtractResult r;
 
@@ -43,16 +38,6 @@ inline ExtractResult extract(const std::string& zipPath, const std::string& dest
     return r;
 }
 
-/**
- * Estrae direttamente da un buffer in memoria: evita di dover scrivere il
- * .zip su disco solo per poi rileggerlo.
- *
- * zip_stream_extract passa da zip_archive_extract, la stessa routine di
- * zip_extract: ogni nome viene normalizzato scartando i segmenti "." e
- * ".." prima di essere concatenato a destDir (zip_name_normalize in
- * zip.c). Zip-slip è quindi bloccato dentro la libreria, non da un
- * controllo mio che potrei aver scritto male.
- */
 inline ExtractResult extractFromMemory(const std::vector<std::uint8_t>& bytes,
                                        const std::string& destDir) {
     ExtractResult r;
@@ -78,4 +63,78 @@ inline ExtractResult extractFromMemory(const std::vector<std::uint8_t>& bytes,
     return r;
 }
 
-} // namespace ZipArchive
+
+/**
+ * Impacchetta una cartella in un archivio zip tenuto in memoria.
+ *
+ * Serve per mandare un gioco appena pubblicato al server: blocky_hostd accetta
+ * "PUT /publish/<id>" con un archivio nel corpo della richiesta, ma finora qui
+ * c'era solo il lato che ESTRAE — un gioco si poteva ricevere, non spedire.
+ *
+ * In memoria e non su file perche' l'archivio serve solo il tempo di una
+ * richiesta HTTP: scriverlo su disco vorrebbe dire inventare un percorso
+ * temporaneo e poi ricordarsi di cancellarlo.
+ *
+ * I percorsi dentro l'archivio sono relativi alla cartella di partenza e usano
+ * sempre "/", come vuole il formato zip anche quando lo si crea su Windows.
+ */
+inline bool createFromFolder(const std::string& folder, std::vector<std::uint8_t>& out,
+                             std::string& error) {
+    namespace fs = std::filesystem;
+    out.clear();
+    error.clear();
+
+    std::error_code ec;
+    if (!fs::is_directory(folder, ec)) {
+        error = "non e' una cartella: " + folder;
+        return false;
+    }
+
+    zip_t* zip = zip_stream_open(nullptr, 0, ZIP_DEFAULT_COMPRESSION_LEVEL, 'w');
+    if (!zip) {
+        error = "impossibile creare l'archivio in memoria";
+        return false;
+    }
+
+    int written = 0;
+    const fs::path base(folder);
+    for (const auto& entry : fs::recursive_directory_iterator(folder, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+
+        std::string rel = fs::relative(entry.path(), base, ec).generic_string();
+        if (ec || rel.empty() || rel.rfind("..", 0) == 0) continue;
+
+        std::ifstream f(entry.path(), std::ios::binary);
+        if (!f) continue;
+        const std::string bytes((std::istreambuf_iterator<char>(f)),
+                                 std::istreambuf_iterator<char>());
+
+        if (zip_entry_open(zip, rel.c_str()) != 0) continue;
+        const bool ok = zip_entry_write(zip, bytes.data(), bytes.size()) == 0;
+        zip_entry_close(zip);
+        if (ok) ++written;
+    }
+
+    if (written == 0) {
+        zip_stream_close(zip);
+        error = "nessun file da inviare in " + folder;
+        return false;
+    }
+
+    void* buf = nullptr;
+    size_t size = 0;
+    const ssize_t n = zip_stream_copy(zip, &buf, &size);
+    zip_stream_close(zip);
+    if (n < 0 || !buf || size == 0) {
+        if (buf) std::free(buf);
+        error = "lettura dell'archivio fallita";
+        return false;
+    }
+
+    out.assign(static_cast<std::uint8_t*>(buf), static_cast<std::uint8_t*>(buf) + size);
+    std::free(buf);
+    return true;
+}
+
+}  // namespace ZipArchive

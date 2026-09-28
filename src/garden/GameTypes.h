@@ -27,7 +27,7 @@ struct ShopItem {
 struct Plot {
     glm::vec3 center;
     PlantType type = PlantType::None;
-    float growth = 0.0f; // 0..1, 1 = pronto al raccolto
+    float growth = 0.0f;
 };
 
 struct Player {

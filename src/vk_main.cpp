@@ -1,4 +1,3 @@
-// RobloxEngine — PC Vulkan: stud texture sulle facce superiori
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -23,7 +22,7 @@
 #include "stb_image.h"
 #include "render/WindowIcon.h"
 
-static constexpr float kStudTile = 4.f; // texture 4x4 stud
+static constexpr float kStudTile = 4.f;
 static int g_w = 1280, g_h = 720;
 
 struct Camera {
@@ -629,7 +628,6 @@ int main() {
     VkImage depthImg{}; VkDeviceMemory depthMem{}; VkImageView depthView{};
     createDepth(ctx, depthFmt, depthImg, depthMem, depthView);
 
-    // Ricrea render pass con depth
     vkDestroyRenderPass(ctx.device, ctx.renderPass, nullptr);
     VkAttachmentDescription atts[2]{};
     atts[0].format = ctx.scFmt; atts[0].samples = VK_SAMPLE_COUNT_1_BIT;

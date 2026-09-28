@@ -1,19 +1,5 @@
 #pragma once
 
-/**
- * Player Animation R6 — un solo formato per walk / jump / idle / emote / tool.
- *
- * File: %APPDATA%/Blocky/anims/<id>.r6anim.json  (legacy: .walk.json)
- * Schema BlockyPlayerAnim v2:
- *   kind: walk|jump|idle|emote|tool
- *   timeMode: phase (t 0..1) | seconds (t in secondi, tipico jump)
- *   keys: [{t, la, ra, ll, rl}]  // rotX gradi
- *
- * Workflow Blender:
- *  1. Anima R6 (Left/Right Arm/Leg)
- *  2. Esporta GLB/FBX → Avatar Catalog → importa → assegna kind → Rilascia
- *  3. Script: game.Animator:SetWalkAnim("Id") / SetJumpAnim("Id") / Play("Id")
- */
 
 #include "GameHub.h"
 #include "Humanoid.h"
@@ -39,14 +25,13 @@
 #endif
 
 struct R6WalkKey {
-    float t = 0.f; // 0..1 sul ciclo (phase) OPPURE secondi se timeMode=seconds
+    float t = 0.f;
     float leftArm = 0.f;
     float rightArm = 0.f;
     float leftLeg = 0.f;
     float rightLeg = 0.f;
 };
 
-/** kind: walk | jump | idle | emote | tool — un solo file per tutte le anim player. */
 enum class R6AnimKind : int {
     Walk = 0,
     Jump,
@@ -76,14 +61,13 @@ inline R6AnimKind r6AnimKindFromName(std::string s) {
 }
 
 struct R6WalkClip {
-    std::string id;            // slug file
-    std::string clipName;      // es. WalkingAnimation (nome Blender)
-    std::string displayName;   // nome rilasciato (scelto dall'utente)
-    std::string sourcePath;    // FBX/GLB originale (solo path corto)
-    float duration = 1.f;      // secondi
+    std::string id;
+    std::string clipName;
+    std::string displayName;
+    std::string sourcePath;
+    float duration = 1.f;
     bool looped = true;
     R6AnimKind kind = R6AnimKind::Walk;
-    /** false = t in 0..1 (walk); true = t in secondi (jump). */
     bool timeInSeconds = false;
     std::vector<R6WalkKey> keys;
     bool valid() const { return keys.size() >= 2; }
@@ -114,11 +98,8 @@ inline std::string r6NormName(std::string s) {
 
 inline int r6LimbFromBoneName(const std::string& name) {
     std::string n = r6NormName(name);
-    // 0=LA 1=RA 2=LL 3=RL  -1=no
-    // Accetta: Left Arm, Left_Arm, LeftArm, mixamorigRightArm, UpperArmL, ArmL, ...
     auto has = [&](const char* a) { return n.find(a) != std::string::npos; };
 
-    // Ordine: match espliciti left/right prima
     if (has("leftarm") || has("leftupperarm") || has("upperarml") || has("arml")
         || has("shoulderl") || n == "la")
         return 0;
@@ -132,8 +113,6 @@ inline int r6LimbFromBoneName(const std::string& name) {
         || has("legr") || has("thighr") || n == "rl")
         return 3;
 
-    // Fallback Blender: "Arm.R" → armt? no → "armr" già sopra. "HandR" no.
-    // Solo "arm" + suffisso L/R senza left/right nel nome
     if (has("arm") && !has("leg") && !has("farm")) {
         if (!has("right") && (n.size() >= 4 && (n.back() == 'l' || has("left"))))
             return 0;
@@ -143,13 +122,10 @@ inline int r6LimbFromBoneName(const std::string& name) {
     return -1;
 }
 
-/** Quaternion → rotazione X in gradi (swing arti R6). */
 inline float r6QuatToRotXDeg(const aiQuaternion& q) {
     glm::quat gq(q.w, q.x, q.y, q.z);
-    // Euler XYZ: interessa pitch (X) per swing avanti/indietro
     glm::vec3 e = glm::eulerAngles(gq);
     float deg = glm::degrees(e.x);
-    // Clamp soft
     if (deg > 180.f) deg -= 360.f;
     if (deg < -180.f) deg += 360.f;
     return deg;
@@ -157,11 +133,6 @@ inline float r6QuatToRotXDeg(const aiQuaternion& q) {
 
 inline float r6Lerp(float a, float b, float t) { return a + (b - a) * t; }
 
-/**
- * Sample clip.
- * - timeInSeconds=false: phase01 in 0..1 (walk loop)
- * - timeInSeconds=true:  timeSec in secondi (jump timeline)
- */
 inline R6WalkKey r6SampleClip(const R6WalkClip& clip, float phaseOrSec) {
     R6WalkKey out{};
     if (!clip.valid()) return out;
@@ -183,7 +154,7 @@ inline R6WalkKey r6SampleClip(const R6WalkClip& clip, float phaseOrSec) {
             float span = keys[i + 1].t - keys[i].t;
             float u = span > 1e-6f ? (t - keys[i].t) / span : 0.f;
             if (clip.timeInSeconds)
-                u = u * u * (3.f - 2.f * u); // smoothstep jump
+                u = u * u * (3.f - 2.f * u);
             out.t = t;
             out.leftArm = r6Lerp(keys[i].leftArm, keys[i + 1].leftArm, u);
             out.rightArm = r6Lerp(keys[i].rightArm, keys[i + 1].rightArm, u);
@@ -205,13 +176,11 @@ inline void r6ApplyKeyToHumanoid(Humanoid& h, const R6WalkKey& k, float w = 1.f)
     }
 }
 
-/** Pack R6 — sine fluido (meno robotico), leggero punch agli estremi. */
 inline float r6PackWalkSharp(float sinVal) {
     float a = std::fabs(sinVal);
     return std::copysign(std::pow(a, 0.94f), sinVal);
 }
 
-/** Clip walk R6 — gambe ±48°, braccia ±68°, ciclo fluido ~0.56s. */
 inline R6WalkClip r6MakeClassicWalkClip() {
     R6WalkClip c;
     c.id = "classic_walk";
@@ -225,7 +194,6 @@ inline R6WalkClip r6MakeClassicWalkClip() {
         float t = i / 24.f;
         float ph = t * 6.2831853f;
         float leg = r6PackWalkSharp(std::sin(ph)) * 48.f;
-        // braccia un filo in ritardo = meno meccanico
         float arm = r6PackWalkSharp(std::sin(ph + 0.18f)) * 68.f;
         R6WalkKey k;
         k.t = t;
@@ -238,22 +206,17 @@ inline R6WalkClip r6MakeClassicWalkClip() {
     return c;
 }
 
-/**
- * Jump pack R6 (video + anim ufficiale): braccia SU + gambe a split in aria.
- */
 inline const float* r6PackJumpKeys(int& outCount) {
-    // t, LA, RA, LL, RL  (rotX°; negativo = braccio su)
-    // Gambe quasi ferme (stile R6 classico: solo braccia su)
     static const float k[][5] = {
-        { 0.00f,   -8.f,  -12.f,    6.f,   -4.f }, // crouch leggero
-        { 0.05f,  -55.f,  -70.f,    4.f,   -2.f }, // launch
-        { 0.11f, -125.f, -145.f,    2.f,   -2.f }, // rise
-        { 0.18f, -168.f, -178.f,    0.f,    0.f }, // quasi peak
-        { 0.26f, -180.f, -180.f,    0.f,    0.f }, // peak braccia dritte
-        { 0.36f, -165.f, -160.f,    0.f,    0.f }, // hold
-        { 0.48f, -105.f,  -98.f,    2.f,   -2.f }, // fall start
-        { 0.60f,  -52.f,  -45.f,    2.f,   -2.f }, // fall
-        { 0.75f,  -22.f,  -18.f,    2.f,   -2.f }, // pre-land
+        { 0.00f,   -8.f,  -12.f,    6.f,   -4.f },
+        { 0.05f,  -55.f,  -70.f,    4.f,   -2.f },
+        { 0.11f, -125.f, -145.f,    2.f,   -2.f },
+        { 0.18f, -168.f, -178.f,    0.f,    0.f },
+        { 0.26f, -180.f, -180.f,    0.f,    0.f },
+        { 0.36f, -165.f, -160.f,    0.f,    0.f },
+        { 0.48f, -105.f,  -98.f,    2.f,   -2.f },
+        { 0.60f,  -52.f,  -45.f,    2.f,   -2.f },
+        { 0.75f,  -22.f,  -18.f,    2.f,   -2.f },
         { 0.92f,   -8.f,   -8.f,    0.f,    0.f },
     };
     outCount = 10;
@@ -284,12 +247,6 @@ inline R6WalkClip r6MakeClassicJumpClip() {
     return c;
 }
 
-/**
- * Importa da FBX/GLB/GLTF (Blender / Maya / ecc.).
- * preferredClip: nome Action/clip (es. WalkingAnimation, Shoot, FancyWalk).
- * Se vuoto: preferisce WalkingAnimation, poi "walk", poi la prima.
- * Ritorna anche la lista nomi clip trovate in outClipNames (opzionale).
- */
 inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::string& err,
                                  const std::string& preferredClip = {},
                                  std::vector<std::string>* outClipNames = nullptr) {
@@ -346,7 +303,6 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
     float durTicks = (float)anim->mDuration;
     float durSec = std::max(0.1f, durTicks / tps);
 
-    // Canali arti
     const aiNodeAnim* ch[4] = { nullptr, nullptr, nullptr, nullptr };
     std::vector<std::string> channelNames;
     channelNames.reserve(anim->mNumChannels);
@@ -359,7 +315,6 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
     }
     int mapped = (ch[0] ? 1 : 0) + (ch[1] ? 1 : 0) + (ch[2] ? 1 : 0) + (ch[3] ? 1 : 0);
 
-    // Pistola / shoot: spesso anima solo 1 braccio — ok
     std::string clipLow = chosenName;
     for (char& c : clipLow)
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
@@ -371,7 +326,6 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
         || clipLow.find("aim") != std::string::npos
         || clipLow.find("reload") != std::string::npos;
 
-    // Se zero arti ma c'è 1 canale con rotazioni → assegna a Right Arm (tipico sparo)
     if (mapped == 0 && anim->mNumChannels >= 1) {
         const aiNodeAnim* best = nullptr;
         unsigned bestKeys = 0;
@@ -383,7 +337,7 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
             }
         }
         if (best && bestKeys > 0) {
-            ch[1] = best; // Right Arm
+            ch[1] = best;
             mapped = 1;
         }
     }
@@ -400,14 +354,12 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
               "Left Arm, Left Leg, Right Leg. Canali nel file: " + list;
         return false;
     }
-    // Walk meglio con >=2, ma 1 arto (pistola) e' accettato
     (void)shootLike;
 
     auto sampleLimb = [](const aiNodeAnim* node, float tick) -> float {
         if (!node || node->mNumRotationKeys == 0) return 0.f;
         if (node->mNumRotationKeys == 1)
             return r6QuatToRotXDeg(node->mRotationKeys[0].mValue);
-        // Trova chiave
         unsigned i = 0;
         while (i + 1 < node->mNumRotationKeys
                && (float)node->mRotationKeys[i + 1].mTime < tick)
@@ -429,9 +381,8 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
     out.displayName = chosenName;
     out.sourcePath = path;
     out.duration = durSec;
-    out.looped = !shootLike; // walk/run loop; shoot/pistol one-shot
+    out.looped = !shootLike;
     if (mapped == 1 && !shootLike) {
-        // Un solo arto senza nome shoot → comunque one-shot (es. wave/fire)
         std::string idHint = path;
         for (char& c : idHint)
             if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
@@ -455,7 +406,6 @@ inline bool r6ImportWalkFromFile(const std::string& path, R6WalkClip& out, std::
         out.keys.push_back(k);
     }
 
-    // id da nome file
     auto slash = path.find_last_of("\\/");
     std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
     auto dot = base.find_last_of('.');
@@ -476,14 +426,6 @@ inline std::string r6Escape(const std::string& s) {
     return o;
 }
 
-/**
- * Inverso di r6Escape.
- *
- * Serve perche' jsonFindStr restituisce la stringa GREZZA: senza questo, un
- * path Windows salvato come "C:\\Users" torna dentro con due backslash, al
- * salvataggio successivo diventa quattro, poi otto. Un file di clip qui e'
- * arrivato a 2^28 backslash (256 MB) in 28 cicli salva/rileggi.
- */
 inline std::string r6Unescape(const std::string& s) {
     std::string o;
     o.reserve(s.size());
@@ -492,7 +434,7 @@ inline std::string r6Unescape(const std::string& s) {
         char n = s[++i];
         if (n == 'n') o.push_back('\n');
         else if (n == 't') o.push_back('\t');
-        else o.push_back(n);          // \\ -> \   e   \" -> "
+        else o.push_back(n);
     }
     return o;
 }
@@ -501,7 +443,6 @@ inline std::string r6ClipFilePath(const std::string& id) {
     return r6AnimsDir() + "/" + id + ".r6anim.json";
 }
 
-/** sourcePath solo se path corto (evita JSON da 100MB se qualcuno ci mette binari). */
 inline std::string r6SafeSourcePath(const std::string& p) {
     if (p.size() > 400) return {};
     return p;
@@ -546,8 +487,6 @@ inline bool r6LoadClipFile(const std::string& path, R6WalkClip& out) {
     std::string json = readTextFile(path);
     if (json.empty()) return false;
     out = R6WalkClip{};
-    // Sempre r6Unescape sui campi stringa: senza, i backslash raddoppiano a
-    // ogni ciclo salva/rileggi (vedi r6Unescape).
     out.id = r6Unescape(jsonFindStr(json, "id"));
     out.clipName = r6Unescape(jsonFindStr(json, "clipName"));
     out.displayName = r6Unescape(jsonFindStr(json, "displayName"));
@@ -561,7 +500,6 @@ inline bool r6LoadClipFile(const std::string& path, R6WalkClip& out) {
     if (!kindStr.empty())
         out.kind = r6AnimKindFromName(kindStr);
     else {
-        // legacy BlockyWalkAnim / infer da nome
         std::string hint = out.id + " " + out.clipName + " " + out.displayName;
         out.kind = r6AnimKindFromName(hint);
     }

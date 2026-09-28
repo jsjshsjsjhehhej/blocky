@@ -1,37 +1,8 @@
 #pragma once
 
-/**
- * Pacchetti animazione R6, stile Roblox.
- *
- * L'unita' che il giocatore equipaggia non e' una clip singola ma un set di
- * ruoli (Idle/Walk/Run/Jump/Fall/Climb/Sit). Un pacchetto riempie i ruoli che
- * vuole e lascia vuoti gli altri: quelli ricadono sui default della libreria.
- *
- * Tre invarianti, e sono il motivo per cui questo file esiste separato dal
- * wizard accessori:
- *
- *   1. Pubblicare NON cambia mai i default globali. Nessuna chiamata a
- *      setDefaultWalk/setDefaultJump da qui. Importare una pistola non puo'
- *      piu' diventare la tua camminata.
- *   2. Un'animazione da tool vale solo mentre il tool e' in mano
- *      (setToolOverride / clearToolOverride) e non viene mai salvata.
- *   3. Si memorizzano solo AnimationId, mai path. Gli id passano da
- *      sanitizeGameId (solo [a-z0-9_]), quindi da qui non si costruiscono
- *      path e non si esce dalla cartella dati.
- *
- * Uso tipico:
- *      AnimPackDraft d;
- *      d.displayName = "Fancy Moves";
- *      d.clipId[(int)AnimRole::Walk] = "FancyWalk";
- *      std::string err;
- *      if (!animPacks().publish(d, err)) showError(err);
- *
- *      animPacks().equip("fancy_moves");
- *      const R6WalkClip* c = animPacks().clipFor(AnimRole::Walk);
- */
 
 #include "../engine/AnimLibrary.h"
-#include "../engine/Animator.h"   // looksLikeToolAnim: euristica sul nome, non solo sul kind
+#include "../engine/Animator.h"
 
 #include <algorithm>
 #include <map>
@@ -49,7 +20,6 @@ enum class AnimRole : int {
     Count
 };
 
-/** Chiave stabile su disco: non tradurla mai. */
 inline const char* animRoleKey(AnimRole r) {
     switch (r) {
     case AnimRole::Idle: return "idle";
@@ -63,7 +33,6 @@ inline const char* animRoleKey(AnimRole r) {
     }
 }
 
-/** Etichetta da mostrare nella UI. */
 inline const char* animRoleLabel(AnimRole r) {
     switch (r) {
     case AnimRole::Idle: return "Fermo";
@@ -77,22 +46,20 @@ inline const char* animRoleLabel(AnimRole r) {
     }
 }
 
-/** Ruoli di locomozione: qui una clip di tipo Tool non entra mai. */
 inline bool animRoleIsLocomotion(AnimRole r) {
     return r == AnimRole::Walk || r == AnimRole::Run || r == AnimRole::Jump
         || r == AnimRole::Fall || r == AnimRole::Climb;
 }
 
-/** Tetti volutamente bassi: il file indice resta leggibile e limitato. */
 static const size_t kAnimPackMaxPacks = 256;
 static const size_t kAnimPackMaxNameLen = 64;
 
 struct AnimPack {
-    std::string id;                              // slug, da sanitizeGameId
+    std::string id;
     std::string displayName;
     std::string author;
-    std::string clipId[(int)AnimRole::Count];    // vuoto = eredita dai default
-    bool builtin = false;                        // non cancellabile/sovrascrivibile
+    std::string clipId[(int)AnimRole::Count];
+    bool builtin = false;
 
     int filledRoles() const {
         int n = 0;
@@ -103,7 +70,6 @@ struct AnimPack {
     bool valid() const { return !id.empty() && filledRoles() > 0; }
 };
 
-/** Quello che la UI riempie prima di pubblicare. */
 struct AnimPackDraft {
     std::string displayName;
     std::string author;
@@ -121,11 +87,9 @@ struct AnimPackLibrary {
     std::map<std::string, AnimPack> byId;
     std::string equippedId;
 
-    // Override temporaneo del tool: vive in RAM, non finisce mai su disco.
     std::string toolClipId;
     AnimRole toolRole = AnimRole::Idle;
 
-    // ---- lettura ------------------------------------------------------
 
     const AnimPack* get(const std::string& id) const {
         auto it = byId.find(id);
@@ -140,16 +104,12 @@ struct AnimPackLibrary {
         std::vector<const AnimPack*> out;
         for (const auto& kv : byId) out.push_back(&kv.second);
         std::sort(out.begin(), out.end(), [](const AnimPack* a, const AnimPack* b) {
-            if (a->builtin != b->builtin) return a->builtin > b->builtin; // builtin in cima
+            if (a->builtin != b->builtin) return a->builtin > b->builtin;
             return a->displayName < b->displayName;
         });
         return out;
     }
 
-    /**
-     * La regola di conflitto, in un posto solo.
-     * tool in mano -> pacchetto equipaggiato -> default libreria -> pack R6.
-     */
     const R6WalkClip* clipFor(AnimRole role) const {
         if (!toolClipId.empty() && role == toolRole) {
             if (const R6WalkClip* c = animLibrary().resolve(toolClipId)) return c;
@@ -172,7 +132,6 @@ struct AnimPackLibrary {
         return nullptr;
     }
 
-    // ---- tool (transitorio) -------------------------------------------
 
     void setToolOverride(const std::string& clipId, AnimRole role = AnimRole::Idle) {
         toolClipId = animLibrary().resolve(clipId) ? clipId : std::string();
@@ -180,12 +139,7 @@ struct AnimPackLibrary {
     }
     void clearToolOverride() { toolClipId.clear(); }
 
-    // ---- scrittura ----------------------------------------------------
 
-    /**
-     * Valida e registra un pacchetto. Non tocca mai i default globali.
-     * Ritorna false con `err` leggibile: la UI lo mostra e basta.
-     */
     bool publish(const AnimPackDraft& draft, std::string& err, std::string* outId = nullptr) {
         std::string name = animTrim(draft.displayName);
         if (name.empty()) { err = "Dai un nome al pacchetto."; return false; }
@@ -221,16 +175,12 @@ struct AnimPackLibrary {
                     + animRoleLabel((AnimRole)i) + ".";
                 return false;
             }
-            // Invariante 1: una clip da tool non puo' diventare locomozione.
-            // Non basta il kind: una clip importata da Blender arriva quasi sempre
-            // marcata "walk" anche se e' una posa da pistola. looksLikeToolAnim
-            // guarda anche id/displayName/clipName.
             if (animRoleIsLocomotion((AnimRole)i) && Animator::looksLikeToolAnim(*c)) {
                 err = std::string("\"") + c->displayName + "\" sembra un'animazione da tool: "
                     + "non puo' fare da " + animRoleLabel((AnimRole)i) + ".";
                 return false;
             }
-            p.clipId[i] = c->id;   // sempre l'id canonico, mai quello digitato
+            p.clipId[i] = c->id;
         }
 
         if (p.filledRoles() == 0) {
@@ -266,7 +216,6 @@ struct AnimPackLibrary {
         return true;
     }
 
-    // ---- persistenza ---------------------------------------------------
 
     static std::string indexPath() { return blockyDataDir() + "/anim_packs.json"; }
 
@@ -277,7 +226,7 @@ struct AnimPackLibrary {
         bool first = true;
         for (const auto& kv : byId) {
             const AnimPack& p = kv.second;
-            if (p.builtin) continue;            // i builtin si riseminano da soli
+            if (p.builtin) continue;
             if (!first) j << ",\n";
             first = false;
             j << "    {\"packId\":\"" << r6Escape(p.id)
@@ -311,7 +260,6 @@ struct AnimPackLibrary {
                 for (int i = 0; i < (int)AnimRole::Count; ++i) {
                     std::string key = std::string("role_") + animRoleKey((AnimRole)i);
                     std::string clip = jsonFindStr(json, key, pos);
-                    // Rileggere valida di nuovo: un file editato a mano non passa.
                     if (!clip.empty() && animLibrary().resolve(clip))
                         p.clipId[i] = sanitizeGameId(clip);
                 }
@@ -325,7 +273,6 @@ struct AnimPackLibrary {
         return !byId.empty();
     }
 
-    /** Pacchetto "Classic" sempre presente, non cancellabile. */
     void seedBuiltin() {
         AnimPack p;
         p.id = "classic";

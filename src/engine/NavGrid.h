@@ -1,20 +1,5 @@
 #pragma once
 
-/**
- * Navigazione su griglia per gli NPC.
- *
- * Il mondo viene proiettato su una griglia 2D: ogni cella è libera o occupata
- * a seconda che ci passi dentro l'ingombro di una Part o di un modello che
- * collide. Poi un A* trova la strada e la semplifica in pochi waypoint.
- *
- * Perché una griglia e non una navmesh: le scene di Blocky sono fatte di
- * scatole allineate, e per quelle una griglia dà lo stesso risultato con un
- * decimo del codice. Una navmesh servirebbe con terreno inclinato, che qui
- * non c'è.
- *
- * Limite dichiarato: è piatta. Un NPC non sa che esiste un piano di sopra —
- * per le scale servirebbero più livelli, ed è un'estensione, non una riscrittura.
- */
 
 #include <algorithm>
 #include <cmath>
@@ -28,21 +13,14 @@
 
 class NavGrid {
 public:
-    /** Lato della cella in studs. Più piccolo = più preciso e più lento. */
     float cellSize = 2.f;
-    /** Margine attorno agli ostacoli: tiene l'NPC staccato dai muri. */
     float clearance = 1.2f;
-    /** Altezza sotto cui un ostacolo si scavalca invece di aggirarlo. */
     float stepOver = 1.5f;
 
     bool ready() const { return cols_ > 0 && rows_ > 0; }
     int cols() const { return cols_; }
     int rows() const { return rows_; }
 
-    /**
-     * Ricostruisce la griglia dal mondo.
-     * `bounds` è il semilato dell'area navigabile attorno all'origine.
-     */
     void build(const DataModel& world,
                const std::vector<glm::vec3>& modelMins,
                const std::vector<glm::vec3>& modelMaxs,
@@ -54,22 +32,16 @@ public:
 
         blocked_.assign((size_t)cols_ * rows_, 0);
 
-        // --- Part ---
         for (const WorkspacePart& p : world.parts) {
             if (!p.canCollide) continue;
             const glm::vec3 half = glm::abs(p.size) * 0.5f;
-            // Un gradino basso non è un ostacolo: bloccarlo renderebbe
-            // impraticabili le obby e i marciapiedi.
             if (p.position.y + half.y <= stepOver) continue;
 
-            // Ingombro allineato agli assi: per le Part ruotate è una
-            // sovrastima, e in navigazione conviene sbagliare per eccesso.
             const float r = std::max(half.x, half.z);
             markBox(p.position.x - r, p.position.z - r,
                     p.position.x + r, p.position.z + r);
         }
 
-        // --- Modelli che collidono ---
         const size_t n = std::min(modelMins.size(), modelMaxs.size());
         for (size_t i = 0; i < n && i < world.models.size(); ++i) {
             if (!world.models[i].canCollide) continue;
@@ -87,11 +59,6 @@ public:
         return blockedAt(cellX(x), cellZ(z));
     }
 
-    /**
-     * Percorso da `from` a `to`, semplificato.
-     * Vuoto se non esiste. Il primo punto è già il passo successivo, non la
-     * posizione di partenza: chi lo segue non deve scartare nulla.
-     */
     std::vector<glm::vec3> findPath(const glm::vec3& from, const glm::vec3& to,
                                     int maxNodes = 20000) const {
         std::vector<glm::vec3> out;
@@ -101,8 +68,6 @@ public:
         int gx = cellX(to.x), gz = cellZ(to.z);
         if (sx < 0 || sz < 0 || sx >= cols_ || sz >= rows_) return out;
 
-        // Se il bersaglio è dentro un ostacolo, punta alla cella libera più
-        // vicina: inseguire un player incastrato in un muro non deve fallire.
         if (blockedAt(gx, gz) && !nearestFree(gx, gz, 6)) return out;
 
         const size_t total = (size_t)cols_ * rows_;
@@ -112,7 +77,7 @@ public:
 
         auto idx = [&](int x, int z) { return (size_t)z * cols_ + x; };
 
-        using Node = std::pair<float, int>;   // f, indice
+        using Node = std::pair<float, int>;
         std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open;
 
         gScore[idx(sx, sz)] = 0.f;
@@ -138,8 +103,6 @@ public:
                     const int nx = cx + dx, nz = cz + dz;
                     if (blockedAt(nx, nz)) continue;
 
-                    // In diagonale servono libere anche le due ortogonali,
-                    // altrimenti l'NPC taglia gli spigoli attraversando i muri.
                     if (dx != 0 && dz != 0 &&
                         (blockedAt(cx + dx, cz) || blockedAt(cx, cz + dz))) continue;
 
@@ -163,8 +126,6 @@ public:
         for (int i = goalIndex; i >= 0; i = parent[(size_t)i]) chain.push_back(i);
         std::reverse(chain.begin(), chain.end());
 
-        // Semplificazione: tieni un punto solo quando la direzione cambia.
-        // Senza, l'NPC riceverebbe un waypoint ogni due studs.
         int lastDx = 999, lastDz = 999;
         for (size_t k = 1; k < chain.size(); ++k) {
             const int px = chain[k - 1] % cols_, pz = chain[k - 1] / cols_;
@@ -193,8 +154,6 @@ private:
     }
 
     static float heuristic(int ax, int az, int bx, int bz) {
-        // Ottagonale: coerente con i movimenti diagonali consentiti, quindi
-        // ammissibile e più informata della distanza di Manhattan.
         const float dx = (float)std::abs(ax - bx);
         const float dz = (float)std::abs(az - bz);
         return (dx + dz) + (1.41421356f - 2.f) * std::min(dx, dz);
@@ -211,12 +170,11 @@ private:
                 blocked_[(size_t)z * cols_ + x] = 1;
     }
 
-    /** Cerca a spirale la cella libera più vicina. False se non ce n'è. */
     bool nearestFree(int& cx, int& cz, int maxRing) const {
         for (int r = 1; r <= maxRing; ++r) {
             for (int dz = -r; dz <= r; ++dz) {
                 for (int dx = -r; dx <= r; ++dx) {
-                    if (std::abs(dx) != r && std::abs(dz) != r) continue;  // solo il bordo
+                    if (std::abs(dx) != r && std::abs(dz) != r) continue;
                     const int nx = cx + dx, nz = cz + dz;
                     if (!blockedAt(nx, nz)) { cx = nx; cz = nz; return true; }
                 }

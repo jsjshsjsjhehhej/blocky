@@ -1,9 +1,5 @@
 #pragma once
 
-/**
- * Crash handler + report per Blocky / Blocky Game Engine.
- * Scrive un report con motivo (exception / signal) e stack, mostra MessageBox.
- */
 
 #include <atomic>
 #include <cstdint>
@@ -11,6 +7,8 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+
+#include "platform/Platform.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -51,29 +49,22 @@ inline State& state() {
     return s;
 }
 
+/**
+ * Dove finiscono i rapporti di crash.
+ *
+ * Fuori da Windows qui c'era il percorso RELATIVO "blocky_data/crashes", che
+ * funziona solo se la cartella di lavoro e' scrivibile. Su Android e' "/", in
+ * sola lettura: il rapporto non veniva scritto e un crash non lasciava
+ * assolutamente nulla da leggere. plat::dataDir() risponde su ogni
+ * piattaforma, e su Windows restituisce lo stesso %APPDATA%\Blocky di prima,
+ * quindi i rapporti gia' salvati restano dove sono.
+ */
 inline std::string crashDir() {
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata && appdata[0]) {
-        std::string dir = std::string(appdata) + "\\Blocky";
-        _mkdir(dir.c_str());
-        dir += "\\crashes";
-        _mkdir(dir.c_str());
-        return dir;
-    }
-#endif
-#ifdef _WIN32
-    _mkdir("blocky_data");
-    _mkdir("blocky_data\\crashes");
-    return "blocky_data\\crashes";
-#else
-    mkdir("blocky_data", 0755);
-    mkdir("blocky_data/crashes", 0755);
-    return "blocky_data/crashes";
-#endif
+    const std::string dir = plat::dataDir() + "/crashes";
+    plat::makeDirs(dir);
+    return dir;
 }
 
-/** Contesto corrente (schermata, azione) — aggiornato dal loop. */
 inline void setContext(const char* ctx) {
     if (!ctx) return;
     std::snprintf(state().context, sizeof(state().context), "%s", ctx);
@@ -86,7 +77,6 @@ inline void setAppInfo(const char* name, const char* version = nullptr) {
         std::snprintf(state().version, sizeof(state().version), "%s", version);
 }
 
-/** Nota breve (ultime azioni prima del crash). */
 inline void note(const char* msg) {
     if (!msg || !msg[0]) return;
     auto& s = state();
@@ -160,8 +150,6 @@ inline void writeStack(FILE* f) {
     }
     void* frames[48] = {};
     USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
-    // Base del modulo principale: permette di mappare gli indirizzi grezzi con
-    // addr2line quando SymFromAddr non risolve i simboli MinGW.
     HMODULE mainMod = GetModuleHandleA(nullptr);
     std::fprintf(f, "ModuleBase: 0x%p\n", (void*)mainMod);
     std::fprintf(f, "Stack (%u frame):\n", (unsigned)n);
@@ -186,7 +174,6 @@ inline void writeStack(FILE* f) {
                              (unsigned)i, sym->Name, (unsigned long long)disp, frames[i]);
             }
         } else {
-            // Non risolto: stampo anche l'offset dal modulo (per addr2line).
             uintptr_t rva = (uintptr_t)frames[i] - (uintptr_t)mainMod;
             std::fprintf(f, "  #%02u  0x%p  (rva +0x%llx)\n",
                          (unsigned)i, frames[i], (unsigned long long)rva);
@@ -212,7 +199,6 @@ inline void writeBreadcrumbs(FILE* f) {
     }
 }
 
-/** Scrive report e restituisce path. */
 inline bool writeReport(const char* kind, const char* reason, const char* detail,
                         char* outPath, size_t outPathN) {
     auto& s = state();
@@ -256,9 +242,16 @@ inline bool writeReport(const char* kind, const char* reason, const char* detail
     std::fprintf(f, "PID:      %lu\n", (unsigned long)GetCurrentProcessId());
 #endif
     std::fprintf(f, "\n");
+    // Flush dopo ogni sezione: se il crash e' cosi' violento da far fallire
+    // di nuovo qualcosa qui dentro (es. lo stack walk su uno stack gia'
+    // corrotto), quanto scritto finora resta comunque su disco invece di
+    // perdersi nel buffer di stdio non ancora svuotato da fclose.
+    std::fflush(f);
     writeBreadcrumbs(f);
     std::fprintf(f, "\n");
+    std::fflush(f);
     writeStack(f);
+    std::fflush(f);
     std::fprintf(f, "\n=== Fine report ===\n");
     std::fprintf(f, "Invia questo file per aiutare a correggere il crash.\n");
     std::fclose(f);
@@ -284,7 +277,6 @@ inline void showReportUi(const char* reason, const char* detail, const char* pat
     int r = MessageBoxA(nullptr, msg, "Blocky — Crash Report",
                         MB_OKCANCEL | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
     if (r == IDOK && path && path[0]) {
-        // Apri cartella crash + seleziona file
         std::string args = "/select,\"" + std::string(path) + "\"";
         ShellExecuteA(nullptr, "open", "explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
     }
@@ -298,20 +290,24 @@ inline void handleCrash(const char* kind, const char* reason, const char* detail
     auto& s = state();
     bool expected = false;
     if (!s.handling.compare_exchange_strong(expected, true))
-        return; // già in handling
+        return;
 
     char path[512] = {};
     writeReport(kind, reason, detail, path, sizeof(path));
 
-    // Best-effort log stderr (se c'è console)
     std::fprintf(stderr, "\n[CRASH] %s: %s\n  %s\n  report: %s\n",
                  kind ? kind : "?", reason ? reason : "?",
                  detail ? detail : "", path);
 
+    // Anche le ultime azioni sul flusso degli errori, non solo nel file.
+    // Su Android stderr finisce in logcat, ed e l unico posto dove un crash
+    // si puo leggere davvero: il file da solo non lo apre nessuno, e senza le
+    // briciole si sa CHE e successo ma non DOVE.
+    writeBreadcrumbs(stderr);
+
     showReportUi(reason, detail, path);
 
 #ifdef _WIN32
-    // Evita dialoghi Windows di default dopo il nostro
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #endif
     std::_Exit(1);
@@ -323,7 +319,6 @@ inline LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep) {
         return EXCEPTION_CONTINUE_SEARCH;
 
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    // Non trattare breakpoint / single-step come crash "utente"
     if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP)
         return EXCEPTION_CONTINUE_SEARCH;
 
@@ -344,7 +339,6 @@ inline LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep) {
 #endif
 
 inline void onCrashSignal(int sig) {
-    // Ripristina default per evitare loop se crashiamo nel handler
     std::signal(sig, SIG_DFL);
     char reason[128];
     std::snprintf(reason, sizeof(reason), "%s (%d)", signalName(sig), sig);
@@ -380,7 +374,6 @@ inline void onInvalidParam(const wchar_t*, const wchar_t*, const wchar_t*,
     handleCrash("Runtime", "Invalid parameter (CRT)", state().context);
 }
 
-/** Chiama all'avvio (prima di glfwInit). */
 inline void install(const char* appName, const char* version = "dev") {
     setAppInfo(appName, version);
     note("CrashHandler installato");
@@ -404,4 +397,4 @@ inline void install(const char* appName, const char* version = "dev") {
 #endif
 }
 
-} // namespace CrashHandler
+}

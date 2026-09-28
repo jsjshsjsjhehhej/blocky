@@ -1,8 +1,5 @@
 #pragma once
 
-// Personaggio R6 stile Roblox Studio: costruito da blocchi, niente FBX.
-// Testa gialla, torso blu, gambe verdi, bacon hair, faccina cartoony.
-// Camminata: oscillazione gambe/braccia + leggero rimbalzo.
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -22,10 +19,9 @@ public:
 
     void update(float dt, bool walking) {
         if (walking) walkPhase += dt * 11.0f;
-        else walkPhase *= 0.85f; // torna piano verso idle
+        else walkPhase *= 0.85f;
     }
 
-    // Disegna il personaggio con i piedi su worldPos, rivolto verso yawDeg (gradi, asse Y).
     void draw(const BlockDrawContext& ctx,
               void (*drawCube)(GLuint, GLuint, const glm::mat4&, const glm::mat4&, const glm::mat4&,
                                const glm::vec3&, const glm::vec3&),
@@ -39,7 +35,6 @@ public:
         glm::mat4 root = glm::translate(glm::mat4(1.0f), worldPos);
         root = glm::rotate(root, glm::radians(yawDeg), glm::vec3(0, 1, 0));
 
-        // Colori classici "noob" Roblox
         const glm::vec3 yellow { 0.96f, 0.80f, 0.24f };
         const glm::vec3 blue   { 0.05f, 0.45f, 0.72f };
         const glm::vec3 green  { 0.18f, 0.55f, 0.24f };
@@ -47,39 +42,32 @@ public:
         const glm::vec3 white  { 0.95f, 0.95f, 0.95f };
         const glm::vec3 black  { 0.08f, 0.08f, 0.08f };
 
-        // --- Gambe (pivot alla coscia, y=2) ---
         drawLimb(ctx, drawCube, root, glm::vec3(-0.5f, 1.0f, 0.0f), glm::vec3(1, 2, 1), green,
                  glm::vec3(0, 1.0f, 0), legSwing, 0);
         drawLimb(ctx, drawCube, root, glm::vec3( 0.5f, 1.0f, 0.0f), glm::vec3(1, 2, 1), green,
                  glm::vec3(0, 1.0f, 0), -legSwing, 0);
 
-        // --- Torso (rimbalzo leggero mentre cammina) ---
         drawPart(ctx, drawCube, root,
                  glm::vec3(0.0f, 3.0f + bob, 0.0f), glm::vec3(2, 2, 1), blue);
 
-        // Dettaglio maglietta (striscia piu' chiara)
         drawPart(ctx, drawCube, root,
                  glm::vec3(0.0f, 3.0f + bob, 0.52f), glm::vec3(1.4f, 0.35f, 0.08f),
                  glm::vec3(0.15f, 0.65f, 0.88f));
 
-        // --- Braccia (pivot alla spalla) ---
         drawLimb(ctx, drawCube, root, glm::vec3(-1.5f, 3.0f + bob, 0.0f), glm::vec3(1, 2, 1), yellow,
                  glm::vec3(0, 1.0f, 0), armSwing, 0);
         drawLimb(ctx, drawCube, root, glm::vec3( 1.5f, 3.0f + bob, 0.0f), glm::vec3(1, 2, 1), yellow,
                  glm::vec3(0, 1.0f, 0), -armSwing, 0);
 
-        // --- Testa ---
         const float headY = 4.75f + bob;
         drawPart(ctx, drawCube, root, glm::vec3(0.0f, headY, 0.0f), glm::vec3(1.6f, 1.5f, 1.5f), yellow);
 
-        // Faccina cartoony (front +Z del personaggio)
         drawPart(ctx, drawCube, root, glm::vec3(-0.35f, headY + 0.15f, 0.78f), glm::vec3(0.28f, 0.28f, 0.08f), white);
         drawPart(ctx, drawCube, root, glm::vec3( 0.35f, headY + 0.15f, 0.78f), glm::vec3(0.28f, 0.28f, 0.08f), white);
         drawPart(ctx, drawCube, root, glm::vec3(-0.35f, headY + 0.15f, 0.84f), glm::vec3(0.14f, 0.14f, 0.05f), black);
         drawPart(ctx, drawCube, root, glm::vec3( 0.35f, headY + 0.15f, 0.84f), glm::vec3(0.14f, 0.14f, 0.05f), black);
         drawPart(ctx, drawCube, root, glm::vec3(0.0f, headY - 0.25f, 0.80f), glm::vec3(0.55f, 0.12f, 0.06f), black);
 
-        // --- Bacon hair: ciocche inclinate con leggero movimento ---
         const float top = headY + 0.75f;
         for (int i = 0; i < 5; ++i) {
             float off = -0.55f + i * 0.28f;
@@ -89,12 +77,10 @@ public:
                      glm::vec3(0.32f, 0.32f, 1.35f), bacon,
                      glm::vec3(0, 0.15f, -0.5f), 32.0f + sway, 0);
         }
-        // Ciocca centrale piu' alta
         drawLimb(ctx, drawCube, root,
                  glm::vec3(0.0f, top + 0.1f, 0.15f),
                  glm::vec3(0.38f, 0.38f, 1.6f), bacon,
                  glm::vec3(0, 0, -0.6f), 18.0f + hairSway * 0.5f, 0);
-        // Mani rosa rimosse — braccia gialle intere (stile noob)
     }
 
 private:

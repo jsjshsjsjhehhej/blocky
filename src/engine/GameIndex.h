@@ -1,24 +1,7 @@
 #pragma once
 
-/**
- * Indice di un gioco pubblicato.
- *
- * È il contratto fra chi pubblica e chi gioca: il client scarica questo file,
- * capisce cosa gli serve e lo prende. Non ricalcola collider, non compila
- * script, non converte formati — tutto è già deciso qui.
- *
- * Due strade di costruzione, perché i dati stanno in due posti diversi:
- *   - dal mondo vivo (pubblicazione dallo Studio): entità, luci, collider
- *   - da una cartella (strumento a riga di comando): inventario e hash
- * Nessuna delle due sa fare il lavoro dell'altra, e fingere il contrario
- * produrrebbe un indice a metà senza dirlo.
- *
- * Il collider di una Part non ha bisogno della mesh: posizione, dimensione e
- * rotazione bastano. Per i modelli importati serve il volume della mesh, che
- * lo conosce solo chi l'ha caricata: lo si passa da fuori invece di tirare
- * assimp dentro questo header.
- */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -31,7 +14,6 @@
 
 namespace GameIndex {
 
-/** Categoria d'uso, dedotta dal formato reale del file. */
 enum class AssetKind { Mesh, Texture, Sound, Script, Data, Unknown };
 
 inline const char* assetKindName(AssetKind k) {
@@ -55,31 +37,25 @@ inline AssetKind kindFromFormat(const std::string& format) {
 }
 
 struct AssetEntry {
-    std::string id;        // percorso relativo dentro il pacchetto
+    std::string id;
     AssetKind kind = AssetKind::Unknown;
     std::string format;
     std::uint64_t bytes = 0;
     std::string checksum;
 };
 
-/**
- * Volume di collisione precalcolato, in coordinate mondo.
- * Un box, non la geometria a triangoli: su una scena di scatole dà lo stesso
- * risultato a una frazione del costo, ed è la forma che il client sa già
- * risolvere senza codice nuovo.
- */
 struct ColliderEntry {
-    std::string owner;     // nome della Part o del Model
+    std::string owner;
     bool fromModel = false;
     glm::vec3 min{0.f};
     glm::vec3 max{0.f};
 };
 
 struct ScriptEntry {
-    std::string owner;     // Part a cui è agganciato
+    std::string owner;
     std::uint64_t bytes = 0;
     std::string checksum;
-    bool compiled = false; // true quando il pacchetto porta il bytecode
+    bool compiled = false;
 };
 
 struct LightingBlock {
@@ -106,7 +82,6 @@ struct Index {
     std::string gameId;
     std::string title;
     int formatVersion = 1;
-    /** Cambia a ogni ripubblicazione: il client la confronta per sapere se aggiornare. */
     std::string contentHash;
 
     LightingBlock lighting;
@@ -122,9 +97,7 @@ struct Index {
     }
 };
 
-// ------------------------------------------------------------------ hash
 
-/** FNV-1a 64: stessa famiglia usata da AssetAudit, così i valori si confrontano. */
 inline std::uint64_t hashString(const std::string& s, std::uint64_t seed = 1469598103934665603ull) {
     std::uint64_t h = seed;
     for (unsigned char c : s) {
@@ -140,17 +113,13 @@ inline std::string toHex(std::uint64_t v) {
     return o.str();
 }
 
-// ------------------------------------------------------- costruzione
 
-/** Restituisce false se il modello non ha un volume noto (mesh non caricata). */
 using ModelBoundsFn = std::function<bool(int modelIndex, glm::vec3& outMin, glm::vec3& outMax)>;
 
 inline void appendPartColliders(const DataModel& world, std::vector<ColliderEntry>& out) {
     for (const WorkspacePart& p : world.parts) {
         if (!p.canCollide) continue;
 
-        // AABB della Part ruotata: si trasformano gli otto vertici e si
-        // riprende min/max, così una rotazione non lascia spigoli fuori.
         const glm::vec3 half = p.size * 0.5f;
         const glm::mat4 rot = partRotationMatrix(p.rotation);
 
@@ -179,7 +148,7 @@ inline void appendModelColliders(const DataModel& world, const ModelBoundsFn& bo
     for (int i = 0; i < (int)world.models.size(); ++i) {
         if (!world.models[(size_t)i].canCollide) continue;
         glm::vec3 lo, hi;
-        if (!bounds(i, lo, hi)) continue;   // mesh non caricata: si salta invece di inventare
+        if (!bounds(i, lo, hi)) continue;
 
         ColliderEntry e;
         e.owner = world.models[(size_t)i].name;
@@ -197,11 +166,9 @@ inline void appendScripts(const DataModel& world, std::vector<ScriptEntry>& out)
         s.owner = p.name;
         s.bytes = (std::uint64_t)p.script.size();
         s.checksum = toHex(hashString(p.script));
-        s.compiled = false;   // diventa true quando il publisher sigilla il bytecode
+        s.compiled = false;
         out.push_back(std::move(s));
     }
-    // I modelli importati possono avere script agganciati (Animator, IA di
-    // un mostro): stesso trattamento delle Part, non un caso a parte.
     for (const WorkspaceModel& m : world.models) {
         if (m.script.empty()) continue;
         ScriptEntry s;
@@ -226,7 +193,6 @@ inline LightingBlock lightingFrom(const LightingService& l) {
     return b;
 }
 
-/** Indice completo a partire dal mondo in memoria (pubblicazione dallo Studio). */
 inline Index buildFromWorld(const DataModel& world, const LightingService& lighting,
                             const std::string& gameId, const std::string& title,
                             const ModelBoundsFn& modelBounds = {}) {
@@ -240,7 +206,8 @@ inline Index buildFromWorld(const DataModel& world, const LightingService& light
     idx.entities.labels = (int)world.labels.size();
     idx.entities.friends = (int)world.friends.size();
     idx.entities.backpack = (int)world.backpack.size();
-    idx.entities.baseplate = world.hasBaseplate;
+    idx.entities.baseplate = std::any_of(world.parts.begin(), world.parts.end(),
+        [](const WorkspacePart& p) { return p.name == "Baseplate"; });
 
     appendPartColliders(world, idx.colliders);
     appendModelColliders(world, modelBounds, idx.colliders);
@@ -248,11 +215,6 @@ inline Index buildFromWorld(const DataModel& world, const LightingService& light
     return idx;
 }
 
-/**
- * Hash unico di tutto il contenuto.
- * Un solo confronto dice al client se la sua copia è vecchia, invece di
- * scorrere l'elenco degli asset uno per uno.
- */
 inline void finalizeHash(Index& idx) {
     std::uint64_t h = hashString(idx.gameId);
     h = hashString(idx.title, h);
@@ -265,7 +227,6 @@ inline void finalizeHash(Index& idx) {
     idx.contentHash = toHex(h);
 }
 
-// ------------------------------------------------------------------ JSON
 
 inline std::string escape(const std::string& s) {
     std::string o;
@@ -348,4 +309,4 @@ inline std::string toJson(const Index& idx) {
     return j.str();
 }
 
-} // namespace GameIndex
+}

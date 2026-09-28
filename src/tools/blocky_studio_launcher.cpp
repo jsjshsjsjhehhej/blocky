@@ -1,17 +1,15 @@
-/**
- * BlockyGameEngine.exe — lanciatore minimo dello Studio classico.
- *
- * Stessa dll di Blocky.exe (libblocky.dll), export diverso: Blocky_RunStudio()
- * invece di Blocky_Run(). Il ramo Studio-vs-player era prima deciso a
- * compilazione (due copie di main.cpp); ora è la stessa dll, e la scelta la
- * fa questo eseguibile chiamando l'export giusto.
- */
 
 #include <windows.h>
+#ifndef BLOCKY_DEV
+#include "AutoUpdater.h"
+#endif
 
 typedef int (*BlockyRunFn)();
 
 int main() {
+#ifndef BLOCKY_DEV
+    blk::AutoUpdater::tryAutoUpdate("Blocky Game Engine");
+#endif
     HMODULE dll = LoadLibraryA("libblocky.dll");
     if (!dll) {
         MessageBoxA(nullptr,

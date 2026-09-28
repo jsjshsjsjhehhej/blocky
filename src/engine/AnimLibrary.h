@@ -1,13 +1,5 @@
 #pragma once
 
-/**
- * Libreria animazioni R6 (BlockyPlayerAnim) con ID usabili da script:
- *   game.Animator:Play("FancyWalk")
- *   game.Animator:SetWalkAnim("FancyWalk")
- *   game.Animator:SetJumpAnim("ClassicJump")
- *
- * Un solo file per kind: walk | jump | idle | emote | tool.
- */
 
 #include "R6WalkAnim.h"
 
@@ -18,7 +10,7 @@
 #include <vector>
 
 struct AnimLibrary {
-    std::map<std::string, R6WalkClip> byId; // AnimationId → clip
+    std::map<std::string, R6WalkClip> byId;
     std::string defaultWalkId;
     std::string defaultJumpId;
 
@@ -38,10 +30,8 @@ struct AnimLibrary {
         return &it->second;
     }
 
-    /** Path file clip: preferisci .r6anim.json, fallback .walk.json. */
     static std::string resolveClipPath(const std::string& id, const std::string& stored) {
         if (!stored.empty()) {
-            // prova path salvato
             R6WalkClip tmp;
             if (r6LoadClipFile(stored, tmp)) return stored;
         }
@@ -64,12 +54,10 @@ struct AnimLibrary {
             byId[clipSan] = byId[clip.id];
     }
 
-    /** Registra clip con AnimationId (sovrascrive se esiste). */
     bool registerClip(const std::string& animId, R6WalkClip clip) {
         if (animId.empty() || !clip.valid()) return false;
         clip.id = sanitizeGameId(animId);
         if (clip.displayName.empty()) clip.displayName = animId;
-        // infer kind da nome se ancora walk generico
         if (clip.kind == R6AnimKind::Walk) {
             R6AnimKind guessed = r6AnimKindFromName(animId + " " + clip.clipName + " " + clip.displayName);
             if (guessed != R6AnimKind::Walk) {
@@ -122,7 +110,6 @@ struct AnimLibrary {
         persistIndex();
     }
 
-    /** Aggiorna/crea walk+jump del pack R6 ufficiale (riscrive i default). */
     void seedBuiltins() {
         bool dirty = false;
         auto upsert = [&](R6WalkClip clip) {
@@ -138,7 +125,6 @@ struct AnimLibrary {
             defaultJumpId = "classic_jump";
             dirty = true;
         }
-        // Se non c'è walk custom, usa pack R6
         if (defaultWalkId.empty()) {
             defaultWalkId = "classic_walk";
             dirty = true;
@@ -192,8 +178,6 @@ struct AnimLibrary {
         defaultJumpId = jsonFindStr(json, "defaultJumpId");
         size_t pos = 0;
         while ((pos = json.find("\"path\"", pos)) != std::string::npos) {
-            // r6Unescape obbligatorio: persistIndex scrive con r6Escape, e senza
-            // il rovescio i backslash del path raddoppiano a ogni riavvio.
             std::string path = r6Unescape(jsonFindStr(json, "path", pos));
             std::string id = jsonFindStr(json, "id", pos > 40 ? pos - 40 : 0);
             std::string kindStr = jsonFindStr(json, "kind", pos > 80 ? pos - 80 : 0);

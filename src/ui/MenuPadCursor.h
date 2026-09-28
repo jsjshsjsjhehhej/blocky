@@ -1,8 +1,5 @@
 #pragma once
 
-/**
- * Cursore pad nei menu: stick sinistro punta alle voci, A / X / L (LB) clicca.
- */
 
 #include <imgui.h>
 #include "platform/GamepadInput.h"
@@ -23,15 +20,10 @@ inline MenuPadCursor& menuPadCursor() {
     return c;
 }
 
-/** True se A (Cross), X (Square) o L/LB — conferma click menu. */
 inline bool menuPadConfirmHeld(const GamepadState& pad) {
     return pad.a || pad.x || pad.lb;
 }
 
-/**
- * Chiama DOPO ImGui_ImplGlfw_NewFrame e PRIMA di ImGui::NewFrame.
- * Inietta posizione mouse + click dal pad.
- */
 inline void applyMenuPadCursor(bool enable, float dt, float screenW, float screenH) {
     auto& c = menuPadCursor();
     const auto& pad = gamepad();
@@ -52,16 +44,13 @@ inline void applyMenuPadCursor(bool enable, float dt, float screenW, float scree
         c.y = screenH * 0.45f;
     }
 
-    // Stick: ly positivo = su schermo (Y decresce)
     float spd = 1100.f;
     float mag = std::sqrt(pad.lx * pad.lx + pad.ly * pad.ly);
     if (mag > 0.08f) {
-        // velocità cresce con deflessione (più preciso vicino al centro)
         float boost = 0.45f + 0.55f * std::min(1.f, mag);
         c.x += pad.lx * spd * boost * dt;
         c.y -= pad.ly * spd * boost * dt;
     }
-    // D-pad: nudge preciso
     float nudge = 420.f * dt;
     if (pad.dpadL) c.x -= nudge;
     if (pad.dpadR) c.x += nudge;
@@ -85,7 +74,6 @@ inline void applyMenuPadCursor(bool enable, float dt, float screenW, float scree
     c.confirmHeld = confirm;
 }
 
-/** Disegna il puntatore pad (dopo i widget menu). */
 inline void drawMenuPadCursor() {
     const auto& c = menuPadCursor();
     if (!c.active) return;

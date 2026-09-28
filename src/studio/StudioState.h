@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Stato dell'editor: mondo, selezione, strumento attivo, log.
- *
- * Tenuto separato dai pannelli perché la viewport, la toolbar e l'Explorer
- * lavorano tutti sulla stessa selezione: se ognuno tenesse la propria copia
- * si disallineerebbero al primo undo.
- */
 
 #include <cstdarg>
 #include <cstdio>
@@ -23,14 +16,16 @@ enum class Tool : int {
     Move,
     Scale,
     Rotate,
+    Transform,
 };
 
 inline const char* toolName(Tool t) {
     switch (t) {
-    case Tool::Move:   return "Move";
-    case Tool::Scale:  return "Scale";
-    case Tool::Rotate: return "Rotate";
-    default:           return "Select";
+    case Tool::Move:      return "Move";
+    case Tool::Scale:     return "Scale";
+    case Tool::Rotate:    return "Rotate";
+    case Tool::Transform: return "Transform";
+    default:              return "Select";
     }
 }
 
@@ -41,7 +36,6 @@ struct LogLine {
     std::string text;
 };
 
-/** Console dell'editor. Tenuta corta: serve l'ultimo errore, non l'archivio. */
 struct OutputLog {
     std::deque<LogLine> lines;
     size_t maxLines = 500;
@@ -76,14 +70,20 @@ struct StudioState {
     UndoStack undo;
     OutputLog output;
 
-    int selected = -1;              // indice in world.parts, -1 = nessuna
+    int selected = -1;
+    // Modelli ed etichette (StarterGui) prima comparivano nell'Explorer ma
+    // cliccarli non faceva nulla — solo le Part erano davvero selezionabili.
+    // Indici separati (non un'unica selezione "a tipo variabile") cosi' il
+    // gizmo/script/undo legati a `selected` (Part) restano invariati.
+    int selectedModel = -1;
+    int selectedLabel = -1;
     Tool tool = Tool::Select;
 
     bool snapEnabled = true;
     float snapStuds = 1.f;
     float snapDegrees = 15.f;
 
-    std::string projectPath;        // vuoto = mai salvato
+    std::string projectPath;
     bool dirty = false;
 
     bool showGrid = true;
@@ -98,7 +98,28 @@ struct StudioState {
         return &world.parts[(size_t)selected];
     }
 
-    void selectNone() { selected = -1; }
+    void selectNone() { selected = -1; selectedModel = -1; selectedLabel = -1; }
+
+    void selectPartIndex(int i) { selected = i; selectedModel = -1; selectedLabel = -1; }
+    void selectModelIndex(int i) { selectedModel = i; selected = -1; selectedLabel = -1; }
+    void selectLabelIndex(int i) { selectedLabel = i; selected = -1; selectedModel = -1; }
+
+    WorkspaceModel* selectedModelPtr() {
+        if (selectedModel < 0 || selectedModel >= (int)world.models.size()) return nullptr;
+        return &world.models[(size_t)selectedModel];
+    }
+    const WorkspaceModel* selectedModelPtr() const {
+        if (selectedModel < 0 || selectedModel >= (int)world.models.size()) return nullptr;
+        return &world.models[(size_t)selectedModel];
+    }
+    WorkspaceLabel* selectedLabelPtr() {
+        if (selectedLabel < 0 || selectedLabel >= (int)world.labels.size()) return nullptr;
+        return &world.labels[(size_t)selectedLabel];
+    }
+    const WorkspaceLabel* selectedLabelPtr() const {
+        if (selectedLabel < 0 || selectedLabel >= (int)world.labels.size()) return nullptr;
+        return &world.labels[(size_t)selectedLabel];
+    }
 
     float snap(float value, float step) const {
         if (!snapEnabled || step <= 0.f) return value;
@@ -110,7 +131,6 @@ struct StudioState {
         return {snap(v.x, step), snap(v.y, step), snap(v.z, step)};
     }
 
-    /** Nome libero: due Part con lo stesso nome confondono l'Explorer. */
     std::string uniqueName(const std::string& base) const {
         std::string candidate = base;
         int suffix = 1;
@@ -136,7 +156,7 @@ struct StudioState {
         world.parts.push_back(p);
         const int index = (int)world.parts.size() - 1;
         undo.recordInsert(index, p);
-        selected = index;
+        selectPartIndex(index);
         dirty = true;
         output.info("Inserita %s", p.name.c_str());
         return index;
@@ -163,10 +183,10 @@ struct StudioState {
         world.parts.push_back(copy);
         const int index = (int)world.parts.size() - 1;
         undo.recordInsert(index, copy);
-        selected = index;
+        selectPartIndex(index);
         dirty = true;
         output.info("Duplicata in %s", copy.name.c_str());
     }
 };
 
-} // namespace studio
+}

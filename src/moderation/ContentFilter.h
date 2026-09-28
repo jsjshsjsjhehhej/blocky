@@ -1,13 +1,5 @@
 #pragma once
 
-/**
- * Moderazione Blocky v2 — chat, username, avatar/giochi.
- * - Odio/razzismo → blocco + strike
- * - Parolacce → censura (****) + soft strike
- * - Anti-spam / rate-limit / mute
- * - Bypass leet / punti / ripetizioni (c.a.z.z.o, fuuuck)
- * - Report giocatori → verifica automatica
- */
 
 #include <algorithm>
 #include <cctype>
@@ -40,7 +32,6 @@ inline std::string toLowerAscii(std::string s) {
     return s;
 }
 
-/** Normalizza aggressiva: leet, strip separatori, collassa ripetizioni (fuuuck→fuck). */
 inline std::string normalizeForMatch(const std::string& raw) {
     std::string tmp;
     tmp.reserve(raw.size());
@@ -56,10 +47,9 @@ inline std::string normalizeForMatch(const std::string& raw) {
         case '8': c = 'b'; break;
         case '9': c = 'g'; break;
         case '!': c = 'i'; break;
-        case '*': continue; // già censurato
+        case '*': continue;
         default: break;
         }
-        // Separatori usati per bypass: c.a.z.z.o / c-a-z-z-o / c a z z o
         if (c == '.' || c == '-' || c == '_' || c == ' ' || c == '\t'
             || c == '/' || c == '\\' || c == ',' || c == ';' || c == ':'
             || c == '\'' || c == '"' || c == '`')
@@ -69,7 +59,6 @@ inline std::string normalizeForMatch(const std::string& raw) {
         else if (c >= '0' && c <= '9')
             tmp.push_back(c);
     }
-    // Collassa 3+ lettere uguali → 2 (cazzooo → cazzoo → ancora utile)
     std::string out;
     out.reserve(tmp.size());
     for (size_t i = 0; i < tmp.size(); ++i) {
@@ -80,21 +69,17 @@ inline std::string normalizeForMatch(const std::string& raw) {
     return out;
 }
 
-/** Match termine con confine “soft” (evita assassin→ass su termini corti). */
 inline bool matchTermInNorm(const std::string& norm, const std::string& term) {
     if (term.size() < 3 || norm.size() < term.size()) return false;
     if (term.size() >= 5) {
-        // termini lunghi: substring ok
         return norm.find(term) != std::string::npos;
     }
-    // termini corti (3–4): richiedi bordo non-alfabetico
     size_t pos = 0;
     while ((pos = norm.find(term, pos)) != std::string::npos) {
         bool leftOk = (pos == 0) || (norm[pos - 1] < 'a' || norm[pos - 1] > 'z');
         size_t end = pos + term.size();
         bool rightOk = (end >= norm.size()) || (norm[end] < 'a' || norm[end] > 'z');
         if (leftOk && rightOk) return true;
-        // anche se attaccato a cifra
         if ((pos == 0 || !std::isalpha((unsigned char)norm[pos - 1]))
             && (end >= norm.size() || !std::isalpha((unsigned char)norm[end])))
             return true;
@@ -104,7 +89,7 @@ inline bool matchTermInNorm(const std::string& norm, const std::string& term) {
 }
 
 inline bool isWordChar(unsigned char c) {
-    return std::isalnum(c) || c >= 128; // tieni anche UTF-8 bytes dentro il token
+    return std::isalnum(c) || c >= 128;
 }
 
 inline const std::vector<std::string>& blockedTerms() {
@@ -128,10 +113,8 @@ inline const std::vector<std::string>& blockedTerms() {
     return k;
 }
 
-/** Parolacce: non bloccano, vengono censurate. Lista ampliata IT/EN + varianti. */
 inline const std::vector<std::string>& swearTerms() {
     static const std::vector<std::string> k = {
-        // IT core
         "cazzo", "cazzi", "cazzone", "cazzata", "cazzate", "incazzo", "incazzato", "incazzata",
         "merda", "merde", "merdoso", "merdosa", "stronzo", "stronza", "stronzi", "stronze",
         "coglione", "coglioni", "cogliona", "coglionata",
@@ -145,7 +128,6 @@ inline const std::vector<std::string>& swearTerms() {
         "culattone", "ricchione", "finocchio",
         "zoccola", "baldracca", "mignotta", "bagascia",
         "cazzaro", "cazzari", "pirla", "pirlata",
-        // EN core + variants
         "fuck", "fucking", "fucker", "motherfucker", "mfucker", "fuk", "fck", "fukc",
         "shit", "shitty", "bullshit", "horseshit", "crap",
         "bitch", "bitches", "asshole", "arsehole", "bastard", "damn", "dammit",
@@ -223,7 +205,6 @@ inline bool isSwearToken(const std::string& token) {
         if (n == t || (t.size() >= 4 && n.find(t) != std::string::npos))
             return true;
     }
-    // multi-word swears già coperte da normalize sull'intera frase in containsSwear
     return false;
 }
 
@@ -231,7 +212,6 @@ inline bool containsSwear(const std::string& text) {
     return containsAnyNormalized(normalizeForMatch(text), swearTerms());
 }
 
-/** Sostituisce le parolacce con * della stessa lunghezza (token per token). */
 inline std::string censorSwears(const std::string& msg, bool* outDidCensor = nullptr) {
     if (outDidCensor) *outDidCensor = false;
     if (msg.empty()) return msg;
@@ -256,10 +236,7 @@ inline std::string censorSwears(const std::string& msg, bool* outDidCensor = nul
         i = j;
     }
 
-    // Frasi unite tipo "vaffanculo" già gestite; "dio cane" come due token:
-    // se entrambi presenti in sequenza, ricensura a livello frase se ancora presenti
     if (containsSwear(out)) {
-        // fallback: se dopo token-censor resta match normalizzato, maschera parole residue note
         std::string second;
         second.reserve(out.size());
         i = 0;
@@ -329,29 +306,30 @@ inline CheckResult checkGameTitle(const std::string& title) {
     return r;
 }
 
-// ─── Log chat + Report con verifica ─────────────────────────────────────────
 
 struct ChatEntry {
     int id = 0;
     std::string user;
-    std::string original; // per verifica report (non mostrato in UI)
+    std::string original;
     std::string display;
     bool censored = false;
-    bool blocked = false; // tentativo odio (non pubblicato)
+    bool blocked = false;
 };
 
 enum class ReportStatus {
-    Confirmed,          // messaggio trovato + violazione vera
-    RejectedNoEvidence, // messaggio inesistente / non verificabile
-    RejectedWrongUser,  // messaggio non di quell'utente
-    RejectedClean,      // messaggio pulito → report falso/non fondato
-    RejectedSelf,       // auto-report
+    Confirmed,
+    Pending, // segnalazioni giocatore/gioco: nessun testo da verificare in automatico
+    RejectedNoEvidence,
+    RejectedWrongUser,
+    RejectedClean,
+    RejectedSelf,
     RejectedDuplicate
 };
 
 inline const char* reportStatusLabel(ReportStatus s) {
     switch (s) {
     case ReportStatus::Confirmed: return "CONFERMATO (violazione verificata)";
+    case ReportStatus::Pending: return "IN ATTESA (nessuna verifica automatica disponibile)";
     case ReportStatus::RejectedNoEvidence: return "RESPINTO (messaggio non trovato)";
     case ReportStatus::RejectedWrongUser: return "RESPINTO (utente non corrisponde)";
     case ReportStatus::RejectedClean: return "RESPINTO (nessuna violazione — report non fondato)";
@@ -360,6 +338,8 @@ inline const char* reportStatusLabel(ReportStatus s) {
     }
     return "?";
 }
+
+enum class ReportKind { Player, Game };
 
 struct Report {
     int id = 0;
@@ -377,15 +357,13 @@ struct Session {
     int nextMsgId = 1;
     int nextReportId = 1;
 
-    // Anti-spam / mute
     int strikes = 0;
-    double mutedUntil = 0.0;       // chrono seconds
+    double mutedUntil = 0.0;
     double lastChatAt = 0.0;
     std::string lastChatNorm;
     int repeatCount = 0;
     float minChatIntervalSec = 0.65f;
 
-    // UI report
     int selectedMsgId = -1;
     char reasonBuf[160] = "";
     std::string lastReportMsg;
@@ -435,10 +413,6 @@ inline const ChatEntry* findMessage(const Session& s, int id) {
     return nullptr;
 }
 
-/**
- * Verifica il report sul messaggio citato.
- * Solo se il messaggio esiste e contiene una violazione reale → CONFERMATO.
- */
 inline Report submitReport(Session& s,
                            const std::string& reporter,
                            int messageId,
@@ -485,7 +459,6 @@ inline Report submitReport(Session& s,
         return r;
     }
 
-    // Verifica contenuto reale (testo originale, non solo display censurato)
     const std::string& raw = msg->original;
     auto hate = checkText(raw, "report");
     bool swear = containsSwear(raw) || msg->censored;
@@ -507,7 +480,31 @@ inline Report submitReport(Session& s,
     return r;
 }
 
-/** Invia in chat: mute/spam, blocca odio, censura parolacce, strike. */
+// Report di un giocatore o di un gioco (non un messaggio specifico): non
+// c'e' un server centrale che possa verificarlo in automatico come per la
+// chat, quindi resta "Pending" e finisce solo nel log locale — utile per
+// l'host di una sessione LAN o per te stesso a rivedere piu' tardi.
+inline Report submitGenericReport(Session& s, ReportKind kind,
+                                  const std::string& reporter,
+                                  const std::string& accused,
+                                  const std::string& reason) {
+    Report r;
+    r.id = s.nextReportId++;
+    r.reporter = reporter;
+    r.accused = accused;
+    r.messageId = -1;
+    r.reason = reason.empty() ? "(nessun motivo)" : reason;
+    r.status = ReportStatus::Pending;
+    r.note = (kind == ReportKind::Player) ? "Report giocatore" : "Report gioco";
+    if (kind == ReportKind::Player && toLowerAscii(accused) == toLowerAscii(reporter)) {
+        r.status = ReportStatus::RejectedSelf;
+        r.note = "Non puoi segnalare te stesso.";
+    }
+    s.reports.push_back(r);
+    appendReportLog(r);
+    return r;
+}
+
 inline bool tryAppendChat(std::vector<std::string>& lines,
                           Session& session,
                           const std::string& username,
@@ -529,14 +526,12 @@ inline bool tryAppendChat(std::vector<std::string>& lines,
         return false;
     }
 
-    // Rate limit
     if (session.lastChatAt > 0.0 && (now - session.lastChatAt) < session.minChatIntervalSec) {
         lines.push_back("[Moderazione] Troppo veloce — aspetta un attimo.");
         session.addStrike(1, 2.0);
         return false;
     }
 
-    // Spam ripetuto
     std::string normMsg = normalizeForMatch(msg);
     if (!normMsg.empty() && normMsg == session.lastChatNorm) {
         session.repeatCount++;
@@ -580,7 +575,7 @@ inline bool tryAppendChat(std::vector<std::string>& lines,
     lines.push_back("[" + username + "] " + display);
     if (censored) {
         lines.push_back("[Moderazione] Parolaccia censurata.");
-        session.addStrike(1, 0.0); // strike soft, no mute obbligatorio
+        session.addStrike(1, 0.0);
         if (session.strikes >= 6) {
             session.addStrike(0, 20.0);
             lines.push_back("[Moderazione] Troppe parolacce — mute 20s.");
@@ -590,4 +585,4 @@ inline bool tryAppendChat(std::vector<std::string>& lines,
     return true;
 }
 
-} // namespace Moderation
+}

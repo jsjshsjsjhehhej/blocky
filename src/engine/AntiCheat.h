@@ -1,14 +1,5 @@
 #pragma once
 
-/**
- * AntiCheat + AntiTamper Blocky (client).
- * - Clamp stats / speed / teleport
- * - Integrità config (seal) e shadow Humanoid
- * - Anti-debug / timing anomaly (speedhack clock)
- * - Fly / fall-speed heuristics
- * Nota: lato client non è inviolabile; in multiplayer le stesse regole
- * devono vivere sul server (authority).
- */
 
 #include "Humanoid.h"
 #include "../platform/ObfStr.h"
@@ -35,18 +26,18 @@
 struct AntiCheatConfig {
     float maxWalkSpeed = 28.f;
     float maxJumpPower = 70.f;
-    float maxHorizSpeed = 45.f;      // u/s
-    float maxTeleportStuds = 80.f;   // per secondo (orizzontale) — largo per lag/collisioni
+    float maxHorizSpeed = 45.f;
+    float maxTeleportStuds = 80.f;
     float maxFallSpeed = 120.f;
-    float maxAirTime = 8.f;          // secondi in aria senza cadere → fly (obby ok)
-    float maxDtSpike = 0.12f;        // dt sospetto (clock speedhack)
-    float maxStepUp = 6.f;           // salita legittima su un blocco (studs/frame)
+    float maxAirTime = 8.f;
+    float maxDtSpike = 0.12f;
+    float maxStepUp = 6.f;
     int   strikesBeforeKick = 6;
     int   tamperBeforeHardMute = 3;
     bool  enabled = true;
-    bool  antiTamper = true;         // seal + debug + shadow
+    bool  antiTamper = true;
     bool  antiDebug = true;
-    bool  killHostileProcs = true;   // chiude solo tool cheat noti (non app a caso)
+    bool  killHostileProcs = true;
 };
 
 struct AntiCheatState {
@@ -61,7 +52,6 @@ struct AntiCheatState {
     float muteMoveUntil = 0.f;
     float hardMuteUntil = 0.f;
 
-    // Anti-tamper
     uint32_t configSeal = 0;
     bool sealed = false;
     float shadowWalk = 16.f;
@@ -72,14 +62,12 @@ struct AntiCheatState {
     bool debuggerSeen = false;
     uint32_t heartbeat = 0;
 
-    // Inject / tool esterni → warning player (consumato da UI)
     std::string playerWarning;
     float lastProcScan = 0.f;
     int hostileKills = 0;
-    int injectIncidents = 0; // quante volte (debounce) → ban via Economy
+    int injectIncidents = 0;
 };
 
-/** Username per ban permanente (settato da main quando loggato). */
 inline const char*& acLinkedUser() {
     static const char* u = "";
     return u;
@@ -93,7 +81,6 @@ inline AntiCheatState& antiCheat() {
     return s;
 }
 
-/** Strike inject → al 2° ban permanente (stesso sistema economia). */
 inline void acReportInjectStrike(float nowTime, const char* detail) {
     auto& ac = antiCheat();
     const char* user = acLinkedUser();
@@ -122,13 +109,12 @@ inline uint32_t acHashBytes(const void* data, size_t n, uint32_t seed = 21661362
 }
 
 inline uint32_t acComputeConfigSeal(const AntiCheatConfig& c) {
-    // Mix campi critici — se qualcuno patcha i limiti in memoria, il seal non torna.
     float pack[] = {
         c.maxWalkSpeed, c.maxJumpPower, c.maxHorizSpeed, c.maxTeleportStuds,
         c.maxFallSpeed, c.maxAirTime, c.maxDtSpike,
         (float)c.strikesBeforeKick, (float)c.tamperBeforeHardMute,
         c.enabled ? 1.f : 0.f, c.antiTamper ? 1.f : 0.f, c.antiDebug ? 1.f : 0.f,
-        0xB10C4u / 1000.f // magic costante
+        0xB10C4u / 1000.f
     };
     return acHashBytes(pack, sizeof(pack), 0xA11C4EAFu);
 }
@@ -148,7 +134,6 @@ inline bool acVerifyConfigSeal() {
         ac.integrityOk = false;
         ac.lastReason = "config tamper (seal)";
         ++ac.tamperHits;
-        // Ripristina limiti sicuri di default
         ac.cfg = AntiCheatConfig{};
         ac.cfg.enabled = true;
         ac.cfg.antiTamper = true;
@@ -192,11 +177,8 @@ inline void acToLowerInPlace(char* s) {
     }
 }
 
-/** Tool noti che si attaccano ai processi (memory edit / debug). */
 inline bool acIsHostileCheatTool(const char* exeLower) {
     if (!exeLower || !exeLower[0]) return false;
-    // Offuscate: i nomi non compaiono in chiaro nel binario, altrimenti
-    // basterebbe cercarli nell'exe e rinominare il proprio tool.
     static const std::string kBad[] = {
         OBF("cheatengine"), OBF("cheat engine"),
         OBF("x64dbg"), OBF("x32dbg"), OBF("ollydbg"),
@@ -212,7 +194,6 @@ inline bool acIsHostileCheatTool(const char* exeLower) {
     return false;
 }
 
-/** Kill SOLO processi cheat noti. Mai Explorer/antivirus/nostro exe. */
 inline int acKillHostileProcesses(std::string& outKilledName) {
     outKilledName.clear();
     int killed = 0;
@@ -236,17 +217,15 @@ inline int acKillHostileProcesses(std::string& outKilledName) {
             std::snprintf(lower, sizeof(lower), "%s", name);
             acToLowerInPlace(lower);
 
-            // Non tocchiamo tool di sistema / IDE (falsi positivi)
             if (std::strstr(lower, "devenv") || std::strstr(lower, "cursor")
                 || std::strstr(lower, "code.exe") || std::strstr(lower, "msvsmon")
-                || std::strstr(lower, "windbg")) // WinDbg spesso legit per dev
+                || std::strstr(lower, "windbg"))
                 continue;
 
             if (!acIsHostileCheatTool(lower)) continue;
 
-            // processhacker: solo warning, non kill (tool admin legittimo)
             if (std::strstr(lower, OBF("processhacker").c_str())) {
-                outKilledName = name; // riusato come "visto"
+                outKilledName = name;
                 continue;
             }
 
@@ -269,7 +248,6 @@ inline int acKillHostileProcesses(std::string& outKilledName) {
     return killed;
 }
 
-/** Se qualcosa è “dentro” Blocky (debugger) o tool cheat aperti → kill + warning (+ ban al 2°). */
 inline void acScanInjectAndWarn(float nowTime) {
     auto& ac = antiCheat();
     if (!ac.cfg.enabled || !ac.cfg.antiTamper) return;
@@ -280,11 +258,9 @@ inline void acScanInjectAndWarn(float nowTime) {
     if (nowTime - ac.lastProcScan < 2.5f) return;
     ac.lastProcScan = nowTime;
 
-    // 1) Debugger / processo attaccato a noi
     const bool dbg = ac.cfg.antiDebug && acDetectDebugger();
     if (dbg) {
         if (!ac.debuggerSeen) {
-            // Rising edge: ogni nuovo aggancio = 1 strike (2° = ban)
             ac.debuggerSeen = true;
             acTamperFlag("app esterna agganciata (debugger)");
             acReportInjectStrike(nowTime, "debugger/inject agganciato a Blocky");
@@ -298,7 +274,6 @@ inline void acScanInjectAndWarn(float nowTime) {
             int n = acKillHostileProcesses(killed);
             if (n > 0) {
                 ac.hostileKills += n;
-                // Kill durante debugger: stesso incidente (debounce Economy evita doppio strike)
                 if (ac.playerWarning.find("BANNATO") == std::string::npos
                     && ac.playerWarning.find("AVVISO") == std::string::npos) {
                     ac.playerWarning =
@@ -308,10 +283,8 @@ inline void acScanInjectAndWarn(float nowTime) {
         }
         return;
     }
-    // Debugger tolto → il prossimo aggancio conta di nuovo
     ac.debuggerSeen = false;
 
-    // 2) Tool cheat in background → kill + strike (2° volta = ban)
     if (ac.cfg.killHostileProcs) {
         std::string killed;
         int n = acKillHostileProcesses(killed);
@@ -323,12 +296,10 @@ inline void acScanInjectAndWarn(float nowTime) {
             std::string detail = "tool cheat chiuso: " + killed;
             acReportInjectStrike(nowTime, detail.c_str());
         } else if (!killed.empty()) {
-            // Process Hacker ecc.: solo warning, NON strike/ban
             char low[260];
             std::snprintf(low, sizeof(low), "%s", killed.c_str());
             acToLowerInPlace(low);
             if (std::strstr(low, OBF("processhacker").c_str())) {
-                // Il messaggio all'utente resta in chiaro: e' giusto che si legga.
                 ac.playerWarning =
                     "ATTENZIONE: Process Hacker in esecuzione. "
                     "Usarlo su Blocky puo' portare al ban.";
@@ -337,7 +308,6 @@ inline void acScanInjectAndWarn(float nowTime) {
     }
 }
 
-/** Chiama una volta a boot / fine loading. */
 inline void acBoot() {
     auto& ac = antiCheat();
     ac.cfg = AntiCheatConfig{};
@@ -370,28 +340,20 @@ inline void acReset() {
     ac.hardMuteUntil = 0.f;
     ac.airTime = 0.f;
     ac.lastReason.clear();
-    // Non spegne antiTamper / seal
 }
 
-/** Marca il prossimo spostamento come legittimo (respawn / script). */
 inline void acAllowTeleport() {
     antiCheat().hasLast = false;
 }
 
-/**
- * Dopo void-respawn / spawn legittimo: sblocca il movimento.
- * Prima il soft-kick restava attivo e il player non poteva più muoversi.
- */
 inline void acOnLegitimateRespawn() {
     auto& ac = antiCheat();
     ac.hasLast = false;
     ac.softKick = false;
     ac.muteMoveUntil = 0.f;
-    // Non tocca hardMute da debugger reale; solo mute movimento “falso”
     if (!ac.debuggerSeen)
         ac.hardMuteUntil = 0.f;
     ac.airTime = 0.f;
-    // Abbassa strike movimento così non ri-kicka subito
     ac.strikes = std::min(ac.strikes, 2);
     ac.flagsThisFrame = 0;
     if (ac.lastReason.find("teleport") != std::string::npos
@@ -414,7 +376,6 @@ inline void acClampHumanoid(Humanoid& h) {
     if (ac.cfg.antiTamper)
         acVerifyConfigSeal();
 
-    // Valori oltre i limiti = cheat o memory edit
     if (h.walkSpeed > ac.cfg.maxWalkSpeed) {
         if (h.walkSpeed > ac.cfg.maxWalkSpeed * 1.35f)
             acTamperFlag("walkSpeed memory edit");
@@ -444,7 +405,6 @@ inline void acClampHumanoid(Humanoid& h) {
     ac.shadowJump = h.jumpPower;
 }
 
-/** Tick integrità ogni frame (debug, clock, heartbeat, inject scan). */
 inline void acTickIntegrity(float dt, float nowTime) {
     auto& ac = antiCheat();
     if (!ac.cfg.enabled || !ac.cfg.antiTamper) {
@@ -456,7 +416,6 @@ inline void acTickIntegrity(float dt, float nowTime) {
     acVerifyConfigSeal();
     acScanInjectAndWarn(nowTime);
 
-    // Speedhack orologio: dt troppo grande o salti temporali
     if (ac.lastFrameTime > 0.f) {
         float wall = nowTime - ac.lastFrameTime;
         if (wall > ac.cfg.maxDtSpike && dt < wall * 0.35f) {
@@ -477,7 +436,6 @@ inline void acTickIntegrity(float dt, float nowTime) {
     }
 }
 
-/** Consuma warning da mostrare in chat/UI (una volta). */
 inline bool acTakePlayerWarning(std::string& out) {
     auto& ac = antiCheat();
     if (ac.playerWarning.empty()) return false;
@@ -486,7 +444,6 @@ inline bool acTakePlayerWarning(std::string& out) {
     return true;
 }
 
-/** Chiama dopo il movimento del frame. Corregge teleport / speedhack / fly. */
 inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, float nowTime,
                                bool grounded = true, float velocityY = 0.f) {
     auto& ac = antiCheat();
@@ -500,14 +457,12 @@ inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, flo
     const bool muted = (ac.softKick && nowTime < ac.muteMoveUntil)
                     || (nowTime < ac.hardMuteUntil);
     if (muted) {
-        // Solo ferma input — NON snappare la posizione (causava "teleport" sui blocchi)
         moveVel = {0, 0, 0};
         if (ac.hasLast) ac.lastPos = pos;
         ac.hasLast = true;
         return;
     }
 
-    // NaN / Inf → snap sicuro
     if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z)) {
         if (ac.hasLast) pos = ac.lastPos;
         else pos = {0, 0, 0};
@@ -527,17 +482,13 @@ inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, flo
     if (ac.hasLast && dt > 1e-4f) {
         glm::vec3 d = pos - ac.lastPos;
         float dist = glm::length(glm::vec2(d.x, d.z));
-        // Soglia larga: lag + collisioni + step su blocchi non sono cheat
         float maxDist = ac.cfg.maxTeleportStuds * std::max(dt, 1.f / 20.f) + 8.f;
         if (dist > maxDist) {
-            // Solo correzioni enormi (vero teleport hack)
             pos.x = ac.lastPos.x;
             pos.z = ac.lastPos.z;
             moveVel.x = moveVel.z = 0.f;
             acFlag("teleport blocked", 1);
         }
-        // Fly: solo salite impossibili (non step-up su un Part)
-        // Step-up legittimo fino a maxStepUp; jump ha velocityY > 0
         if (!grounded && d.y > ac.cfg.maxStepUp && velocityY <= 0.1f) {
             pos.y = ac.lastPos.y;
             acFlag("fly ascent blocked", 1);
@@ -545,12 +496,10 @@ inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, flo
     }
 
     if (!grounded) {
-        // Caduta / jump legittimi: non contare airtime anti-fly
         if (velocityY < -2.f || velocityY > 2.f)
             ac.airTime = 0.f;
         else
             ac.airTime += dt;
-        // Solo se fluttua a mid-air senza cadere (noclip) — mai durante void fall
         if (ac.airTime > ac.cfg.maxAirTime && std::fabs(velocityY) < 1.f) {
             acFlag("fly / airtime", 1);
             if (ac.hasLast) pos.y = std::min(pos.y, ac.lastPos.y);
@@ -575,7 +524,6 @@ inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, flo
     ac.hasLast = true;
 }
 
-/** Overload retrocompatibile. */
 inline void acValidateMovement(glm::vec3& pos, glm::vec3& moveVel, float dt, float nowTime) {
     acValidateMovement(pos, moveVel, dt, nowTime, true, 0.f);
 }

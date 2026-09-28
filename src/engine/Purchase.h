@@ -1,16 +1,5 @@
 #pragma once
 
-/**
- * Acquisto Blocky Bucks (B$) via pay-link (Stripe Payment Link o simile).
- *
- * Flusso:
- *  1. Shop → Compra B$ → apre payLink nel browser
- *  2. Dopo il pagamento l'utente riceve un codice
- *  3. Incolla il codice in Shop → credito B$
- *
- * Config: %APPDATA%/Blocky/bucks_store.json
- * Codici:  %APPDATA%/Blocky/bucks_codes.json
- */
 
 #include "Economy.h"
 #include "GameHub.h"
@@ -74,7 +63,6 @@ inline std::string bucksEscape(const std::string& s) {
     return o;
 }
 
-/** Grant da acquisto (codice) — tetto più alto dei reward di gioco. */
 inline bool ecoGrantPurchase(const char* user, int amount, const char* reason = nullptr) {
     auto& e = economy();
     if (e.banned) {
@@ -106,7 +94,6 @@ inline void bucksSeedDefaultPacks(BucksPurchaseState& st) {
         p.payLink = link;
         st.packs.push_back(std::move(p));
     };
-    // Sostituisci payLink in bucks_store.json con i tuoi Stripe Payment Links
     add("b100",  "100 Blocky Bucks",   100,  "€0.99",  "https://buy.stripe.com/test_blocky_100");
     add("b500",  "500 Blocky Bucks",   500,  "€3.99",  "https://buy.stripe.com/test_blocky_500");
     add("b1200", "1.200 Blocky Bucks", 1200, "€7.99",  "https://buy.stripe.com/test_blocky_1200");
@@ -234,7 +221,6 @@ inline void bucksEnsureLoaded() {
         bucksLoadStore(bucksPurchase());
 }
 
-/** Se i link sono ancora placeholder Stripe test → pagina demo locale. */
 inline void bucksSetFallbackPayPage(const std::string& fileUrlOrHttp) {
     bucksEnsureLoaded();
     auto& st = bucksPurchase();

@@ -1,21 +1,5 @@
 #pragma once
 
-/**
- * Economia B$ + ban anti-cheat (client).
- *
- * Strike SOLO su prove chiare di manomissione:
- *  - firma disco presente ma falsa (edit profile.txt)
- *  - poke memoria (seal/shadow non tornano)
- *  - tentativo grant illegale (> kMaxGrant)
- *
- * NON è strike (niente ban falso):
- *  - profilo legacy senza firma (migrazione)
- *  - ecoGrant / ecoSpend legittimi (acquisti, reward)
- *  - clamp saldo per tetto massimo
- *
- * 2 strike confermati → ban permanente (file integrity).
- * Nota: senza server un cheat avanzato può ancora cancellare il file ban.
- */
 
 #include <algorithm>
 #include <cstdint>
@@ -32,25 +16,25 @@ struct EconomyState {
     int coins = 500;
     int shadowXor = 500 ^ 0x5A5A5A5A;
     uint32_t seal = 0;
-    bool tampered = false;       // ultimo evento sospetto
-    bool banned = false;         // ban permanente
-    int cheatStrikes = 0;        // 0..2+
+    bool tampered = false;
+    bool banned = false;
+    int cheatStrikes = 0;
     std::string lastError;
-    float lastStrikeTime = -1000.f; // debounce
+    float lastStrikeTime = -1000.f;
 
     static constexpr int kMaxCoins = 250000;
     static constexpr int kStartCoins = 500;
     static constexpr int kMaxGrant = 5000;
     static constexpr int kXorKey = (int)0x5A5A5A5A;
     static constexpr int kStrikesToBan = 2;
-    static constexpr float kStrikeCooldownSec = 8.f; // 2 poke ravvicinati = 1 strike
+    static constexpr float kStrikeCooldownSec = 8.f;
 };
 
 enum class EcoCheatKind {
-    DiskForgery,   // profile firmato ma alterato
-    MemoryPoke,    // seal/shadow rotti
-    IllegalGrant,  // tentativo di dare troppi B$ via API
-    HostileInject  // debugger / tool cheat agganciato (ripetuto → ban)
+    DiskForgery,
+    MemoryPoke,
+    IllegalGrant,
+    HostileInject
 };
 
 inline EconomyState& economy() {
@@ -142,11 +126,6 @@ inline void ecoReseal(const char* user) {
     e.seal = ecoHashUserCoins(user ? user : "", e.coins);
 }
 
-/**
- * Registra uno strike SOLO per cheat confermato.
- * Debounce: eventi entro kStrikeCooldownSec contano come 1.
- * Ritorna true se ora è bannato.
- */
 inline bool ecoReportConfirmedCheat(const char* user, EcoCheatKind kind, float nowTime,
                                     const char* detail) {
     auto& e = economy();
@@ -158,13 +137,11 @@ inline bool ecoReportConfirmedCheat(const char* user, EcoCheatKind kind, float n
     else if (kind == EcoCheatKind::IllegalGrant) kindStr = "illegal grant";
     else if (kind == EcoCheatKind::HostileInject) kindStr = "inject/cheat tool";
 
-    // Già bannato
     if (e.banned) {
         e.lastError = "Account bannato per cheat economia";
         return true;
     }
 
-    // Debounce: non contare 60 volte al secondo lo stesso poke
     if (nowTime - e.lastStrikeTime < EconomyState::kStrikeCooldownSec) {
         e.lastError = std::string("B$ protetti (") + kindStr + ") — saldo ripristinato";
         std::fprintf(stderr, "[Economy] cheat debounce (%s): %s\n", kindStr,
@@ -209,12 +186,11 @@ inline void ecoBoot(const char* user, int coins) {
     }
     if (coins < 0) coins = 0;
     if (coins > EconomyState::kMaxCoins)
-        coins = EconomyState::kMaxCoins; // clamp soft, NON strike (può essere reward legittimo vecchio)
+        coins = EconomyState::kMaxCoins;
     e.coins = coins;
     ecoReseal(user);
 }
 
-/** Verify memoria. nowTime=glfw time (0 = no strike, solo restore silenzioso). */
 inline bool ecoVerify(const char* user, float nowTime = 0.f) {
     auto& e = economy();
     if (e.banned) {
@@ -225,7 +201,6 @@ inline bool ecoVerify(const char* user, float nowTime = 0.f) {
     int fromShadow = e.shadowXor ^ EconomyState::kXorKey;
     uint32_t expect = ecoHashUserCoins(user ? user : "", e.coins);
     if (fromShadow != e.coins || expect != e.seal) {
-        // Poke memoria confermato (seal e shadow non allineati al valore)
         if (nowTime > 0.f)
             ecoReportConfirmedCheat(user, EcoCheatKind::MemoryPoke, nowTime, "seal/shadow mismatch");
         else {
@@ -256,9 +231,7 @@ inline bool ecoSpend(const char* user, int amount, const char* reason = nullptr)
         e.lastError = "Account bannato";
         return false;
     }
-    // Spend legittimo: verify senza strike time (se rotto, restore; strike solo con nowTime>0)
     if (!ecoVerify(user, 0.f)) {
-        // Se era un poke, già segnalato altrove con nowTime; qui non doppio-strike
         return false;
     }
     if (amount <= 0 || e.coins < amount) {
@@ -281,7 +254,6 @@ inline bool ecoGrant(const char* user, int amount, const char* reason = nullptr,
     }
     if (!ecoVerify(user, 0.f)) return false;
     if (amount <= 0) return false;
-    // Solo grant assurdi = cheat (reward di gioco restano sotto kMaxGrant)
     if (amount > EconomyState::kMaxGrant) {
         if (nowTime > 0.f)
             ecoReportConfirmedCheat(user, EcoCheatKind::IllegalGrant, nowTime, "grant eccessivo");
@@ -300,30 +272,22 @@ inline bool ecoGrant(const char* user, int amount, const char* reason = nullptr,
     return true;
 }
 
-/**
- * Carica coins da disco.
- * outStrikeDisk = true solo se c'era firma E era falsa (edit intenzionale).
- * Legacy senza firma → false (niente ban).
- */
 inline int ecoSanitizeLoadedCoins(const char* user, int coins, bool hasSig, bool sigOk,
                                   bool* outConfirmedDiskCheat) {
     if (outConfirmedDiskCheat) *outConfirmedDiskCheat = false;
     if (coins < 0) coins = 0;
 
     if (hasSig && !sigOk) {
-        // Firma presente ma non torna = qualcuno ha editato i B$
         if (outConfirmedDiskCheat) *outConfirmedDiskCheat = true;
         return EconomyState::kStartCoins;
     }
 
-    // Legacy senza firma: migra, NON è cheat. Mantieni saldo entro tetto.
     if (!hasSig) {
         if (coins > EconomyState::kMaxCoins)
             coins = EconomyState::kMaxCoins;
         return coins;
     }
 
-    // Firma ok: saldo legittimo (acquisto / reward). Solo clamp soft.
     if (coins > EconomyState::kMaxCoins)
         coins = EconomyState::kMaxCoins;
     return coins;

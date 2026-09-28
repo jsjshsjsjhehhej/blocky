@@ -1,12 +1,3 @@
-/**
- * asset_audit — controlla gli asset e scrive l'inventario.
- *
- *   asset_audit [cartella] [--manifest percorso] [--strict]
- *
- * Uscita 0 se non ci sono errori, 1 altrimenti: così può stare in uno script
- * di release e fermarlo prima che parta il pacchetto. Con --strict anche gli
- * avvisi fanno fallire.
- */
 
 #include <cstdio>
 #include <cstring>
@@ -27,7 +18,6 @@ void printReport(const AssetAudit::Report& r, const std::string& root) {
         return;
     }
 
-    // Errori prima: sono quelli che bloccano la release.
     for (int pass = 0; pass < 2; ++pass) {
         const auto want = pass == 0 ? AssetAudit::Severity::Error : AssetAudit::Severity::Warn;
         for (const auto& f : r.findings) {
@@ -41,7 +31,7 @@ void printReport(const AssetAudit::Report& r, const std::string& root) {
     std::printf("\n  %d errori, %d avvisi\n\n", r.errors, r.warnings);
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
     std::string root = "assets";

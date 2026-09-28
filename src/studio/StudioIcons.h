@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Icone vettoriali disegnate a runtime con ImDrawList.
- *
- * Nessun file PNG, nessun atlante: le icone sono geometria, quindi restano
- * nitide a ogni scala e l'eseguibile non porta dietro asset. Ogni glifo è
- * costruito qui dentro con primitive elementari.
- */
 
 #include <imgui.h>
 #include <cmath>
@@ -18,6 +11,7 @@ enum class Icon : int {
     Move,
     Scale,
     Rotate,
+    Transform,
     Cube,
     Sphere,
     Cylinder,
@@ -36,12 +30,21 @@ enum class Icon : int {
     Folder,
     Camera,
     Anchor,
+    // Categorie dell'Avatar Editor. In fondo all'enum di proposito: nessuno
+    // converte Icon da/verso int, ma appendere resta la scelta piu' sicura.
+    Head,
+    Torso,
+    ArmLeft,
+    ArmRight,
+    LegLeft,
+    LegRight,
+    Walk,
+    Package,
 };
 
-/** `size` è il lato del riquadro logico dell'icona; il disegno lo riempie. */
 inline void drawIcon(ImDrawList* dl, ImVec2 c, float size, Icon icon, ImU32 col) {
     const float r = size * 0.5f;
-    const float t = (size * 0.085f > 1.4f) ? size * 0.085f : 1.4f;   // spessore tratto
+    const float t = (size * 0.085f > 1.4f) ? size * 0.085f : 1.4f;
 
     auto P = [&](float x, float y) { return ImVec2(c.x + x * r, c.y + y * r); };
 
@@ -76,7 +79,6 @@ inline void drawIcon(ImDrawList* dl, ImVec2 c, float size, Icon icon, ImU32 col)
     case Icon::Rotate: {
         dl->PathArcTo(c, r * 0.68f, -2.9f, 1.5f, 24);
         dl->PathStroke(col, 0, t);
-        // Punta della freccia in coda all'arco.
         const float a = 1.5f;
         const ImVec2 tip(c.x + std::cos(a) * r * 0.68f, c.y + std::sin(a) * r * 0.68f);
         dl->AddTriangleFilled(ImVec2(tip.x + r * 0.26f, tip.y),
@@ -85,8 +87,22 @@ inline void drawIcon(ImDrawList* dl, ImVec2 c, float size, Icon icon, ImU32 col)
         break;
     }
 
+    case Icon::Transform: {
+        // Anello di rotazione attorno a una piccola croce di spostamento:
+        // stesso linguaggio visivo di Move/Rotate ma combinati, per il
+        // gizmo "tutto in uno".
+        dl->AddCircle(c, r * 0.82f, col, 28, t * 0.85f);
+        const float h = 0.40f, s = 0.14f;
+        dl->AddLine(P(0, -h), P(0, h), col, t);
+        dl->AddLine(P(-h, 0), P(h, 0), col, t);
+        dl->AddTriangleFilled(P(0, -h - s), P(-s, -h), P(s, -h), col);
+        dl->AddTriangleFilled(P(0, h + s),  P(-s, h),  P(s, h),  col);
+        dl->AddTriangleFilled(P(-h - s, 0), P(-h, -s), P(-h, s), col);
+        dl->AddTriangleFilled(P(h + s, 0),  P(h, -s),  P(h, s),  col);
+        break;
+    }
+
     case Icon::Cube: {
-        // Proiezione isometrica: tre facce, spigoli condivisi.
         const ImVec2 top = P(0, -0.86f), left = P(-0.80f, -0.42f), right = P(0.80f, -0.42f);
         const ImVec2 bottom = P(0, 0.86f), bl = P(-0.80f, 0.42f), br = P(0.80f, 0.42f);
         const ImVec2 mid = P(0, 0.0f);
@@ -226,7 +242,74 @@ inline void drawIcon(ImDrawList* dl, ImVec2 c, float size, Icon icon, ImU32 col)
         dl->PathStroke(col, 0, t);
         break;
     }
+
+    case Icon::Head: {
+        const ImU32 shade = (col & 0x00FFFFFF) | 0x70000000;
+        dl->AddRectFilled(P(-0.20f, 0.34f), P(0.20f, 0.72f), col, r * 0.10f);
+        dl->AddRectFilled(P(-0.54f, -0.74f), P(0.54f, 0.40f), col, r * 0.30f);
+        dl->AddCircleFilled(P(-0.22f, -0.20f), r * 0.11f, shade, 10);
+        dl->AddCircleFilled(P(0.22f, -0.20f), r * 0.11f, shade, 10);
+        break;
+    }
+
+    case Icon::Torso: {
+        const ImU32 shade = (col & 0x00FFFFFF) | 0x70000000;
+        dl->AddRectFilled(P(-0.24f, -0.88f), P(0.24f, -0.62f), col, r * 0.10f);
+        dl->AddRectFilled(P(-0.64f, -0.64f), P(0.64f, 0.66f), col, r * 0.22f);
+        dl->AddLine(P(-0.50f, -0.18f), P(0.50f, -0.18f), shade, t * 0.8f);
+        break;
+    }
+
+    case Icon::ArmLeft: {
+        dl->AddCircleFilled(P(-0.32f, -0.58f), r * 0.21f, col, 14);
+        dl->AddRectFilled(P(-0.50f, -0.38f), P(-0.14f, 0.80f), col, r * 0.16f);
+        break;
+    }
+
+    case Icon::ArmRight: {
+        dl->AddCircleFilled(P(0.32f, -0.58f), r * 0.21f, col, 14);
+        dl->AddRectFilled(P(0.14f, -0.38f), P(0.50f, 0.80f), col, r * 0.16f);
+        break;
+    }
+
+    case Icon::LegLeft: {
+        dl->AddRectFilled(P(-0.46f, -0.74f), P(-0.10f, 0.50f), col, r * 0.16f);
+        dl->AddRectFilled(P(-0.64f, 0.50f), P(-0.10f, 0.80f), col, r * 0.12f);
+        break;
+    }
+
+    case Icon::LegRight: {
+        dl->AddRectFilled(P(0.10f, -0.74f), P(0.46f, 0.50f), col, r * 0.16f);
+        dl->AddRectFilled(P(0.10f, 0.50f), P(0.64f, 0.80f), col, r * 0.12f);
+        break;
+    }
+
+    case Icon::Walk: {
+        dl->AddCircleFilled(P(0.12f, -0.64f), r * 0.20f, col, 14);
+        dl->AddLine(P(0.08f, -0.42f), P(-0.04f, 0.16f), col, t);
+        dl->AddLine(P(-0.04f, 0.16f), P(-0.46f, 0.74f), col, t);
+        dl->AddLine(P(-0.04f, 0.16f), P(0.44f, 0.64f), col, t);
+        dl->AddLine(P(0.03f, -0.28f), P(-0.44f, -0.04f), col, t * 0.85f);
+        dl->AddLine(P(0.03f, -0.28f), P(0.50f, -0.32f), col, t * 0.85f);
+        break;
+    }
+
+    case Icon::Package: {
+        const ImVec2 top = P(0, -0.80f), left = P(-0.76f, -0.40f), right = P(0.76f, -0.40f);
+        const ImVec2 bottom = P(0, 0.80f), bl = P(-0.76f, 0.40f), br = P(0.76f, 0.40f);
+        const ImVec2 mid = P(0, 0.0f);
+        const ImVec2 faceTop[] = {top, right, mid, left};
+        dl->AddConvexPolyFilled(faceTop, 4, col);
+        const ImVec2 faceL[] = {left, mid, bottom, bl};
+        dl->AddConvexPolyFilled(faceL, 4, (col & 0x00FFFFFF) | 0xA0000000);
+        const ImVec2 faceR[] = {mid, right, br, bottom};
+        dl->AddConvexPolyFilled(faceR, 4, (col & 0x00FFFFFF) | 0x70000000);
+        const ImU32 ribbon = IM_COL32(255, 255, 255, 215);
+        dl->AddLine(top, mid, ribbon, t * 0.9f);
+        dl->AddLine(mid, bottom, ribbon, t * 0.9f);
+        break;
+    }
     }
 }
 
-} // namespace studio
+}

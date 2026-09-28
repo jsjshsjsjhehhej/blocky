@@ -1,20 +1,23 @@
 #pragma once
 
-/**
- * Flusso: Login (prima schermata) → Hub (Games / Shop / Chat)
- * Studio / Avatar Catalog sono solo in Blocky Game Engine.
- */
 
 #include <imgui.h>
 #include <imgui_internal.h>
 
 #include "engine/GameHub.h"
+#include "engine/PoolConfig.h"
+#include "engine/RemoteGames.h"
+#include "engine/RemoteCatalog.h"
+#include "engine/ServerBrowser.h"
 #include "engine/Economy.h"
 #include "engine/GoogleAuth.h"
 #include "engine/AccountVault.h"
 #include "engine/Purchase.h"
 #include "moderation/ContentFilter.h"
 #include "ui/Loc.h"
+#include "ui/UiTheme.h"
+#include "ui/UiMetrics.h"
+#include "render/Texture2D.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -34,50 +38,58 @@ struct ClassicMenuState {
     int selectedGame = 0;
     int hoveredGame = -1;
     float charSpin = 0.f;
-    float uiTime = 0.f;       // tempo globale UI (animazioni)
-    float loginAppear = 0.f;  // 0→1 ingresso login
-    float tabSlide = 0.f;     // indicatore tab animato (0=Games,1=Shop,2=Chat)
+    float uiTime = 0.f;
+    float loginAppear = 0.f;
+    float tabSlide = 0.f;
     float playPulse = 0.f;
     bool wantPlay = false;
-    bool wantBuild = false; // legacy / unused in Blocky hub
+    bool wantBuild = false;
     bool wantCatalog = false;
     bool wantImportModel = false;
     bool wantQuit = false;
     int launchGame = -1;
 
-    // --- Entra con IP ---
-    // Il broadcast LAN non attraversa i router: senza un indirizzo scritto a
-    // mano non si raggiunge un server fuori dalla propria rete.
     char joinIp[64] = "127.0.0.1";
     int  joinPort = 27015;
     bool wantJoinIp = false;
 
-    bool showLogin = true; // true all'avvio — pagina login
+    // Server dei giochi pubblicati (blocky_hostd). Vuoto = solo giochi locali.
+    char gameServer[80] = "";
+    bool wantRefreshGameServer = false;
+    bool wantPublishCatalog = false;
+    bool wantSyncGames = false;
+    bool wantServerList = false;
+    bool showServerList = false;
+    int  joinServerIndex = -1;
+
+    char joinCode[16] = "";
+    bool wantJoinCode = false;
+
+    bool showLogin = true;
     HubTab tab = HubTab::Games;
     bool loggedIn = false;
     char username[64] = "";
     char password[64] = "";
     char googleEmail[128] = "";
-    bool googleLoginPending = false; // dopo click "Google": aspetta conferma email
+    bool googleLoginPending = false;
     bool loggedInWithGoogle = false;
-    bool createPasskeyPending = false; // dopo login: crea PIN/passkey
-    bool unlockPasskeyPending = false; // login da account salvato: chiedi PIN
+    bool createPasskeyPending = false;
+    bool unlockPasskeyPending = false;
     char passkeyBuf[32] = {};
     char passkeyConfirmBuf[32] = {};
     char unlockTargetUser[64] = {};
     char chatInput[128] = "";
     std::vector<std::string> chatLines;
-    Moderation::Session mod; // log chat + report con verifica
-    int shopCoins = 500; // Blocky Bucks (B$)
+    Moderation::Session mod;
+    int shopCoins = 500;
     std::string loginError;
 
-    /** Item in vendita nello Shop (inclusi avatar pubblicati dal Catalog). */
     struct ShopItem {
         std::string name;
         std::string seller = "Blocky";
-        std::string sourcePath; // vuoto = cosmetico stub; per walk = .walk.json
-        int slot = 0;           // AvatarSlot (accessori)
-        int kind = 0;           // 0=accessorio, 1=walking animation
+        std::string sourcePath;
+        int slot = 0;
+        int kind = 0;
         float offset[3] = {0, 0, 0};
         float rotation[3] = {0, 0, 0};
         float scale[3] = {1, 1, 1};
@@ -85,54 +97,99 @@ struct ClassicMenuState {
         int price = 50;
         bool owned = false;
         bool fromPublisher = false;
-        bool replacesBody = false; // parte custom al posto del cubo R6
-        bool equipped = false; // indossato sull'avatar
+        bool replacesBody = false;
+        bool equipped = false;
     };
     std::vector<ShopItem> shopItems;
-    int wantEquipShop = -1;   // indice da equipaggiare (main.cpp)
-    int wantUnequipShop = -1; // indice da disequipaggiare
-    int wantUnequipEquipped = -1; // indice in equippedList
+    int wantEquipShop = -1;
+    int wantUnequipShop = -1;
+    int wantUnequipEquipped = -1;
     bool shopSeeded = false;
 
-    // Multiplayer: stato solo informativo (join automatico su PLAY)
     char netStatus[96] = "";
 
-    /** Copia degli accessori attualmente sull'avatar (sync da main). */
     struct EquippedInfo {
         std::string name;
         int slot = 0;
         std::string sourcePath;
     };
     std::vector<EquippedInfo> equippedList;
+
+    std::vector<std::string> userFriends; // account reali (LAN), non i companion NPC di Studio
+    bool showPlayersPanel = false;
+    int reportTargetPlayer = -1; // indice in g_net.remotes, -1 = nessuno
+    bool reportGamePending = false;
+    char reportReasonBuf[160] = {};
 };
 
-/** Percorso profilo utente (username + B$ + auto-login + firma). */
 inline std::string blockyProfilePath() {
-#ifdef _WIN32
-    const char* appdata = std::getenv("APPDATA");
-    if (appdata && appdata[0]) {
-        std::string dir = std::string(appdata) + "\\Blocky";
-        _mkdir(dir.c_str());
-        return dir + "\\profile.txt";
-    }
-#endif
-    return "blocky_profile.txt";
+    return plat::dataDir() + "/profile.txt";
 }
 
 inline void ecoSyncMenu(ClassicMenuState& st, float nowTime = 0.f) {
     st.shopCoins = ecoBalance(st.username, nowTime);
 }
 
+// Lista amici reali (account visti su LAN), un file per utente locale —
+// NON va confusa con WorkspaceFriend/g_friends, che sono i companion NPC
+// piazzabili in Studio: due concetti separati, stesso nome per comodita'
+// dell'utente ma niente a che fare l'uno con l'altro nel codice.
+inline std::string blockyFriendsPath(const std::string& username) {
+    std::string key = normalizeCreatorKey(username);
+    // Stessa radice di tutto il resto dei dati utente: il ripiego
+    // relativo di prima su Android finiva in "/", di sola lettura, e la
+    // lista amici non veniva mai salvata.
+    return plat::dataDir() + "/friends_" + key + ".txt";
+}
+
+inline std::vector<std::string> loadFriendsList(const std::string& username) {
+    std::vector<std::string> out;
+    if (username.empty()) return out;
+    std::ifstream f(blockyFriendsPath(username));
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (!line.empty()) out.push_back(line);
+    }
+    return out;
+}
+
+inline void saveFriendsList(const std::string& username, const std::vector<std::string>& list) {
+    if (username.empty()) return;
+    std::ofstream f(blockyFriendsPath(username));
+    for (const auto& n : list) f << n << "\n";
+}
+
+inline bool isFriend(const ClassicMenuState& st, const std::string& name) {
+    std::string key = normalizeCreatorKey(name);
+    for (const auto& f : st.userFriends)
+        if (normalizeCreatorKey(f) == key) return true;
+    return false;
+}
+
+inline void addFriend(ClassicMenuState& st, const std::string& name) {
+    if (name.empty() || normalizeCreatorKey(name) == normalizeCreatorKey(st.username)) return;
+    if (isFriend(st, name)) return;
+    st.userFriends.push_back(name);
+    saveFriendsList(st.username, st.userFriends);
+}
+
+inline void removeFriend(ClassicMenuState& st, const std::string& name) {
+    std::string key = normalizeCreatorKey(name);
+    auto& v = st.userFriends;
+    v.erase(std::remove_if(v.begin(), v.end(),
+        [&](const std::string& f) { return normalizeCreatorKey(f) == key; }), v.end());
+    saveFriendsList(st.username, v);
+}
+
 inline void saveUserProfile(const ClassicMenuState& st) {
     if (st.username[0] == '\0') return;
     ClassicMenuState& mut = const_cast<ClassicMenuState&>(st);
-    // Save: verify silenzioso (niente strike) — evita ban su glitch salvataggio
     ecoVerify(st.username, 0.f);
     mut.shopCoins = economy().coins;
     uint32_t sig = ecoDiskSignature(st.username, mut.shopCoins);
     FILE* f = std::fopen(blockyProfilePath().c_str(), "wb");
     if (!f) return;
-    // username\ncoins\nautoLogin\nsigHex\n
     std::fprintf(f, "%s\n%d\n%d\n%08X\n", st.username, mut.shopCoins,
                  st.loggedIn ? 1 : 0, (unsigned)sig);
     std::fclose(f);
@@ -141,6 +198,7 @@ inline void saveUserProfile(const ClassicMenuState& st) {
 
 inline bool loadUserProfile(ClassicMenuState& st) {
     loadSavedAccounts();
+    dedupeSavedAccounts();
     FILE* f = std::fopen(blockyProfilePath().c_str(), "rb");
     if (!f) {
         ecoBoot(st.username, EconomyState::kStartCoins);
@@ -172,7 +230,6 @@ inline bool loadUserProfile(ClassicMenuState& st) {
     bool sigOk = false;
     if (hasSigLine) {
         unsigned v = 0;
-        // Accetta solo riga hex firma (8+ hex) — evita falsi positivi
         size_t sl = std::strlen(sigLine);
         while (sl > 0 && (sigLine[sl - 1] == '\n' || sigLine[sl - 1] == '\r')) sigLine[--sl] = '\0';
         if (sl >= 6 && std::sscanf(sigLine, "%x", &v) == 1) {
@@ -186,8 +243,6 @@ inline bool loadUserProfile(ClassicMenuState& st) {
 
     ecoBoot(st.username, coins);
 
-    // Strike SOLO se firma c'era ed era falsa (edit intenzionale).
-    // Legacy senza firma / acquisti firmati ok → MAI ban.
     if (diskCheat && !economy().banned) {
         ecoReportConfirmedCheat(st.username, EcoCheatKind::DiskForgery, 1000.f,
                                 "profile signature mismatch");
@@ -200,9 +255,10 @@ inline bool loadUserProfile(ClassicMenuState& st) {
         st.showLogin = true;
         st.loginError = "Account BANNATO per cheat economia (permanente)";
     } else if (autoLogin && st.username[0]) {
-        // Se l'account ha passkey, non auto-login: chiedi PIN
         const SavedAccount* acc = findSavedAccount(st.username);
-        if (acc && acc->hasPasskey) {
+        // Se su questo dispositivo la passkey e' gia' stata verificata di
+        // recente, non si richiede: sarebbe solo fastidio, non sicurezza in piu'.
+        if (acc && acc->hasPasskey && !isDeviceTrustedFor(st.username)) {
             st.loggedIn = false;
             st.showLogin = true;
             st.unlockPasskeyPending = true;
@@ -210,6 +266,7 @@ inline bool loadUserProfile(ClassicMenuState& st) {
         } else {
             st.loggedIn = true;
             st.showLogin = false;
+            st.userFriends = loadFriendsList(st.username);
         }
     }
 
@@ -244,7 +301,6 @@ inline std::string avatarSavePath() {
     return blockyDataDir() + "/avatar.json";
 }
 
-/** Salva Shop (item pubblicati + posseduti) su disco. */
 inline bool saveShopItems(const ClassicMenuState& st) {
     std::ostringstream j;
     j << "{\n  \"items\": [\n";
@@ -283,7 +339,6 @@ inline bool jsonFindFloat3(const std::string& json, const std::string& key, size
     return std::sscanf(json.c_str() + b + 1, "%f,%f,%f", &out[0], &out[1], &out[2]) >= 3;
 }
 
-/** Carica Shop salvato. Ritorna true se ha trovato il file. */
 inline bool loadShopItems(ClassicMenuState& st) {
     std::string json = readTextFile(shopSavePath());
     if (json.empty()) return false;
@@ -316,9 +371,107 @@ inline bool loadShopItems(ClassicMenuState& st) {
     return !st.shopItems.empty();
 }
 
+
+/**
+ * Gli item scaricati dal server, aggiunti a quelli locali.
+ *
+ * Si fondono per NOME invece di sostituire tutto: chi ha gia' i suoi item non
+ * deve vederseli spazzare via perche' un altro dispositivo ha pubblicato il
+ * proprio catalogo. Se un nome esiste gia' si tiene quello locale, che e'
+ * quello su cui l'utente sta lavorando.
+ *
+ * I sourcePath arrivano come nomi di file nudi: qui diventano il percorso
+ * della copia scaricata, altrimenti punterebbero a una cartella che esiste
+ * solo sul computer di chi li ha creati.
+ */
+inline int mergeRemoteCatalog(ClassicMenuState& st, const std::string& json) {
+    if (json.empty()) return 0;
+
+    int added = 0;
+    size_t pos = 0;
+    while ((pos = json.find("\"name\"", pos)) != std::string::npos) {
+        ClassicMenuState::ShopItem it;
+        it.name = jsonFindStr(json, "name", pos);
+        it.seller = jsonFindStr(json, "seller", pos);
+        const std::string meshFile = jsonFindStr(json, "sourcePath", pos);
+        it.slot = jsonFindInt(json, "slot", pos);
+        jsonFindFloat3(json, "offset", pos, it.offset);
+        jsonFindFloat3(json, "rotation", pos, it.rotation);
+        jsonFindFloat3(json, "scale", pos, it.scale);
+        jsonFindFloat3(json, "tint", pos, it.tint);
+        it.price = jsonFindInt(json, "price", pos);
+        it.kind = jsonFindInt(json, "kind", pos);
+        // Un catalogo condiviso e una VETRINA, non un regalo: gli item
+        // arrivano da vedere, non gia posseduti. Prima si copiava owned dal
+        // PC che li aveva pubblicati, e sul telefono comparivano come roba
+        // gia tua senza averla mai presa.
+        it.owned = false;
+        it.equipped = false;
+        it.fromPublisher = jsonFindBool(json, "fromPublisher", pos, false);
+        it.replacesBody = jsonFindBool(json, "replacesBody", pos, false);
+        pos += 6;
+
+        if (it.name.empty()) continue;
+        if (it.scale[0] == 0 && it.scale[1] == 0 && it.scale[2] == 0)
+            it.scale[0] = it.scale[1] = it.scale[2] = 1.f;
+
+        bool already = false;
+        for (const auto& existing : st.shopItems)
+            if (existing.name == it.name) { already = true; break; }
+        if (already) continue;
+
+        if (!meshFile.empty())
+            it.sourcePath = blk::remotecatalog::localMeshDir() + "/" + meshFile;
+
+        st.shopItems.push_back(std::move(it));
+        ++added;
+    }
+    if (added > 0) saveShopItems(st);
+    return added;
+}
+
+/**
+ * Manda il catalogo locale al server.
+ *
+ * I sourcePath vengono ridotti al solo nome del file: e' quello che l'altro
+ * capo chiedera' a GET /catalog/<file>, e un percorso assoluto di questo
+ * computer non gli servirebbe a niente.
+ */
+inline void publishCatalogToServer(const ClassicMenuState& st, const std::string& hostPort) {
+    std::ostringstream j;
+    j << "{\n  \"items\": [\n";
+    std::vector<std::string> meshes;
+    bool first = true;
+    for (const auto& it : st.shopItems) {
+        std::string meshName;
+        if (!it.sourcePath.empty()) {
+            meshes.push_back(it.sourcePath);
+            meshName = std::filesystem::path(it.sourcePath).filename().string();
+        }
+        if (!first) j << ",\n";
+        first = false;
+        j << "    {"
+          << "\"name\":\"" << jsonEscape(it.name) << "\","
+          << "\"seller\":\"" << jsonEscape(it.seller) << "\","
+          << "\"sourcePath\":\"" << jsonEscape(meshName) << "\","
+          << "\"slot\":" << it.slot << ","
+          << "\"offset\":[" << it.offset[0] << "," << it.offset[1] << "," << it.offset[2] << "],"
+          << "\"rotation\":[" << it.rotation[0] << "," << it.rotation[1] << "," << it.rotation[2] << "],"
+          << "\"scale\":[" << it.scale[0] << "," << it.scale[1] << "," << it.scale[2] << "],"
+          << "\"tint\":[" << it.tint[0] << "," << it.tint[1] << "," << it.tint[2] << "],"
+          << "\"price\":" << it.price << ","
+          << "\"kind\":" << it.kind << ","
+          << "\"owned\":" << (it.owned ? "true" : "false") << ","
+          << "\"fromPublisher\":" << (it.fromPublisher ? "true" : "false") << ","
+          << "\"replacesBody\":" << (it.replacesBody ? "true" : "false")
+          << "}";
+    }
+    j << "\n  ]\n}\n";
+    blk::remotecatalog::publish(hostPort, j.str(), meshes);
+}
+
 inline void seedDefaultShop(ClassicMenuState& st) {
     if (st.shopSeeded) return;
-    // Prova prima il salvataggio su disco
     if (loadShopItems(st)) return;
     st.shopSeeded = true;
     auto add = [&](const char* name, int price, bool owned = false) {
@@ -353,93 +506,29 @@ inline void uiSoftShadow(ImDrawList* dl, ImVec2 a, ImVec2 b, float rounding, int
     }
 }
 
+// Definita in fondo al file, accanto alle altre finestre della hub.
+inline void drawServerListWindow(ClassicMenuState& st);
+
 inline void applyClassicRobloxTheme() {
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 16.f;
-    s.ChildRounding = 14.f;
-    s.FrameRounding = 10.f;
-    s.GrabRounding = 8.f;
-    s.PopupRounding = 12.f;
-    s.ScrollbarRounding = 10.f;
-    s.ItemSpacing = {14, 10};
-    s.WindowPadding = {16, 14};
-    s.FramePadding = {14, 9};
-    s.WindowBorderSize = 0.f;
-    s.ChildBorderSize = 0.f;
-    s.FrameBorderSize = 0.f;
-    ImVec4* c = s.Colors;
-    // Palette blu Blocky — glass / product UI
-    c[ImGuiCol_WindowBg]          = {0.06f, 0.22f, 0.48f, 0.0f};
-    c[ImGuiCol_ChildBg]           = {0.99f, 0.995f, 1.00f, 0.96f};
-    c[ImGuiCol_PopupBg]           = {0.99f, 0.995f, 1.00f, 0.98f};
-    c[ImGuiCol_Button]            = {0.10f, 0.46f, 0.94f, 1.f};
-    c[ImGuiCol_ButtonHovered]     = {0.18f, 0.56f, 1.00f, 1.f};
-    c[ImGuiCol_ButtonActive]      = {0.07f, 0.36f, 0.80f, 1.f};
-    c[ImGuiCol_Header]            = {0.16f, 0.50f, 0.96f, 0.35f};
-    c[ImGuiCol_HeaderHovered]     = {0.20f, 0.56f, 1.00f, 0.55f};
-    c[ImGuiCol_HeaderActive]      = {0.14f, 0.44f, 0.90f, 0.75f};
-    c[ImGuiCol_FrameBg]           = {0.93f, 0.96f, 1.00f, 1.f};
-    c[ImGuiCol_FrameBgHovered]    = {0.88f, 0.93f, 1.00f, 1.f};
-    c[ImGuiCol_FrameBgActive]     = {0.82f, 0.90f, 1.00f, 1.f};
-    c[ImGuiCol_Text]              = {0.08f, 0.14f, 0.26f, 1.f};
-    c[ImGuiCol_TextDisabled]      = {0.40f, 0.50f, 0.66f, 1.f};
-    c[ImGuiCol_Border]            = {0.78f, 0.86f, 0.96f, 0.8f};
-    c[ImGuiCol_Separator]         = {0.82f, 0.88f, 0.96f, 1.f};
-    c[ImGuiCol_CheckMark]         = {0.10f, 0.46f, 0.94f, 1.f};
-    c[ImGuiCol_SliderGrab]        = {0.18f, 0.52f, 0.96f, 1.f};
-    c[ImGuiCol_SliderGrabActive]  = {0.32f, 0.66f, 1.00f, 1.f};
-    c[ImGuiCol_ScrollbarBg]       = {0.92f, 0.95f, 1.00f, 0.45f};
-    c[ImGuiCol_ScrollbarGrab]     = {0.52f, 0.68f, 0.92f, 1.f};
-    c[ImGuiCol_NavHighlight]      = {0.f, 0.f, 0.f, 0.f};
-    c[ImGuiCol_NavWindowingHighlight] = {0.f, 0.f, 0.f, 0.f};
-    c[ImGuiCol_NavWindowingDimBg] = {0.f, 0.f, 0.f, 0.f};
+    // Come applyStudioTheme() sotto: i valori vivono in assets/ui/theme.json
+    // (chiavi "Hub..." — vedi UiTheme.h) invece che scritti qui a mano. Se il
+    // file manca o e' malformato, loadHubTheme applica questi stessi valori
+    // di sempre, quindi nessun comportamento cambia finche' non lo tocchi.
+    loadHubTheme(ImGui::GetStyle());
+    // Dopo il tema, mai prima: loadHubTheme riscrive lo stile da capo e
+    // cancellerebbe le misure da touch.
+    blk::ui::applyToStyle(ImGui::GetStyle());
 }
 
-/** Tema scuro blu per Studio (engine C++). Pannelli opachi — no glass. */
 inline void applyStudioTheme() {
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 12.f;
-    s.ChildRounding = 10.f;
-    s.FrameRounding = 8.f;
-    s.GrabRounding = 6.f;
-    s.PopupRounding = 10.f;
-    s.ScrollbarRounding = 8.f;
-    s.ItemSpacing = {10, 8};
-    s.WindowPadding = {14, 12};
-    s.FramePadding = {11, 7};
-    s.WindowBorderSize = 1.f;
-    s.ChildBorderSize = 1.f;
-    ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg]          = {0.08f, 0.11f, 0.18f, 1.f}; // opaco
-    c[ImGuiCol_ChildBg]           = {0.10f, 0.14f, 0.22f, 1.f};
-    c[ImGuiCol_PopupBg]           = {0.09f, 0.13f, 0.21f, 1.f};
-    c[ImGuiCol_Border]            = {0.20f, 0.32f, 0.52f, 1.f};
-    c[ImGuiCol_FrameBg]           = {0.12f, 0.18f, 0.30f, 1.f};
-    c[ImGuiCol_FrameBgHovered]    = {0.16f, 0.26f, 0.42f, 1.f};
-    c[ImGuiCol_FrameBgActive]     = {0.20f, 0.34f, 0.54f, 1.f};
-    c[ImGuiCol_TitleBg]           = {0.05f, 0.08f, 0.14f, 1.f};
-    c[ImGuiCol_TitleBgActive]     = {0.10f, 0.28f, 0.58f, 1.f};
-    c[ImGuiCol_MenuBarBg]         = {0.06f, 0.10f, 0.18f, 1.f};
-    c[ImGuiCol_Header]            = {0.12f, 0.36f, 0.70f, 0.65f};
-    c[ImGuiCol_HeaderHovered]     = {0.16f, 0.46f, 0.86f, 0.88f};
-    c[ImGuiCol_HeaderActive]      = {0.20f, 0.54f, 0.94f, 1.f};
-    c[ImGuiCol_Button]            = {0.14f, 0.26f, 0.46f, 1.f};
-    c[ImGuiCol_ButtonHovered]     = {0.20f, 0.40f, 0.70f, 1.f};
-    c[ImGuiCol_ButtonActive]      = {0.10f, 0.46f, 0.86f, 1.f};
-    c[ImGuiCol_Text]              = {0.93f, 0.96f, 1.00f, 1.f};
-    c[ImGuiCol_TextDisabled]      = {0.48f, 0.58f, 0.72f, 1.f};
-    c[ImGuiCol_Separator]         = {0.20f, 0.30f, 0.46f, 1.f};
-    c[ImGuiCol_CheckMark]         = {0.42f, 0.80f, 1.00f, 1.f};
-    c[ImGuiCol_SliderGrab]        = {0.28f, 0.60f, 0.98f, 1.f};
-    c[ImGuiCol_SliderGrabActive]  = {0.48f, 0.76f, 1.00f, 1.f};
-    c[ImGuiCol_Tab]               = {0.10f, 0.16f, 0.28f, 1.f};
-    c[ImGuiCol_TabHovered]        = {0.18f, 0.44f, 0.80f, 1.f};
-    c[ImGuiCol_TabActive]         = {0.12f, 0.38f, 0.72f, 1.f};
-    c[ImGuiCol_NavHighlight]      = {0.f, 0.f, 0.f, 0.f};
-    c[ImGuiCol_NavWindowingHighlight] = {0.f, 0.f, 0.f, 0.f};
+    // I colori/valori vivono ora in assets/ui/theme.json (vedi UiTheme.h) —
+    // cambiare un colore non richiede piu' ricompilare. Se il file manca o
+    // e' malformato, loadUiTheme applica esattamente questi stessi valori
+    // di prima, quindi nessun comportamento cambia finche' non lo tocchi.
+    loadUiTheme(ImGui::GetStyle());
+    blk::ui::applyToStyle(ImGui::GetStyle());
 }
 
-/** Sfondo hub animato (stile web: gradient drift + orbs). */
 inline void drawBlueHubBackground(ImDrawList* dl, float w, float h, float time = 0.f) {
     float wave = 0.5f + 0.5f * std::sin(time * 0.35f);
     int r0 = (int)uiLerp(58, 88, wave);
@@ -452,7 +541,6 @@ inline void drawBlueHubBackground(ImDrawList* dl, float w, float h, float time =
         IM_COL32(r0, g0, b0, 255), IM_COL32(r0 - 12, g0 - 14, b0 - 8, 255),
         IM_COL32(r1, g1, b1, 255), IM_COL32(r1 - 6, g1 - 10, b1 - 12, 255));
 
-    // Alone luminosi in movimento
     for (int i = 0; i < 14; ++i) {
         float sp = 0.12f + (i % 5) * 0.04f;
         float x = fmodf(i * 173.f + time * (18.f + i * 2.5f) * (i % 2 ? 1.f : -1.f) + w, w + 120.f) - 60.f;
@@ -463,12 +551,10 @@ inline void drawBlueHubBackground(ImDrawList* dl, float w, float h, float time =
         dl->AddCircleFilled({x + r * 0.2f, y - r * 0.15f}, r * 0.45f, IM_COL32(180, 220, 255, a / 2));
     }
 
-    // Velo superiore glass
     dl->AddRectFilledMultiColor({0, 0}, {w, h * 0.42f},
         IM_COL32(255, 255, 255, 36), IM_COL32(255, 255, 255, 22),
         IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0));
 
-    // Top bar glassmorphism
     dl->AddRectFilled({0, 0}, {w, 68}, IM_COL32(12, 58, 138, 210));
     dl->AddRectFilledMultiColor({0, 0}, {w, 68},
         IM_COL32(255, 255, 255, 28), IM_COL32(255, 255, 255, 8),
@@ -526,7 +612,6 @@ inline void hubPanelHeader(const char* title) {
     ImGui::Dummy({0, 8});
 }
 
-/** Completa login (username gia' riempito). */
 inline bool completeHubLogin(ClassicMenuState& st, bool fromGoogle) {
     if (st.username[0] == '\0') {
         st.loginError = "Inserisci un username";
@@ -537,6 +622,25 @@ inline bool completeHubLogin(ClassicMenuState& st, bool fromGoogle) {
         st.loginError = "Username non consentito (moderazione)";
         return false;
     }
+    // Nome gia di qualcun altro su questo dispositivo, e protetto da passkey:
+    // non si entra riscrivendone il nome, bisogna dimostrare di essere lui.
+    // Senza questo controllo bastava ridigitare lo stesso username per
+    // ritrovarsi dentro un account non proprio.
+    if (!st.unlockPasskeyPending) {
+        if (const SavedAccount* taken = findSavedAccount(st.username)) {
+            if (taken->hasPasskey && !isDeviceTrustedFor(st.username)) {
+                st.unlockPasskeyPending = true;
+                std::snprintf(st.unlockTargetUser, sizeof(st.unlockTargetUser), "%s",
+                              taken->username.c_str());
+                st.passkeyBuf[0] = 0;
+                st.loginError = "Questo username ha gia un account: inserisci la passkey";
+                st.showLogin = true;
+                st.loggedIn = false;
+                return false;
+            }
+        }
+    }
+
     ecoLoadIntegrity(st.username);
     if (economy().banned) {
         st.loginError = "Account BANNATO per cheat economia (permanente)";
@@ -551,10 +655,10 @@ inline bool completeHubLogin(ClassicMenuState& st, bool fromGoogle) {
     st.googleLoginPending = false;
     st.unlockPasskeyPending = false;
     st.loggedInWithGoogle = fromGoogle;
+    st.userFriends = loadFriendsList(st.username);
     rememberLoginAccount(st.username,
                          fromGoogle ? st.googleEmail : nullptr,
                          fromGoogle);
-    // Se non ha ancora passkey → chiedi di crearne una (no ospiti)
     const SavedAccount* acc = findSavedAccount(st.username);
     bool isGuest = false;
     {
@@ -600,7 +704,6 @@ inline bool completeHubLogin(ClassicMenuState& st, bool fromGoogle) {
     return true;
 }
 
-/** Schermata LOGIN a tutto schermo (prima cosa all'avvio). */
 inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, float dt, float time) {
     st.uiTime = time;
     st.loginAppear = std::min(1.f, st.loginAppear + dt * 1.8f);
@@ -625,7 +728,6 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
     float cx = (screenW - cardW) * 0.5f;
     float cy = (screenH - cardH) * 0.5f - 6.f + slideY;
 
-    // Brand hero con leggero float
     const char* brand = "BLOCKY";
     float brandSz = 56.f;
     float brandBob = std::sin(time * 1.4f) * 3.f;
@@ -641,12 +743,11 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
     dl->AddText({screenW * 0.5f - subSz.x * 0.5f, cy - 30},
         IM_COL32(210, 232, 255, alpha), sub);
 
-    // Ombra + card
     uiSoftShadow(dl, {cx, cy}, {cx + cardW, cy + cardH}, 20.f, 5);
     ImGui::SetCursorPos({cx, cy});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, {1.f, 1.f, 1.f, 0.97f * appear});
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 20.f);
-    ImGui::BeginChild("LoginCard", {cardW, cardH}, true);
+    ImGui::BeginChild("LoginCard", {cardW, cardH}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
 
     ImDrawList* cdl = ImGui::GetWindowDrawList();
     ImVec2 cp = ImGui::GetWindowPos();
@@ -696,6 +797,9 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
                 st.loginError = "Impossibile salvare la passkey";
             } else {
                 st.createPasskeyPending = false;
+                // Chi l ha appena scelta la conosce: inutile richiedergliela al
+                // prossimo avvio su questo stesso dispositivo.
+                trustDevice(st.username);
                 st.showLogin = false;
                 st.loginError.clear();
                 st.passkeyBuf[0] = 0;
@@ -740,11 +844,12 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
             } else {
                 std::snprintf(st.username, sizeof(st.username), "%s", st.unlockTargetUser);
                 st.unlockPasskeyPending = false;
+                trustDevice(st.unlockTargetUser);
                 st.passkeyBuf[0] = 0;
                 st.loginError.clear();
                 const SavedAccount* acc = findSavedAccount(st.username);
                 completeHubLogin(st, acc && acc->google);
-                st.createPasskeyPending = false; // ha gia' passkey
+                st.createPasskeyPending = false;
                 st.showLogin = false;
             }
         }
@@ -936,7 +1041,7 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
     ImGui::End();
 }
 
-#if 0 // old login body removed
+#if 0
     ImGui::Dummy({0, 18});
     ImGui::SetCursorPosX(32);
     hubPanelHeader("LOGIN");
@@ -1061,12 +1166,28 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
 }
 #endif
 
+// Icona di un gioco pubblicato: caricata una volta sola e tenuta in cache
+// per percorso file (path vuoto o file assente -> 0, si ricade sul colore
+// accent nella card).
+inline GLuint gameIconTexture(const std::string& path) {
+    static std::unordered_map<std::string, GLuint> cache;
+    static std::unordered_map<std::string, bool> tried;
+    if (path.empty()) return 0;
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+    if (tried[path]) return 0;
+    tried[path] = true;
+    Texture2D tex;
+    if (!tex.load(path, true)) return 0;
+    cache[path] = tex.id;
+    return tex.id;
+}
+
 inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& games,
                         float dt, float screenW, float screenH, float time) {
     st.charSpin += dt * 30.f;
     st.uiTime = time;
     st.playPulse = time;
-    // Rileva poke memoria; strike solo su cheat reale (debounce in Economy)
     ecoSyncMenu(st, time);
     if (economy().banned) {
         st.loggedIn = false;
@@ -1086,7 +1207,6 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImDrawList* dl = ImGui::GetWindowDrawList();
     drawBlueHubBackground(dl, screenW, screenH, time);
 
-    // Brand top
     dl->AddText(ImGui::GetFont(), 30.f, {22, 18}, IM_COL32(255, 255, 255, 255), "BLOCKY");
     dl->AddText({128, 28}, IM_COL32(180, 215, 255, 200), "hub");
 
@@ -1099,14 +1219,12 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::SameLine(0, 8);
     if (hubTabButton(L("hub.chat"), st.tab == HubTab::Chat)) st.tab = HubTab::Chat;
 
-    // Underline tab animato
     {
         float underlineX = tabStartX + st.tabSlide * (112.f + 8.f);
         dl->AddRectFilled({underlineX + 18, tabY + 38}, {underlineX + 94, tabY + 41},
                           IM_COL32(255, 255, 255, 220), 2.f);
     }
 
-    // Chip utente + B$
     {
         char userChip[96];
         std::snprintf(userChip, sizeof(userChip), "%s  ·  %d B$",
@@ -1129,6 +1247,9 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             st.showLogin = true;
             st.loggedIn = false;
             st.password[0] = '\0';
+            // Uscire deve voler dire uscire davvero: al prossimo accesso la
+            // passkey verra richiesta di nuovo.
+            forgetTrustedDevice();
             st.loginAppear = 0.f;
             saveUserProfile(st);
         }
@@ -1139,9 +1260,8 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 16.f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, {1.f, 1.f, 1.f, 0.96f});
 
-    // Play laterale
     ImGui::SetCursorPos({24, 86});
-    ImGui::BeginChild("PlayPanel", {268, 220}, true);
+    ImGui::BeginChild("PlayPanel", {268, 220}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
     {
         ImVec2 wp = ImGui::GetWindowPos();
         ImGui::GetWindowDrawList()->AddRectFilledMultiColor(
@@ -1162,6 +1282,26 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
         st.wantPlay = true;
         st.launchGame = st.selectedGame;
     }
+    // Col controller in mano il pulsante giusto dev'essere gia' selezionato:
+    // altrimenti premere ✕ non fa "gioca", fa "entra nel pannello", e sembra
+    // che il tasto non funzioni. Il fuoco iniziale va qui, sul Play.
+    ImGui::SetItemDefaultFocus();
+
+    // wantBuild esisteva gia' come campo, dichiarato per questo scopo esatto
+    // (entrare in Studio a costruire) — ma nessun pulsante lo impostava mai
+    // a true, ed enterStudio() dal lato main.cpp non veniva mai chiamata.
+    // Studio (e con lui la Toolbox, i preset di script, ecc.) esisteva nel
+    // codice ed era irraggiungibile dall'interfaccia: lo stesso difetto gia'
+    // visto con la lista server, qui sul pulsante che porta a Studio stesso.
+    if (kIsGameEngine) {
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.30f, 0.35f, 0.42f, 1.f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.40f, 0.46f, 0.55f, 1.f});
+        if (ImGui::Button("Studio (costruisci)", {236, 34}))
+            st.wantBuild = true;
+        ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Apri l'editor: costruisci, scripta, usa la Toolbox.");
+    }
     if (st.netStatus[0])
         ImGui::TextWrapped("%s", st.netStatus);
 
@@ -1179,10 +1319,53 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
         st.launchGame = st.selectedGame;
     }
     ImGui::TextDisabled("Per un server fuori dalla tua rete.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Server giochi pubblicati");
+    ImGui::SetNextItemWidth(150);
+    ImGui::InputText("##gameserver", st.gameServer, sizeof(st.gameServer));
+    ImGui::SameLine();
+    const bool fetching = blk::remotegames::isFetching();
+    if (fetching) ImGui::BeginDisabled();
+    if (ImGui::Button(fetching ? "..." : "Aggiorna", {80, 30}))
+        st.wantRefreshGameServer = true;
+    if (fetching) ImGui::EndDisabled();
+    ImGui::TextDisabled("IP del PC che ha pubblicato (porta 8080).");
+
+    // Il catalogo viaggia sullo stesso server dei giochi: e lo stesso computer.
+    const bool catBusy = blk::remotecatalog::isBusy();
+    if (catBusy) ImGui::BeginDisabled();
+    if (ImGui::Button(catBusy ? "Invio catalogo..." : "Pubblica catalogo", {236, 28}))
+        st.wantPublishCatalog = true;
+    if (catBusy) ImGui::EndDisabled();
+    ImGui::TextDisabled("Manda i tuoi item a tutti i dispositivi.");
+
+    const bool gamesBusy = blk::remotegames::isUploading();
+    if (gamesBusy) ImGui::BeginDisabled();
+    if (ImGui::Button(gamesBusy ? "Invio giochi..." : "Sincronizza i miei giochi", {236, 28}))
+        st.wantSyncGames = true;
+    if (gamesBusy) ImGui::EndDisabled();
+    ImGui::TextDisabled("Manda al server i giochi gia pubblicati qui.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Entra con codice");
+    ImGui::SetNextItemWidth(150);
+    ImGui::InputText("##joincode", st.joinCode, sizeof(st.joinCode),
+                      ImGuiInputTextFlags_CharsUppercase);
+    ImGui::SameLine();
+    bool poolOk = blk::PoolConfig::isConfigured();
+    if (!poolOk) ImGui::BeginDisabled();
+    if (ImGui::Button("Entra##joincode", {80, 30})) {
+        st.wantJoinCode = true;
+        st.launchGame = st.selectedGame;
+    }
+    if (!poolOk) ImGui::EndDisabled();
+    ImGui::TextDisabled(poolOk ? "Per giocare via internet, ovunque (blk://)."
+                               : "Pool online non ancora configurato.");
     ImGui::EndChild();
 
     ImGui::SetCursorPos({24, 320});
-    ImGui::BeginChild("AvatarQuick", {268, 180}, true);
+    ImGui::BeginChild("AvatarQuick", {268, 180}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
     hubPanelHeader("AVATAR");
     ImGui::TextWrapped("Le parti che crei nel Catalog sono gia' sull'avatar (anche senza pubblicarle nello Shop).");
     ImGui::Spacing();
@@ -1197,9 +1380,8 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     }
     ImGui::EndChild();
 
-    // Pannello centrale
     ImGui::SetCursorPos({308, 86});
-    ImGui::BeginChild("MainPanel", {screenW - 332, screenH - 110}, true);
+    ImGui::BeginChild("MainPanel", {screenW - 332, screenH - 110}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
 
     if (st.tab == HubTab::Games) {
         hubPanelHeader("GAMES");
@@ -1212,14 +1394,13 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             ImGui::PushID(i);
             const auto& g = games[i];
             bool sel = (st.selectedGame == i);
-            // Stagger entrance
             float delay = std::min(1.f, (time * 2.2f - i * 0.08f));
             float pop = uiEaseOutCubic(std::max(0.f, delay));
 
             ImGui::PushStyleColor(ImGuiCol_ChildBg,
                 sel ? ImVec4{0.90f, 0.95f, 1.f, pop} : ImVec4{0.99f, 0.995f, 1.f, pop});
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.f);
-            ImGui::BeginChild("gcard", {cardW, cardH}, true);
+            ImGui::BeginChild("gcard", {cardW, cardH}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
             ImDrawList* cdl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
             float thumbW = cardW - 18.f;
@@ -1229,12 +1410,17 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
                              sel ? IM_COL32(40, 140, 255, 160) : IM_COL32(100, 170, 255, 90),
                              14.f, 0, sel ? 2.2f : 1.4f);
             }
-            cdl->AddRectFilled({p.x, p.y}, {p.x + thumbW, p.y + 78},
-                IM_COL32((int)(g.accent.x * 255), (int)(g.accent.y * 255), (int)(g.accent.z * 255), 255), 10.f);
+            GLuint iconTex = g.iconPath.empty() ? 0 : gameIconTexture(g.iconPath);
+            if (iconTex) {
+                cdl->AddImageRounded((ImTextureID)(intptr_t)iconTex, {p.x, p.y}, {p.x + thumbW, p.y + 78},
+                    {0, 1}, {1, 0}, IM_COL32_WHITE, 10.f);
+            } else {
+                cdl->AddRectFilled({p.x, p.y}, {p.x + thumbW, p.y + 78},
+                    IM_COL32((int)(g.accent.x * 255), (int)(g.accent.y * 255), (int)(g.accent.z * 255), 255), 10.f);
+            }
             cdl->AddRectFilledMultiColor({p.x, p.y}, {p.x + thumbW, p.y + 78},
                 IM_COL32(255, 255, 255, 50), IM_COL32(255, 255, 255, 12),
                 IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 40));
-            // shimmer
             float sh = fmodf(time * 0.35f + i * 0.2f, 1.4f);
             float sx = p.x + sh * thumbW - 40.f;
             cdl->AddRectFilledMultiColor({sx, p.y}, {sx + 50.f, p.y + 78},
@@ -1250,6 +1436,15 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             ImGui::TextColored({0.10f, 0.46f, 0.92f, 1.f}, "%d / %d posti",
                                g.playersOnline, g.maxPlayers > 0 ? g.maxPlayers : 8);
             if (hovered && ImGui::IsMouseClicked(0)) st.selectedGame = i;
+            // Tasto destro (o tocco prolungato sul tablet): apre l elenco dei
+            // server di questo gioco, invece di affidarsi alla ricerca
+            // automatica che prende la prima risposta e se non ne arriva
+            // nessuna ospita per conto suo, senza dire perche.
+            if (hovered && (ImGui::IsMouseClicked(1)
+                            || ImGui::IsMouseDoubleClicked(0))) {
+                st.selectedGame = i;
+                st.wantServerList = true;
+            }
             if (hovered && ImGui::IsMouseDoubleClicked(0)) {
                 st.wantPlay = true; st.launchGame = i;
             }
@@ -1322,7 +1517,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             ImGui::PushID(i);
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.f);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.97f, 0.985f, 1.f, 1.f});
-            ImGui::BeginChild("shopitem", {shopRowW, it.fromPublisher ? 86.f : 64.f}, true);
+            ImGui::BeginChild("shopitem", {shopRowW, it.fromPublisher ? 86.f : 64.f}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
             if (it.kind == 1) {
                 ImGui::TextColored({0.55f, 0.28f, 0.85f, 1.f}, "[Walk] %s", it.name.c_str());
                 ImGui::TextDisabled("Walking Animation · da %s · %d B$", it.seller.c_str(), it.price);
@@ -1413,7 +1608,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
         bool any = false;
         for (int i = (int)st.mod.history.size() - 1; i >= 0; --i) {
             const auto& e = st.mod.history[(size_t)i];
-            if (e.blocked) continue; // non pubblicato in chat
+            if (e.blocked) continue;
             any = true;
             bool sel = (st.mod.selectedMsgId == e.id);
             std::string lab = "#" + std::to_string(e.id) + " [" + e.user + "] " + e.display;
@@ -1459,13 +1654,13 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::End();
 }
 
-/** Entry point menu: Login prima, poi Hub. */
 inline void drawClassicMainMenu(ClassicMenuState& st, const std::vector<GameEntry>& games,
                                 float dt, float screenW, float screenH, float time) {
     if (st.showLogin || !st.loggedIn)
         drawLoginPage(st, screenW, screenH, dt, time);
     else
         drawHubPage(st, games, dt, screenW, screenH, time);
+        drawServerListWindow(st);
 }
 
 inline void drawLoadingScreen(float progress, const std::string& gameTitle,
@@ -1516,5 +1711,64 @@ inline void drawLoadingScreen(float progress, const std::string& gameTitle,
     std::snprintf(pct, sizeof(pct), "%d%%", (int)(progress * 100.f + 0.5f));
     ImVec2 pctSz = ImGui::CalcTextSize(pct);
     dl->AddText({c.x - pctSz.x * 0.5f, c.y + 58}, IM_COL32(210, 230, 255, 255), pct);
+    ImGui::End();
+}
+
+/**
+ * Finestra "Server di questo gioco".
+ *
+ * Mostra quello che risponde davvero in rete. Se l'elenco e' vuoto non e' un
+ * guasto muto: significa che nessun server ha risposto, ed e' un'informazione
+ * utile quanto un elenco pieno.
+ */
+inline void drawServerListWindow(ClassicMenuState& st) {
+    if (!st.showServerList) return;
+
+    ImGui::SetNextWindowSize({520, 320}, ImGuiCond_Appearing);
+    if (!ImGui::Begin("Server di questo gioco##srvlist", &st.showServerList)) {
+        ImGui::End();
+        return;
+    }
+
+    const bool scanning = blk::serverbrowser::isScanning();
+    if (scanning) ImGui::BeginDisabled();
+    if (ImGui::Button(scanning ? "Cerco..." : "Cerca di nuovo", {150, 32}))
+        blk::serverbrowser::startScan(st.joinPort, st.selectedGame);
+    if (scanning) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("porta %d", st.joinPort);
+
+    ImGui::Separator();
+
+    const auto servers = blk::serverbrowser::result();
+    if (scanning && servers.empty()) {
+        ImGui::TextDisabled("Sto chiedendo in rete...");
+    } else if (servers.empty()) {
+        ImGui::TextColored({1.f, 0.72f, 0.3f, 1.f}, "Nessun server ha risposto.");
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "Controlla che sul computer che ospita sia avviato BlockyServer, "
+            "che sia sulla stessa rete e che il firewall di Windows lo lasci "
+            "passare. Puoi anche entrare a mano con \"Entra con IP\".");
+    } else {
+        for (size_t i = 0; i < servers.size(); ++i) {
+            ImGui::PushID((int)i);
+            const auto& s = servers[i];
+            const bool full = (s.players >= s.maxPlayers);
+            if (full) ImGui::BeginDisabled();
+            if (ImGui::Button(full ? "Pieno" : "Entra", {90, 28})) {
+                std::snprintf(st.joinIp, sizeof(st.joinIp), "%s", s.ip.c_str());
+                st.joinPort = s.port;
+                st.wantJoinIp = true;
+                st.launchGame = st.selectedGame;
+                st.showServerList = false;
+            }
+            if (full) ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextUnformatted(s.label().c_str());
+            ImGui::PopID();
+        }
+    }
+
     ImGui::End();
 }

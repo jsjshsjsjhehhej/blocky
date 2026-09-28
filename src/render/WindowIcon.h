@@ -7,6 +7,8 @@
 
 #include "stb_image.h"
 
+#include "platform/Platform.h"
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -18,17 +20,10 @@
 #include <GLFW/glfw3native.h>
 #endif
 
-inline std::string iconBaseDir() {
-#ifdef _WIN32
-    char buf[MAX_PATH];
-    GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::string p(buf);
-    auto s = p.find_last_of("\\/");
-    return s == std::string::npos ? "." : p.substr(0, s);
-#else
-    return ".";
-#endif
-}
+// Quinta copia di "dov'e' l'eseguibile", e l'ultima dentro libblocky. Il ramo
+// non-Windows rispondeva "." — cioe' la cartella di lavoro di turno, che non
+// e' dove stanno le icone. plat::selfDir() lo sa su tutte le piattaforme.
+inline std::string iconBaseDir() { return plat::selfDir(); }
 
 #ifdef _WIN32
 inline bool fileExistsA(const std::string& path) {
@@ -36,7 +31,6 @@ inline bool fileExistsA(const std::string& path) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/** Carica .ico da file (taskbar / titolo). */
 inline HICON loadIconFile(const std::string& path, int cx, int cy) {
     if (!fileExistsA(path)) return nullptr;
     int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
@@ -47,7 +41,6 @@ inline HICON loadIconFile(const std::string& path, int cx, int cy) {
                              LR_LOADFROMFILE | LR_DEFAULTCOLOR);
 }
 
-/** Applica icona embedded (app.ico) o file assets a HWND. */
 inline void applyNativeExeIcon(HWND hwnd) {
     if (!hwnd) return;
     HINSTANCE inst = GetModuleHandleW(nullptr);
@@ -59,7 +52,6 @@ inline void applyNativeExeIcon(HWND hwnd) {
     HICON big = nullptr;
     HICON small = nullptr;
 
-    // 1) Risorsa embedded nell'exe (app.rc → ID 1)
     for (int id : {1, 101}) {
         if (!big) {
             big = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(id), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
@@ -71,7 +63,6 @@ inline void applyNativeExeIcon(HWND hwnd) {
         if (big && small) break;
     }
 
-    // 2) File accanto all'exe (sempre aggiornato dopo copia asset)
     std::string base = iconBaseDir();
     const std::string icoPaths[] = {
         base + "\\assets\\icon\\app.ico",
@@ -84,7 +75,6 @@ inline void applyNativeExeIcon(HWND hwnd) {
         if (big && small) break;
     }
 
-    // 3) Fallback: icona associata all'exe
     if (!big) {
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -103,12 +93,10 @@ inline void applyNativeExeIcon(HWND hwnd) {
 }
 #endif
 
-/** Imposta icona finestra + taskbar Blocky (lettera B). */
 inline void setWindowIconB(GLFWwindow* win) {
     if (!win) return;
 
     std::string base = iconBaseDir();
-    // Solo icona B (PNG per GLFW; .ico via applyNativeExeIcon)
     std::vector<std::string> paths = {
         base + "/assets/icon/b_icon.png",
         base + "\\assets\\icon\\b_icon.png",
@@ -139,5 +127,4 @@ inline void setWindowIconB(GLFWwindow* win) {
         std::fprintf(stderr, "Avviso: icona Blocky non trovata (assets/icon/b_icon.png)\n");
 }
 
-/** @deprecated usa setWindowIconB */
 inline void setWindowIconR(GLFWwindow* win) { setWindowIconB(win); }

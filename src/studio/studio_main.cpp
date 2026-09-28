@@ -1,14 +1,3 @@
-/**
- * Blocky Studio — editor di place.
- *
- * Eseguibile separato da BlockyGameEngine: condivide DataModel, UndoStack e
- * PlaceExporter, ma non ne tocca il main. Così l'editor può cambiare layout
- * senza rischiare di rompere il runtime del gioco.
- *
- * Layout a pannelli fissi calcolati a mano invece che con DockSpace: la
- * versione di Dear ImGui agganciata qui (v1.91.6, branch master) non ha il
- * docking, e un layout fisso è comunque quello che serve a uno Studio.
- */
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -23,6 +12,7 @@
 #include <string>
 
 #include "engine/BlockyProject.h"
+#include "engine/GameHub.h"
 #include "engine/Humanoid.h"
 #include "engine/PlaceExporter.h"
 #include "engine/SceneIntegrity.h"
@@ -46,9 +36,16 @@ constexpr ImGuiWindowFlags kPanelFlags =
     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-/** Asse del gizmo attualmente trascinato. -1 = nessuno. */
+// Quale manipolazione applicare durante il trascinamento — serve solo per
+// il gizmo Transform (combinato), dove il tool attivo da solo non basta a
+// distinguere: dipende da quale tipo di maniglia si e' presa (linea =
+// sposta, quadratino = scala, anello = ruota). Per Move/Scale/Rotate
+// singoli continua a derivare direttamente da StudioState::Tool.
+enum class GizmoOp : int { Move, Scale, Rotate };
+
 struct GizmoDrag {
     int axis = -1;
+    GizmoOp op = GizmoOp::Move;
     ImVec2 startMouse{};
     glm::vec3 startPosition{};
     glm::vec3 startSize{};
@@ -90,11 +87,6 @@ std::string windowTitle(const StudioState& s) {
     return t;
 }
 
-/**
- * Verifica il place e riversa i rilievi nell'Output.
- * `autoRepair` corregge il correggibile: usato al caricamento, dove un valore
- * rotto non è colpa dell'utente e fermarlo non aiuterebbe nessuno.
- */
 void runIntegrityCheck(StudioState& s, bool autoRepair) {
     SceneIntegrity::Result res = SceneIntegrity::check(s.world);
 
@@ -137,14 +129,34 @@ void savePlace(StudioState& s) {
     }
 }
 
-// ------------------------------------------------------------------- gizmo
 
-/**
- * Gizmo a tre assi. Il trascinamento si risolve in spazio schermo: si proietta
- * l'asse, si misura quanto il mouse è avanzato lungo quella direzione e lo si
- * riconverte in unità mondo. Funziona a qualsiasi angolo di camera senza dover
- * intersecare piani.
- */
+// Applica lo spostamento/scala/rotazione lungo un asse in base a
+// drag.op — condivisa tra il gizmo a tool singolo (Move/Scale/Rotate) e
+// quello combinato Transform, cosi' la matematica vive in un solo posto.
+void applyGizmoOp(StudioState& s, WorkspacePart* part, const GizmoDrag& drag, int axis, float amount) {
+    switch (drag.op) {
+    case GizmoOp::Move: {
+        glm::vec3 p = drag.startPosition;
+        p[axis] += amount;
+        p[axis] = s.snap(p[axis], s.snapStuds);
+        part->position = p;
+        break;
+    }
+    case GizmoOp::Scale: {
+        glm::vec3 sz = drag.startSize;
+        sz[axis] = std::max(0.05f, s.snap(sz[axis] + amount * 2.f, s.snapStuds));
+        part->size = sz;
+        break;
+    }
+    case GizmoOp::Rotate: {
+        glm::vec3 r = drag.startRotation;
+        r[axis] = s.snap(r[axis] + amount * 8.f, s.snapDegrees);
+        part->rotation = r;
+        break;
+    }
+    }
+}
+
 void drawGizmo(StudioState& s, Viewport& vp, ImVec2 imageOrigin, bool viewportHovered,
                GizmoDrag& drag) {
     WorkspacePart* part = s.selectedPart();
@@ -169,7 +181,6 @@ void drawGizmo(StudioState& s, Viewport& vp, ImVec2 imageOrigin, bool viewportHo
         endValid[a] = vp.worldToScreen(part->position + axes[a] * handleLength, endPx[a]);
     }
 
-    // Quale asse è sotto il cursore (solo se non stiamo già trascinando).
     int hovered = -1;
     if (drag.axis < 0 && viewportHovered) {
         float bestDistance = 10.f;
@@ -200,6 +211,9 @@ void drawGizmo(StudioState& s, Viewport& vp, ImVec2 imageOrigin, bool viewportHo
 
     if (hovered >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         drag.axis = hovered;
+        drag.op = (s.tool == Tool::Scale) ? GizmoOp::Scale
+                : (s.tool == Tool::Rotate) ? GizmoOp::Rotate
+                : GizmoOp::Move;
         drag.startMouse = mouse;
         drag.startPosition = part->position;
         drag.startSize = part->size;
@@ -221,35 +235,211 @@ void drawGizmo(StudioState& s, Viewport& vp, ImVec2 imageOrigin, bool viewportHo
         const ImVec2 end{imageOrigin.x + endPx[a].x, imageOrigin.y + endPx[a].y};
         glm::vec2 screenAxis{end.x - center.x, end.y - center.y};
         const float axisLength = std::sqrt(screenAxis.x * screenAxis.x + screenAxis.y * screenAxis.y);
-        if (axisLength < 2.f) return;   // asse quasi di punta: il drag sarebbe ingovernabile
+        if (axisLength < 2.f) return;
         screenAxis /= axisLength;
 
         const glm::vec2 delta{mouse.x - drag.startMouse.x, mouse.y - drag.startMouse.y};
         const float alongPixels = delta.x * screenAxis.x + delta.y * screenAxis.y;
         const float amount = alongPixels / axisLength * handleLength;
 
-        switch (s.tool) {
-        case Tool::Move: {
-            glm::vec3 p = drag.startPosition;
-            p[a] += amount;
-            p[a] = s.snap(p[a], s.snapStuds);
-            part->position = p;
-            break;
+        applyGizmoOp(s, part, drag, a, amount);
+    }
+}
+
+// Gizmo di orientamento nell'angolo del viewport, come in Roblox Studio:
+// tre assi colorati (X rosso, Y verde, Z blu) proiettati dalla sola
+// rotazione della camera — aiuta a capire dove si sta guardando senza
+// dover leggere numeri. Solo visivo, nessuna interazione per ora.
+void drawOrientationGizmo(Viewport& vp, ImVec2 imageOrigin, ImVec2 avail) {
+    const float radius = 34.f;
+    const ImVec2 center{imageOrigin.x + avail.x - radius - 26.f, imageOrigin.y + radius + 22.f};
+
+    const glm::mat3 rot(vp.camera.view());
+    struct AxisDef { glm::vec3 dir; ImU32 color; const char* label; };
+    const AxisDef axes[3] = {
+        {{1.f, 0.f, 0.f}, IM_COL32(224, 80, 75, 255), "X"},
+        {{0.f, 1.f, 0.f}, IM_COL32(115, 205, 100, 255), "Y"},
+        {{0.f, 0.f, 1.f}, IM_COL32(80, 150, 235, 255), "Z"},
+    };
+
+    struct Tip { glm::vec2 screen; float depth; ImU32 color; const char* label; bool positive; };
+    Tip tips[6];
+    for (int i = 0; i < 3; ++i) {
+        const glm::vec3 v = rot * axes[i].dir;
+        tips[i * 2 + 0] = {{v.x, -v.y}, v.z, axes[i].color, axes[i].label, true};
+        tips[i * 2 + 1] = {{-v.x, v.y}, -v.z, axes[i].color, axes[i].label, false};
+    }
+    std::sort(tips, tips + 6, [](const Tip& a, const Tip& b) { return a.depth < b.depth; });
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(center, radius + 12.f, IM_COL32(18, 20, 24, 130));
+
+    for (const Tip& t : tips) {
+        const ImVec2 end{center.x + t.screen.x * radius, center.y + t.screen.y * radius};
+        dl->AddLine(center, end, t.color, 2.f);
+        if (t.positive) {
+            dl->AddCircleFilled(end, 8.5f, t.color);
+            dl->AddText({end.x - 3.5f, end.y - 7.f}, IM_COL32(24, 24, 28, 255), t.label);
+        } else {
+            dl->AddCircle(end, 6.5f, t.color, 12, 1.4f);
         }
-        case Tool::Scale: {
-            glm::vec3 sz = drag.startSize;
-            sz[a] = std::max(0.05f, s.snap(sz[a] + amount * 2.f, s.snapStuds));
-            part->size = sz;
-            break;
+    }
+}
+
+// Gizmo combinato "Transform": mostra insieme le maniglie di Move (linea +
+// pallino in punta), Scale (quadratino a meta' asse) e Rotate (anello
+// attorno al centro) per i 3 assi — l'utente prende quella che vuole senza
+// cambiare strumento, come in Roblox Studio. La rotazione qui e' un vero
+// trascinamento angolare attorno al centro (piu' preciso del trucco
+// "trascina lungo un asse" del gizmo Rotate singolo, che resta invariato).
+void drawTransformGizmo(StudioState& s, Viewport& vp, ImVec2 imageOrigin, bool viewportHovered,
+                        GizmoDrag& drag) {
+    WorkspacePart* part = s.selectedPart();
+    if (!part) { drag.axis = -1; return; }
+
+    glm::vec2 centerPx;
+    if (!vp.worldToScreen(part->position, centerPx)) return;
+
+    const float handleLength = vp.camera.distance * 0.14f;
+    const float ringRadius = handleLength * 0.82f;
+    const float scaleT = 0.5f;
+    const glm::vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const ImU32 colors[3] = {IM_COL32(235, 80, 75, 255),
+                             IM_COL32(115, 215, 100, 255),
+                             IM_COL32(80, 150, 245, 255)};
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 center{imageOrigin.x + centerPx.x, imageOrigin.y + centerPx.y};
+    const ImVec2 mouse = ImGui::GetMousePos();
+
+    glm::vec2 movePx[3], scalePx[3];
+    bool moveValid[3], scaleValid[3];
+    for (int a = 0; a < 3; ++a) {
+        moveValid[a] = vp.worldToScreen(part->position + axes[a] * handleLength, movePx[a]);
+        scaleValid[a] = vp.worldToScreen(part->position + axes[a] * handleLength * scaleT, scalePx[a]);
+    }
+
+    constexpr int kRingSegs = 28;
+    glm::vec2 ringPx[3][kRingSegs];
+    bool ringValid[3][kRingSegs];
+    for (int a = 0; a < 3; ++a) {
+        const glm::vec3 bAxis = axes[(a + 1) % 3];
+        const glm::vec3 cAxis = axes[(a + 2) % 3];
+        for (int i = 0; i < kRingSegs; ++i) {
+            const float t = (float)i / (float)kRingSegs * 6.2831853f;
+            const glm::vec3 wp = part->position + (bAxis * std::cos(t) + cAxis * std::sin(t)) * ringRadius;
+            ringValid[a][i] = vp.worldToScreen(wp, ringPx[a][i]);
         }
-        case Tool::Rotate: {
+    }
+
+    auto segDist = [&](ImVec2 p0, ImVec2 p1) {
+        const float sx = p1.x - p0.x, sy = p1.y - p0.y;
+        const float len2 = sx * sx + sy * sy;
+        float t = len2 > 1.f ? ((mouse.x - p0.x) * sx + (mouse.y - p0.y) * sy) / len2 : 0.f;
+        t = std::clamp(t, 0.f, 1.f);
+        const float dx = mouse.x - (p0.x + sx * t), dy = mouse.y - (p0.y + sy * t);
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    enum class Kind { None, Move, Scale, Rotate };
+    Kind hoverKind = Kind::None;
+    int hoverAxis = -1;
+    if (drag.axis < 0 && viewportHovered) {
+        float best = 11.f;
+        auto consider = [&](Kind k, int a, float d) {
+            if (d < best) { best = d; hoverKind = k; hoverAxis = a; }
+        };
+        for (int a = 0; a < 3; ++a) {
+            if (moveValid[a]) {
+                const ImVec2 end{imageOrigin.x + movePx[a].x, imageOrigin.y + movePx[a].y};
+                consider(Kind::Move, a, segDist(center, end));
+            }
+            if (scaleValid[a]) {
+                const ImVec2 pt{imageOrigin.x + scalePx[a].x, imageOrigin.y + scalePx[a].y};
+                const float dx = mouse.x - pt.x, dy = mouse.y - pt.y;
+                consider(Kind::Scale, a, std::max(0.f, std::sqrt(dx * dx + dy * dy) - 4.f));
+            }
+            for (int i = 0; i < kRingSegs; ++i) {
+                const int j = (i + 1) % kRingSegs;
+                if (!ringValid[a][i] || !ringValid[a][j]) continue;
+                const ImVec2 p0{imageOrigin.x + ringPx[a][i].x, imageOrigin.y + ringPx[a][i].y};
+                const ImVec2 p1{imageOrigin.x + ringPx[a][j].x, imageOrigin.y + ringPx[a][j].y};
+                consider(Kind::Rotate, a, segDist(p0, p1));
+            }
+        }
+    }
+
+    for (int a = 0; a < 3; ++a) {
+        const bool ringHot = (hoverKind == Kind::Rotate && hoverAxis == a)
+                           || (drag.op == GizmoOp::Rotate && drag.axis == a);
+        for (int i = 0; i < kRingSegs; ++i) {
+            const int j = (i + 1) % kRingSegs;
+            if (!ringValid[a][i] || !ringValid[a][j]) continue;
+            const ImVec2 p0{imageOrigin.x + ringPx[a][i].x, imageOrigin.y + ringPx[a][i].y};
+            const ImVec2 p1{imageOrigin.x + ringPx[a][j].x, imageOrigin.y + ringPx[a][j].y};
+            dl->AddLine(p0, p1, colors[a], ringHot ? 3.f : 1.6f);
+        }
+        if (moveValid[a]) {
+            const ImVec2 end{imageOrigin.x + movePx[a].x, imageOrigin.y + movePx[a].y};
+            const bool hot = (hoverKind == Kind::Move && hoverAxis == a)
+                           || (drag.op == GizmoOp::Move && drag.axis == a);
+            dl->AddLine(center, end, colors[a], hot ? 4.5f : 2.6f);
+            dl->AddCircleFilled(end, hot ? 6.5f : 4.5f, colors[a]);
+        }
+        if (scaleValid[a]) {
+            const ImVec2 pt{imageOrigin.x + scalePx[a].x, imageOrigin.y + scalePx[a].y};
+            const bool hot = (hoverKind == Kind::Scale && hoverAxis == a)
+                           || (drag.op == GizmoOp::Scale && drag.axis == a);
+            const float hs = hot ? 6.f : 4.5f;
+            dl->AddRectFilled({pt.x - hs, pt.y - hs}, {pt.x + hs, pt.y + hs}, colors[a]);
+        }
+    }
+    dl->AddCircleFilled(center, 4.f, IM_COL32(240, 240, 240, 220));
+
+    if (hoverKind != Kind::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        drag.axis = hoverAxis;
+        drag.op = (hoverKind == Kind::Scale) ? GizmoOp::Scale
+                : (hoverKind == Kind::Rotate) ? GizmoOp::Rotate
+                : GizmoOp::Move;
+        drag.startMouse = mouse;
+        drag.startPosition = part->position;
+        drag.startSize = part->size;
+        drag.startRotation = part->rotation;
+        drag.before = *part;
+    }
+
+    if (drag.axis >= 0) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            s.undo.recordTransform(s.selected, drag.before, *part);
+            s.dirty = true;
+            drag.axis = -1;
+            return;
+        }
+        const int a = drag.axis;
+
+        if (drag.op == GizmoOp::Rotate) {
+            const glm::vec2 toMouse{mouse.x - center.x, mouse.y - center.y};
+            const glm::vec2 toStart{drag.startMouse.x - center.x, drag.startMouse.y - center.y};
+            if (glm::length(toMouse) < 2.f || glm::length(toStart) < 2.f) return;
+            const float angStart = std::atan2(toStart.y, toStart.x);
+            const float angNow = std::atan2(toMouse.y, toMouse.x);
+            const float deltaDeg = glm::degrees(angNow - angStart);
             glm::vec3 r = drag.startRotation;
-            r[a] = s.snap(r[a] + amount * 8.f, s.snapDegrees);
+            r[a] = s.snap(r[a] + deltaDeg, s.snapDegrees);
             part->rotation = r;
-            break;
+            return;
         }
-        default: break;
-        }
+
+        if (!moveValid[a]) return;
+        const ImVec2 end{imageOrigin.x + movePx[a].x, imageOrigin.y + movePx[a].y};
+        glm::vec2 screenAxis{end.x - center.x, end.y - center.y};
+        const float axisLength = std::sqrt(screenAxis.x * screenAxis.x + screenAxis.y * screenAxis.y);
+        if (axisLength < 2.f) return;
+        screenAxis /= axisLength;
+        const glm::vec2 delta{mouse.x - drag.startMouse.x, mouse.y - drag.startMouse.y};
+        const float alongPixels = delta.x * screenAxis.x + delta.y * screenAxis.y;
+        const float amount = alongPixels / axisLength * handleLength;
+        applyGizmoOp(s, part, drag, a, amount);
     }
 }
 
@@ -273,13 +463,37 @@ void handleShortcuts(StudioState& s) {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) savePlace(s);
     if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) s.deleteSelected();
 
+    // Copia/Incolla distinto da Duplica: si puo' copiare una volta e
+    // incollare piu' volte, anche dopo aver selezionato altro — Duplica
+    // invece agisce subito sulla selezione corrente.
+    static bool hasClipboard = false;
+    static WorkspacePart clipboard;
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+        if (const WorkspacePart* p = s.selectedPart()) {
+            clipboard = *p;
+            hasClipboard = true;
+            s.output.info("Copiata %s", p->name.c_str());
+        }
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && hasClipboard) {
+        WorkspacePart copy = clipboard;
+        copy.name = s.uniqueName(clipboard.name);
+        copy.position.x += 4.f;
+        s.world.parts.push_back(copy);
+        const int index = (int)s.world.parts.size() - 1;
+        s.undo.recordInsert(index, copy);
+        s.selectPartIndex(index);
+        s.dirty = true;
+        s.output.info("Incollata in %s", copy.name.c_str());
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_1, false)) s.tool = Tool::Select;
     if (ImGui::IsKeyPressed(ImGuiKey_2, false)) s.tool = Tool::Move;
     if (ImGui::IsKeyPressed(ImGuiKey_3, false)) s.tool = Tool::Scale;
     if (ImGui::IsKeyPressed(ImGuiKey_4, false)) s.tool = Tool::Rotate;
+    if (ImGui::IsKeyPressed(ImGuiKey_5, false)) s.tool = Tool::Transform;
 }
 
-/** Contenuto della ribbon per la scheda attiva. */
 void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
     static const char* const tabs[] = {"HOME", "MODEL", "TEST", "VIEW"};
     ribbonTabs(tabs, IM_ARRAYSIZE(tabs), tab);
@@ -293,6 +507,7 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
         if (ribbonBigButton("t_mov", Icon::Move,   "Move",   s.tool == Tool::Move))   s.tool = Tool::Move;
         if (ribbonBigButton("t_scl", Icon::Scale,  "Scale",  s.tool == Tool::Scale))  s.tool = Tool::Scale;
         if (ribbonBigButton("t_rot", Icon::Rotate, "Rotate", s.tool == Tool::Rotate)) s.tool = Tool::Rotate;
+        if (ribbonBigButton("t_xfm", Icon::Transform, "Transform", s.tool == Tool::Transform)) s.tool = Tool::Transform;
         ribbonEndGroup("Strumenti");
     };
 
@@ -307,7 +522,6 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
 
     auto snapGroup = [&]() {
         ribbonBeginGroup();
-        // Due righe, non tre: la terza sfonderebbe l'altezza della ribbon.
         ImGui::Checkbox("Snap", &s.snapEnabled);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(78.f);
@@ -319,7 +533,7 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
 
     switch (tab) {
 
-    case 0: // HOME
+    case 0:
         ribbonBeginGroup();
         ribbonBeginStack();
         if (ribbonSmallButton("h_undo", Icon::Undo, "Annulla", false, s.undo.canUndo()))
@@ -343,16 +557,14 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
         snapGroup();
         break;
 
-    case 1: // MODEL
+    case 1:
         insertGroup();
         toolGroup();
         snapGroup();
         break;
 
-    case 2: // TEST
+    case 2:
         ribbonBeginGroup();
-        // Disabilitati finché il runtime non è agganciato: un bottone che non
-        // fa nulla è peggio di uno spento.
         ribbonBigButton("x_play", Icon::Play, "Play", false, false);
         ribbonBigButton("x_stop", Icon::Stop, "Stop", false, false);
         ribbonEndGroup("Simulazione");
@@ -364,10 +576,9 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
         ribbonEndGroup("Place");
         break;
 
-    case 3: // VIEW
+    case 3:
         ribbonBeginGroup();
         ImGui::Checkbox("Griglia", &s.showGrid);
-        ImGui::Checkbox("Baseplate", &s.world.hasBaseplate);
         ribbonEndGroup("Mostra");
 
         ribbonBeginGroup();
@@ -400,12 +611,14 @@ void drawStatusBar(const StudioState& s) {
     dl->AddRectFilled({p.x - 8.f, p.y - 4.f}, {p.x + width + 8.f, p.y + kStatusHeight},
                       IM_COL32(38, 88, 152, 255));
 
-    const WorkspacePart* part = s.selectedPart();
+    const char* selName = "nessuna selezione";
+    if (const WorkspacePart* part = s.selectedPart()) selName = part->name.c_str();
+    else if (const WorkspaceModel* m = s.selectedModelPtr()) selName = m->name.c_str();
+    else if (const WorkspaceLabel* l = s.selectedLabelPtr()) selName = l->name.c_str();
+
     char left[256];
     std::snprintf(left, sizeof(left), "%s   |   %s   |   %d parts",
-                  toolName(s.tool),
-                  part ? part->name.c_str() : "nessuna selezione",
-                  (int)s.world.parts.size());
+                  toolName(s.tool), selName, (int)s.world.parts.size());
     dl->AddText({p.x + 4.f, p.y + 1.f}, IM_COL32(232, 240, 252, 255), left);
 
     char right[128];
@@ -415,7 +628,7 @@ void drawStatusBar(const StudioState& s) {
     dl->AddText({p.x + width - w - 4.f, p.y + 1.f}, IM_COL32(198, 216, 240, 255), right);
 }
 
-void drawMenuBar(StudioState& s, bool& running) {
+void drawMenuBar(StudioState& s, Viewport& vp, bool& running) {
     if (!ImGui::BeginMainMenuBar()) return;
 
     if (ImGui::BeginMenu("File")) {
@@ -426,9 +639,25 @@ void drawMenuBar(StudioState& s, bool& running) {
             s.dirty = false;
             s.output.info("Nuovo place: Baseplate");
         }
+        // Prima mancava del tutto: si poteva solo creare un place nuovo o
+        // partire da un template incorporato, mai aprire un file .blocky
+        // qualsiasi salvato altrove (dallo stesso Studio, dal motore
+        // principale, o scritto a mano). Riusa la stessa dialog/parser
+        // gia' usati dal motore principale (GameHub.h), zero duplicazione.
+        if (ImGui::MenuItem("Apri place...")) {
+            std::string path;
+            if (openPlaceFileDialog(path)) {
+                if (loadPlaceFromJson(path, s.world, &vp.lighting)) {
+                    s.undo.clear();
+                    s.selectNone();
+                    s.dirty = false;
+                    s.output.info("Place aperto: %s (%d part)", path.c_str(), (int)s.world.parts.size());
+                } else {
+                    s.output.add(LogLevel::Error, "Apertura fallita: %s", path.c_str());
+                }
+            }
+        }
         if (ImGui::BeginMenu("Template")) {
-            // Ogni caricamento passa dal controllo d'integrità: un place
-            // scritto da una build diversa è il caso in cui serve davvero.
             auto loadTemplate = [&](const char* label, void (DataModel::*loader)()) {
                 if (!ImGui::MenuItem(label)) return;
                 CrashHandler::note((std::string("carica template: ") + label).c_str());
@@ -464,11 +693,9 @@ void drawMenuBar(StudioState& s, bool& running) {
 
     if (ImGui::BeginMenu("View")) {
         ImGui::MenuItem("Griglia", nullptr, &s.showGrid);
-        ImGui::MenuItem("Baseplate", nullptr, &s.world.hasBaseplate);
         ImGui::EndMenu();
     }
 
-    // Stato a destra: dice sempre cosa è selezionato e con che strumento.
     const WorkspacePart* p = s.selectedPart();
     char status[192];
     std::snprintf(status, sizeof(status), "%s   |   %s   |   %d parts",
@@ -482,13 +709,9 @@ void drawMenuBar(StudioState& s, bool& running) {
     ImGui::EndMainMenuBar();
 }
 
-} // namespace
+}
 
-/** Era `int main()`: rinominata per vivere dentro libblocky.dll insieme al
- *  resto dell'engine — vedi engine/BlockyApi.cpp per il wrapper esportato. */
 int Blocky_RunEditorImpl() {
-    // Prima di tutto: un crash durante l'inizializzazione è quello che
-    // lascia meno indizi, ed è proprio quello che va registrato.
     CrashHandler::install("BlockyStudio", "1.0");
     CrashHandler::note("avvio");
 
@@ -517,7 +740,7 @@ int Blocky_RunEditorImpl() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::GetIO().IniFilename = nullptr;   // il layout è fisso: niente imgui.ini
+    ImGui::GetIO().IniFilename = nullptr;
     applyDarkTheme();
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -540,6 +763,7 @@ int Blocky_RunEditorImpl() {
     int ribbonTab = 0;
     bool running = true;
     std::string lastTitle;
+    float lastTime = (float)glfwGetTime();
 
     while (running && !glfwWindowShouldClose(win)) {
         glfwPollEvents();
@@ -549,14 +773,15 @@ int Blocky_RunEditorImpl() {
         ImGui::NewFrame();
 
         const float time = (float)glfwGetTime();
+        const float dt = std::clamp(time - lastTime, 0.f, 0.1f);
+        lastTime = time;
         handleShortcuts(state);
-        drawMenuBar(state, running);
+        drawMenuBar(state, viewport, running);
 
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         const ImVec2 origin = vp->WorkPos;
         const ImVec2 size = vp->WorkSize;
 
-        // --- Ribbon ---
         ImGui::SetNextWindowPos(origin);
         ImGui::SetNextWindowSize({size.x, kRibbonHeight});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
@@ -571,13 +796,11 @@ int Blocky_RunEditorImpl() {
         const float bodyY = origin.y + kRibbonHeight;
         const float bodyH = size.y - kRibbonHeight - kStatusHeight;
 
-        // --- Explorer ---
         ImGui::SetNextWindowPos({origin.x, bodyY});
         ImGui::SetNextWindowSize({kPanelLeft, bodyH});
         if (ImGui::Begin("##explorer", nullptr, kPanelFlags)) drawExplorer(state);
         ImGui::End();
 
-        // --- Properties ---
         ImGui::SetNextWindowPos({origin.x + size.x - kPanelRight, bodyY});
         ImGui::SetNextWindowSize({kPanelRight, bodyH});
         if (ImGui::Begin("##properties", nullptr, kPanelFlags)) drawProperties(state);
@@ -586,7 +809,6 @@ int Blocky_RunEditorImpl() {
         const float centerX = origin.x + kPanelLeft;
         const float centerW = size.x - kPanelLeft - kPanelRight;
 
-        // --- Output / Script (schede sullo stesso riquadro) ---
         ImGui::SetNextWindowPos({centerX, bodyY + bodyH - kPanelBottom});
         ImGui::SetNextWindowSize({centerW, kPanelBottom});
         if (ImGui::Begin("##bottom", nullptr, kPanelFlags)) {
@@ -604,10 +826,8 @@ int Blocky_RunEditorImpl() {
         }
         ImGui::End();
 
-        // print() degli script arriva su stdout: va svuotato ogni frame.
         scriptEditor.capture.drain(state.output);
 
-        // --- Barra di stato ---
         ImGui::SetNextWindowPos({origin.x, origin.y + size.y - kStatusHeight});
         ImGui::SetNextWindowSize({size.x, kStatusHeight});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8, 4});
@@ -615,7 +835,6 @@ int Blocky_RunEditorImpl() {
         ImGui::End();
         ImGui::PopStyleVar();
 
-        // --- Viewport 3D ---
         ImGui::SetNextWindowPos({centerX, bodyY});
         ImGui::SetNextWindowSize({centerW, bodyH - kPanelBottom});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
@@ -639,15 +858,39 @@ int Blocky_RunEditorImpl() {
                     viewport.camera.zoom(io.MouseWheel);
             }
 
-            drawGizmo(state, viewport, imageOrigin, hovered, drag);
+            // Volo WASD+QE tenendo il tasto destro, come in Roblox Studio —
+            // mancava del tutto: prima ci si poteva solo orbitare/pannare/
+            // zoomare attorno a un punto fisso, mai "volare" nella scena.
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                const float speed = (io.KeyShift ? 44.f : 18.f) * dt;
+                glm::vec3 local(0.f);
+                if (ImGui::IsKeyDown(ImGuiKey_W)) local.z += speed;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) local.z -= speed;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) local.x += speed;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) local.x -= speed;
+                if (ImGui::IsKeyDown(ImGuiKey_E)) local.y += speed;
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) local.y -= speed;
+                if (local != glm::vec3(0.f)) viewport.camera.flyMove(local);
+            }
 
-            // Selezione solo se il click non è finito su una maniglia del gizmo.
+            if (state.tool == Tool::Transform)
+                drawTransformGizmo(state, viewport, imageOrigin, hovered, drag);
+            else
+                drawGizmo(state, viewport, imageOrigin, hovered, drag);
+            drawOrientationGizmo(viewport, imageOrigin, avail);
+
             if (hovered && drag.axis < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 const ImVec2 m = ImGui::GetMousePos();
                 const float u = (m.x - imageOrigin.x) / std::max(avail.x, 1.f);
                 const float v = (m.y - imageOrigin.y) / std::max(avail.y, 1.f);
                 const int hit = viewport.pick(state.world, u, v);
-                state.selected = hit;
+                // selectPartIndex (non l'assegnazione diretta a .selected)
+                // cosi' clicchare una Part nel viewport pulisce anche
+                // un'eventuale selezione di Model/Label rimasta
+                // dall'Explorer — altrimenti restavano "selezionate"
+                // insieme due cose diverse, con Properties e barra di
+                // stato in disaccordo su quale.
+                if (hit >= 0) state.selectPartIndex(hit); else state.selectNone();
                 if (hit >= 0) {
                     state.output.info("Selezionata %s",
                                       state.world.parts[(size_t)hit].name.c_str());
@@ -673,7 +916,7 @@ int Blocky_RunEditorImpl() {
         glfwSwapBuffers(win);
     }
 
-    scriptEditor.stop();   // ripristina stdout prima di chiudere
+    scriptEditor.stop();
     viewport.destroy();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

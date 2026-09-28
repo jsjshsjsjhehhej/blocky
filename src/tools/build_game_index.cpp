@@ -1,17 +1,3 @@
-/**
- * build_game_index — costruisce game_index.json per un gioco pubblicato.
- *
- *   build_game_index <cartella_gioco> [--id nome] [--title "Titolo"]
- *
- * La cartella deve avere place.json (o game.blocky.json) e una sottocartella
- * assets/. Wrapper a riga di comando su GamePublish::buildIndexForFolder —
- * la stessa funzione usata da blocky_hostd per validare un gioco ricevuto
- * via rete, così i due percorsi non possono divergere in silenzio.
- *
- * Uscita 0 se scritto, 1 se la cartella non è quella di un gioco pubblicato:
- * così può stare in uno script di release e fermarlo prima del pacchetto,
- * come asset_audit.
- */
 
 #include <cstdio>
 #include <cstring>

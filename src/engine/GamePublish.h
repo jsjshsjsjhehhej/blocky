@@ -1,14 +1,5 @@
 #pragma once
 
-/**
- * Pipeline di pubblicazione: da una cartella (o da un .zip ricevuto via rete)
- * a un game_index.json validato.
- *
- * Un solo percorso di validazione condiviso da due chiamanti: lo strumento a
- * riga di comando build_game_index e il server blocky_hostd. Farlo in due
- * punti separati significherebbe che un giorno divergono silenziosamente —
- * il server accetterebbe un gioco che la CLI avrebbe rifiutato, o viceversa.
- */
 
 #include <cstdio>
 #include <filesystem>
@@ -29,11 +20,10 @@ namespace fs = std::filesystem;
 struct BuildResult {
     bool ok = false;
     GameIndex::Index index;
-    std::string json;                 // valido solo se ok
-    std::vector<std::string> errors;  // motivi del fallimento, per l'umano e per il client
+    std::string json;
+    std::vector<std::string> errors;
 };
 
-// ------------------------------------------------------------ utilità
 
 inline bool writeTextFile(const std::string& path, const std::string& content) {
     std::ofstream out(path, std::ios::binary);
@@ -50,9 +40,6 @@ inline std::string readTextFile(const std::string& path) {
     return ss.str();
 }
 
-/** Id sicuro per un percorso: solo alfanumerico, tutto il resto diventa '_'.
- *  Un id che arriva dalla rete (URL di publish) non è mai testo fidato — deve
- *  poter diventare un nome di cartella senza uscire da hostedRoot. */
 inline std::string slugify(std::string s) {
     for (char& c : s) {
         if (std::isalnum((unsigned char)c)) c = (char)std::tolower((unsigned char)c);
@@ -61,11 +48,6 @@ inline std::string slugify(std::string s) {
     return s.empty() ? "game" : s;
 }
 
-/**
- * Legge solo i campi che servono da un place.json scritto da PlaceExporter,
- * senza un parser JSON completo: il formato è generato da noi, quindi i
- * pattern sono noti e stabili.
- */
 inline bool loadPlaceInto(const std::string& path, DataModel& world) {
     const std::string text = readTextFile(path);
     if (text.empty()) return false;
@@ -86,8 +68,6 @@ inline bool loadPlaceInto(const std::string& path, DataModel& world) {
     world.placeName = findString("placeName");
     if (world.placeName.empty()) world.placeName = "Untitled";
 
-    // Conta le occorrenze di "name" dentro il blocco "parts": basta a dare un
-    // numero di entità plausibile senza analizzare la struttura ad albero.
     auto countBlock = [&](const char* blockKey) -> int {
         const std::string bneedle = std::string("\"") + blockKey + "\"";
         const size_t b = text.find(bneedle);
@@ -128,14 +108,7 @@ inline std::string findPlaceFile(const std::string& gameDir) {
     return {};
 }
 
-// -------------------------------------------------------- costruzione indice
 
-/**
- * Costruisce l'indice da una cartella già estratta sul disco.
- * Non scrive nulla: il chiamante decide se e dove salvare game_index.json,
- * perché il server vuole scriverlo in una cartella di staging, non subito
- * in quella pubblica.
- */
 inline BuildResult buildIndexForFolder(const std::string& gameDir,
                                        std::string gameId, std::string title) {
     BuildResult r;
@@ -166,7 +139,6 @@ inline BuildResult buildIndexForFolder(const std::string& gameDir,
     if (fs::exists(assetsDir, ec)) {
         audit = AssetAudit::run(assetsDir.string());
     }
-    // Nessuna assets/ non è un errore: un gioco di sole Part non ne ha bisogno.
 
     if (audit.errors > 0) {
         for (const auto& f : audit.findings) {
@@ -197,13 +169,12 @@ inline BuildResult buildIndexForFolder(const std::string& gameDir,
     return r;
 }
 
-// ---------------------------------------------------------- publish da zip
 
 struct PublishResult {
     bool ok = false;
     std::string gameId;
     std::string message;
-    BuildResult build;   // dettaglio, per il messaggio di errore al client
+    BuildResult build;
 };
 
 inline std::string randomSuffix() {
@@ -213,15 +184,6 @@ inline std::string randomSuffix() {
     return o.str();
 }
 
-/**
- * Riceve i byte di un archivio .zip, lo estrae in una cartella di staging,
- * valida e indicizza, e solo se tutto va bene lo rende visibile scambiando
- * la cartella finale con quella nuova.
- *
- * Il file non finisce mai in `hostedRoot/<id>` finché non ha superato
- * l'audit: un client che stesse scaricando in quel momento non vede mai un
- * pacchetto a metà.
- */
 inline PublishResult publishZipBytes(const std::vector<std::uint8_t>& zipBytes,
                                      const std::string& requestedId,
                                      const std::string& hostedRoot) {
@@ -251,10 +213,6 @@ inline PublishResult publishZipBytes(const std::vector<std::uint8_t>& zipBytes,
         return pr;
     }
 
-    // L'estrazione può aver messo tutto dentro un'unica cartella radice
-    // (comune quando si zippa una cartella invece del suo contenuto): se
-    // staging ha un solo figlio che è una directory, si scende lì dentro
-    // invece di richiedere all'utente di zippare "bene".
     fs::path contentRoot = staging;
     {
         int childCount = 0;
@@ -280,9 +238,6 @@ inline PublishResult publishZipBytes(const std::vector<std::uint8_t>& zipBytes,
         return pr;
     }
 
-    // Scambio: sposta il vecchio da parte, promuovi il nuovo, poi cancella
-    // il vecchio. Se lo scambio si interrompe a metà resta comunque una
-    // versione servibile in hostedRoot/<id>, mai una cartella a metà scritta.
     const fs::path finalDir = fs::path(hostedRoot) / id;
     const fs::path backupDir = fs::path(hostedRoot) / (".old_" + id);
 
@@ -291,7 +246,6 @@ inline PublishResult publishZipBytes(const std::vector<std::uint8_t>& zipBytes,
 
     fs::rename(contentRoot, finalDir, ec);
     if (ec) {
-        // Rollback: riporta il vecchio al suo posto se lo scambio fallisce.
         std::error_code ec2;
         fs::rename(backupDir, finalDir, ec2);
         fs::remove_all(staging, ec2);
@@ -300,11 +254,11 @@ inline PublishResult publishZipBytes(const std::vector<std::uint8_t>& zipBytes,
     }
 
     fs::remove_all(backupDir, ec);
-    fs::remove_all(staging, ec);   // se contentRoot era una sottocartella, staging ha ancora quel guscio
+    fs::remove_all(staging, ec);
 
     pr.ok = true;
     pr.message = "pubblicato";
     return pr;
 }
 
-} // namespace GamePublish
+}

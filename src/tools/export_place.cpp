@@ -1,4 +1,3 @@
-// CLI — esporta place di default in JSON
 #include "engine/DataModel.h"
 #include "engine/Humanoid.h"
 #include "engine/PlaceExporter.h"

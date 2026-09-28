@@ -1,16 +1,5 @@
 #pragma once
 
-/**
- * Validatore e inventario degli asset.
- *
- * Due usi con un solo codice:
- *  - dal tool `asset_audit`, prima di impacchettare una release;
- *  - dal motore, per validare un file prima di caricarlo.
- *
- * Ogni asset esce con id, formato, dimensione, checksum e data: è l'inventario
- * che serve per sapere se un file è cambiato fra due build, e per accorgersi
- * che due asset diversi sono in realtà lo stesso byte per byte.
- */
 
 #include <algorithm>
 #include <cctype>
@@ -46,19 +35,16 @@ struct Finding {
 };
 
 struct AssetRecord {
-    std::string id;        // percorso relativo, separatori normalizzati
-    std::string format;    // formato riconosciuto dai magic byte
+    std::string id;
+    std::string format;
     std::uint64_t bytes = 0;
     std::uint64_t checksum = 0;
     std::int64_t modified = 0;
 };
 
 struct Options {
-    /** Oltre questa soglia un singolo asset è segnalato. */
     std::uint64_t heavyBytes = 8ull * 1024 * 1024;
-    /** Estensioni che non hanno motivo di finire in una release. */
     std::vector<std::string> devExtensions = {".py", ".bak", ".tmp", ".orig", ".md"};
-    /** Frammenti di nome la cui origine va verificata a mano prima di spedire. */
     std::vector<std::string> reviewNames = {"roblox", "noob", "hellod", "character"};
 };
 
@@ -79,7 +65,6 @@ struct Report {
     bool releaseReady() const { return errors == 0; }
 };
 
-// --------------------------------------------------------------- utilità
 
 inline std::string lower(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
@@ -91,7 +76,6 @@ inline std::string normalizeSlashes(std::string s) {
     return s;
 }
 
-/** FNV-1a 64 bit: niente dipendenze, e basta per confrontare due file. */
 inline std::uint64_t hashBytes(const std::vector<unsigned char>& data) {
     std::uint64_t h = 1469598103934665603ull;
     for (unsigned char b : data) {
@@ -120,10 +104,6 @@ inline bool startsWith(const std::vector<unsigned char>& d, const char* sig, siz
     return true;
 }
 
-/**
- * Formato dedotto dai primi byte, non dall'estensione: un .png rinominato
- * resta un .png, e un file corrotto si vede subito perché non è nulla.
- */
 inline std::string sniffFormat(const std::vector<unsigned char>& d) {
     if (d.empty()) return "vuoto";
 
@@ -138,7 +118,6 @@ inline std::string sniffFormat(const std::vector<unsigned char>& d) {
     if (d.size() >= 4 && d[0] == 0 && d[1] == 0 && d[2] == 1 && d[3] == 0) return "ico";
     if (startsWith(d, "\x1b" "Lua", 4)) return "lua-bytecode";
 
-    // Testo: nessun byte di controllo fuori da tab/CR/LF nei primi 512 byte.
     const size_t probe = std::min<size_t>(d.size(), 512);
     for (size_t i = 0; i < probe; ++i) {
         const unsigned char c = d[i];
@@ -148,7 +127,6 @@ inline std::string sniffFormat(const std::vector<unsigned char>& d) {
     return "testo";
 }
 
-/** Formati accettabili per una data estensione. */
 inline std::vector<std::string> expectedFormats(const std::string& ext) {
     if (ext == ".png")  return {"png"};
     if (ext == ".jpg" || ext == ".jpeg") return {"jpg"};
@@ -160,7 +138,7 @@ inline std::vector<std::string> expectedFormats(const std::string& ext) {
     if (ext == ".lua")  return {"testo", "lua-bytecode"};
     if (ext == ".json" || ext == ".txt" || ext == ".html" || ext == ".rc" || ext == ".md")
         return {"testo"};
-    return {};   // estensione senza aspettative: nessun controllo
+    return {};
 }
 
 inline bool containsAny(const std::string& haystack, const std::vector<std::string>& needles) {
@@ -169,7 +147,6 @@ inline bool containsAny(const std::string& haystack, const std::vector<std::stri
     return false;
 }
 
-// ----------------------------------------------------------------- audit
 
 inline Report run(const std::string& rootDir, const Options& opt = {}) {
     Report report;
@@ -181,7 +158,6 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
         return report;
     }
 
-    // checksum -> primo file che lo ha prodotto, per trovare i duplicati
     std::map<std::uint64_t, std::string> seen;
 
     std::error_code ec;
@@ -212,12 +188,10 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
 
         report.totalBytes += rec.bytes;
 
-        // --- vuoto -----------------------------------------------------
         if (rec.bytes == 0) {
             report.add(Severity::Error, rel, "vuoto", "0 byte: il caricamento fallirà");
         }
 
-        // --- formato coerente con l'estensione -------------------------
         const std::vector<std::string> want = expectedFormats(ext);
         if (!want.empty() && rec.bytes > 0 &&
             std::find(want.begin(), want.end(), rec.format) == want.end()) {
@@ -225,13 +199,11 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
                        "estensione " + ext + " ma i byte dicono '" + rec.format + "'");
         }
 
-        // --- peso ------------------------------------------------------
         if (rec.bytes > opt.heavyBytes) {
             report.add(Severity::Warn, rel, "pesante",
                        std::to_string(rec.bytes / 1024) + " KB in un solo asset");
         }
 
-        // --- duplicati -------------------------------------------------
         auto dup = seen.find(rec.checksum);
         if (dup != seen.end() && rec.bytes > 0) {
             report.add(Severity::Warn, rel, "duplicato",
@@ -240,7 +212,6 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
             seen.emplace(rec.checksum, rel);
         }
 
-        // --- residui di sviluppo ---------------------------------------
         if (std::find(opt.devExtensions.begin(), opt.devExtensions.end(), ext)
             != opt.devExtensions.end()) {
             report.add(Severity::Warn, rel, "residuo-sviluppo",
@@ -254,9 +225,6 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
                        "sembra una versione di lavoro o uno script di build");
         }
 
-        // --- origine da verificare -------------------------------------
-        // Non è un giudizio automatico: segnala i file il cui nome suggerisce
-        // che vengano da fuori, perché vanno guardati prima di spedirli.
         if (containsAny(name, opt.reviewNames)) {
             report.add(Severity::Warn, rel, "origine-da-verificare",
                        "il nome rimanda a materiale di terzi: controlla prima di pubblicare");
@@ -271,10 +239,6 @@ inline Report run(const std::string& rootDir, const Options& opt = {}) {
     return report;
 }
 
-/**
- * Validazione singola, per il motore prima di un caricamento.
- * `why` riceve il motivo quando torna false.
- */
 inline bool validateFile(const std::string& path, std::string& why,
                          std::uint64_t maxBytes = 64ull * 1024 * 1024) {
     std::error_code ec;
@@ -300,7 +264,6 @@ inline bool validateFile(const std::string& path, std::string& why,
     return true;
 }
 
-// -------------------------------------------------------------- manifest
 
 inline std::string jsonEscape(const std::string& s) {
     std::string o;
@@ -312,7 +275,6 @@ inline std::string jsonEscape(const std::string& s) {
     return o;
 }
 
-/** Inventario in JSON: id, formato, byte, checksum, data. */
 inline std::string toJson(const Report& r) {
     std::ostringstream j;
     j << "{\n  \"format\": \"BlockyAssetManifest\",\n  \"version\": 1,\n";
@@ -336,4 +298,4 @@ inline std::string toJson(const Report& r) {
     return j.str();
 }
 
-} // namespace AssetAudit
+}

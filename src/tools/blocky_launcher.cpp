@@ -1,20 +1,16 @@
-/**
- * Blocky.exe — lanciatore minimo dell'hub/player.
- *
- * Non linka GLFW, ImGui, assimp o glad: carica libblocky.dll a runtime e
- * chiama Blocky_Run(). Tutto il motore vive nella dll; questo eseguibile è
- * solo il punto d'ingresso che Windows Explorer sa aprire.
- *
- * Windows cerca la dll prima nella cartella dell'eseguibile: basta che
- * libblocky.dll stia accanto a questo .exe, come fanno già gli asset.
- */
 
 #include <windows.h>
 #include <cstdio>
+#ifndef BLOCKY_DEV
+#include "AutoUpdater.h"
+#endif
 
 typedef int (*BlockyRunFn)();
 
 int main() {
+#ifndef BLOCKY_DEV
+    blk::AutoUpdater::tryAutoUpdate("Blocky");
+#endif
     HMODULE dll = LoadLibraryA("libblocky.dll");
     if (!dll) {
         MessageBoxA(nullptr,

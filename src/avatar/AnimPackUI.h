@@ -1,18 +1,5 @@
 #pragma once
 
-/**
- * Pannello "Pubblica pacchetto animazioni".
- *
- * Il publishing avviene in due tempi, e questo pannello e' il secondo:
- *
- *   1. Importi una clip da FBX/GLB nel pannello animazioni esistente
- *      -> AnimLibrary::registerClip() ti da' un AnimationId.
- *   2. Qui assegni gli AnimationId ai ruoli e pubblichi il pacchetto.
- *
- * Le clip da tool non vengono nemmeno elencate nei ruoli di movimento: la
- * regola e' applicata due volte, in UI perche' non ti confonda e in
- * AnimPackLibrary::publish() perche' non si aggiri.
- */
 
 #include "AnimPack.h"
 
@@ -33,10 +20,9 @@ struct AnimPackClipEntry {
     std::string id;
     std::string label;
     R6AnimKind kind = R6AnimKind::Walk;
-    bool looksLikeTool = false;   // per nome, non solo per kind
+    bool looksLikeTool = false;
 };
 
-/** Clip disponibili, deduplicate per id canonico (byId contiene gli alias). */
 inline std::vector<AnimPackClipEntry> animPackAvailableClips() {
     std::vector<AnimPackClipEntry> out;
     std::map<std::string, bool> seen;
@@ -69,7 +55,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
         return;
     }
 
-    // ---- 1. ruoli ------------------------------------------------------
     ImGui::SeparatorText("1. Assegna le animazioni ai ruoli");
     for (int r = 0; r < (int)AnimRole::Count; ++r) {
         AnimRole role = (AnimRole)r;
@@ -80,7 +65,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
             if (ImGui::Selectable("(eredita dal default)", cur.empty()))
                 st.draft.clipId[r].clear();
             for (const auto& c : clips) {
-                // Invariante: niente clip da tool nella locomozione.
                 if (animRoleIsLocomotion(role) && c.looksLikeTool) continue;
                 if (ImGui::Selectable(c.label.c_str(), cur == c.id))
                     st.draft.clipId[r] = c.id;
@@ -91,7 +75,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
     }
     ImGui::TextDisabled("Le clip [tool] non compaiono nei ruoli di movimento.");
 
-    // ---- 2. identita' --------------------------------------------------
     ImGui::Spacing();
     ImGui::SeparatorText("2. Nome del pacchetto");
     ImGui::InputText("Nome", st.nameBuf, sizeof(st.nameBuf));
@@ -102,7 +85,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
         if (!st.draft.clipId[r].empty()) ++filled;
     ImGui::TextDisabled("Ruoli assegnati: %d / %d", filled, (int)AnimRole::Count);
 
-    // ---- 3. pubblica ---------------------------------------------------
     ImGui::Spacing();
     ImGui::SeparatorText("3. Pubblica");
     ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.62f, 0.42f, 1.f});
@@ -130,7 +112,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
             ImGui::SetClipboardText(st.lastPublishedId.c_str());
     }
 
-    // ---- catalogo ------------------------------------------------------
     ImGui::Spacing();
     ImGui::SeparatorText("Pacchetti nel catalogo");
     std::vector<const AnimPack*> packs = animPacks().list();
@@ -155,7 +136,6 @@ inline void drawAnimPackPublisher(AnimPackPublisherState& st) {
         ImGui::PopID();
     }
 
-    // ---- cosa sta suonando adesso --------------------------------------
     ImGui::Spacing();
     ImGui::SeparatorText("Attivo adesso");
     for (int r = 0; r < (int)AnimRole::Count; ++r) {

@@ -1,11 +1,5 @@
 #pragma once
 
-/**
- * Animazione modelli Workspace: keyframe TRS.
- * Supporta stile professionale AnimateFrame(frame, position):
- *   frame intero + posizione (rot/scale opzionali).
- * Tempo = frame / fps (default 30).
- */
 
 #include "AnimateFrame.h"
 
@@ -18,16 +12,16 @@
 
 struct ModelAnimKey {
     float time = 0.f;
-    int frame = 0; // AnimateFrame: indice frame (sincronizzato con time via fps)
+    int frame = 0;
     glm::vec3 position{0, 2, 0};
-    glm::vec3 rotation{0}; // gradi Euler
+    glm::vec3 rotation{0};
     glm::vec3 scale{1, 1, 1};
 };
 
 struct ModelAnimClip {
     std::string name = "Anim";
     float duration = 2.f;
-    int fps = 30; // AnimateFrame fps
+    int fps = 30;
     bool looped = true;
     std::vector<ModelAnimKey> keys;
 
@@ -65,11 +59,6 @@ struct ModelAnimClip {
         keys.push_back(b);
     }
 
-    /**
-     * true solo se i keyframe descrivono un movimento reale.
-     * ensureSeed() crea due key IDENTICHE come punto di partenza: quella non è
-     * un'animazione e non deve sovrascrivere ciò che sposti/scali in Studio.
-     */
     bool hasMotion() const {
         if (keys.size() < 2) return false;
         const ModelAnimKey& k0 = keys.front();
@@ -85,7 +74,6 @@ struct ModelAnimClip {
         return false;
     }
 
-    /** Sposta un clip ancora "fermo" sul nuovo transform (segue le modifiche in Studio). */
     void reseedIfStatic(const glm::vec3& pos, const glm::vec3& rot, const glm::vec3& scl) {
         if (hasMotion()) return;
         for (auto& k : keys) {
@@ -95,7 +83,6 @@ struct ModelAnimClip {
         }
     }
 
-    /** API professionale: AnimateFrame(frame, position [, rot, scale]). */
     int animateFrame(int frame, const glm::vec3& pos,
                      const glm::vec3& rot = {0, 0, 0},
                      const glm::vec3& scl = {1, 1, 1}) {
@@ -107,17 +94,6 @@ struct ModelAnimClip {
             keys[idx].time = t;
         }
         return idx;
-    }
-
-    AnimateClip toAnimateClip() const {
-        AnimateClip c;
-        c.name = name;
-        c.fps = fps;
-        c.looped = looped;
-        for (const auto& k : keys)
-            c.frames.push_back({k.frame > 0 ? k.frame : timeToFrame(k.time), k.position, k.rotation, k.scale});
-        c.sortFrames();
-        return c;
     }
 
     ModelAnimKey sample(float t) const {
@@ -173,10 +149,9 @@ struct ModelAnimClip {
 };
 
 struct ModelRigInfo {
-    bool fileHasBones = false; // info dal primo load StaticMesh
-    bool simpleRig = false;    // Root creato dall'utente
+    bool fileHasBones = false;
+    bool simpleRig = false;
     std::string rootName = "Root";
 
-    /** Per l'editor TRS basta il Rig Root (anche se il file ha ossa). */
     bool hasAnimRig() const { return simpleRig || fileHasBones; }
 };

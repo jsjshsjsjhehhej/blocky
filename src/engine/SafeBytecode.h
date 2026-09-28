@@ -1,27 +1,9 @@
 #pragma once
 
-/**
- * Blocky Safe Bytecode (BBCS) — logica di gioco, NON rendering.
- *
- * - Sviluppo: Lua completo (API Blocky già esposta) → nessun limite di gamedev
- * - Publish: compila a bytecode Lua + sigillo anti-tamper
- * - Play: carica solo chunk verificati (firma OK) → gioco giocabile subito
- * - OpenGL / Vulkan restano fuori da questo layer
- *
- * Formato file .bbc:
- *   magic[4] = 'B','B','C','S'
- *   version  u16 = 1
- *   flags    u16
- *   gameIdLen u16 + gameId bytes
- *   payloadLen u32 + lua binary chunk
- *   seal u32  (FNV-style keyed hash su header+payload)
- */
 
-extern "C" {
 #include "lua.h"
 #include "lualib.h"
-#include "lauxlib.h"
-}
+#include <Luau/Compiler.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -34,7 +16,6 @@ namespace SafeBytecode {
 
 inline constexpr uint16_t kVersion = 1;
 inline constexpr char kMagic[4] = { 'B', 'B', 'C', 'S' };
-// Chiave client (obfuscata): non è server-grade, ma blocca edit casuali / swap file
 inline constexpr uint32_t kSealKey = 0xB10C5AFEU;
 
 inline uint32_t fnv(const void* data, size_t n, uint32_t seed) {
@@ -61,53 +42,37 @@ inline uint32_t sealPayload(const std::string& gameId,
     return h;
 }
 
-struct WriterCtx {
-    std::vector<uint8_t>* out = nullptr;
-};
-
-inline int luaDumpWriter(lua_State*, const void* p, size_t sz, void* ud) {
-    auto* ctx = static_cast<WriterCtx*>(ud);
-    if (!ctx || !ctx->out) return 1;
-    const auto* b = static_cast<const uint8_t*>(p);
-    ctx->out->insert(ctx->out->end(), b, b + sz);
-    return 0;
-}
-
-/** Compila sorgente Lua → bytecode binario (chunk Lua 5.4). */
 inline bool compileLuaToBytecode(const std::string& source,
                                  const std::string& chunkName,
                                  std::vector<uint8_t>& outBc,
                                  std::string& err) {
     outBc.clear();
+    // Luau::compile produce gia' il bytecode finale (niente passaggio di
+    // "dump" separato come con lua_dump/Lua 5.4) — ma non segnala un
+    // errore di sintassi con un codice di ritorno: lo si scopre provando a
+    // caricarlo con luau_load, che sa interpretare il marcatore di errore
+    // che Luau::compile incorpora nel bytecode stesso.
+    const std::string bc = Luau::compile(source);
     lua_State* L = luaL_newstate();
     if (!L) {
         err = "luaL_newstate fallita";
         return false;
     }
-    // Solo parsing/compilazione — niente librerie pericolose
-    int st = luaL_loadbuffer(L, source.data(), source.size(),
-                             chunkName.empty() ? "=(blocky)" : chunkName.c_str());
-    if (st != LUA_OK) {
+    const std::string name = chunkName.empty() ? "=(blocky)" : chunkName;
+    if (luau_load(L, name.c_str(), bc.data(), bc.size(), 0) != 0) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "compile error";
         lua_close(L);
         return false;
     }
-    WriterCtx ctx{ &outBc };
-    // strip debug: 1 = strip
-    if (lua_dump(L, luaDumpWriter, &ctx, 1) != 0) {
-        err = "lua_dump fallita";
-        lua_close(L);
-        return false;
-    }
     lua_close(L);
-    if (outBc.empty()) {
+    if (bc.empty()) {
         err = "bytecode vuoto";
         return false;
     }
+    outBc.assign(bc.begin(), bc.end());
     return true;
 }
 
-/** Impacchetta bytecode + sigillo → blob BBCS. */
 inline bool packSealed(const std::string& gameId,
                        const std::vector<uint8_t>& luaBc,
                        std::vector<uint8_t>& outFile,
@@ -163,7 +128,6 @@ inline uint32_t rd32(const uint8_t* p) {
          | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/** Verifica sigillo e estrae bytecode Lua. */
 inline Unpacked unpackSealed(const uint8_t* data, size_t n) {
     Unpacked u;
     if (!data || n < 4 + 2 + 2 + 2 + 4 + 4) {
@@ -180,7 +144,7 @@ inline Unpacked unpackSealed(const uint8_t* data, size_t n) {
         u.err = "versione BBCS non supportata";
         return u;
     }
-    o += 2; // flags
+    o += 2;
     uint16_t idLen = rd16(data + o); o += 2;
     if (o + idLen + 4 + 4 > n) {
         u.err = "header BBCS corrotti";
@@ -225,7 +189,6 @@ inline bool writeFile(const std::string& path, const std::vector<uint8_t>& data)
     return (bool)f;
 }
 
-/** Sorgente Lua → file .bbc sigillato. */
 inline bool compileSourceToSealedFile(const std::string& source,
                                       const std::string& gameId,
                                       const std::string& outPath,
@@ -259,4 +222,4 @@ inline bool looksLikeBbcMagic(const std::string& path) {
     return f.gcount() == 4 && std::memcmp(m, kMagic, 4) == 0;
 }
 
-} // namespace SafeBytecode
+}

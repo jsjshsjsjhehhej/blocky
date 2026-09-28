@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glad/gl.h>
+#include "render/GlslPortable.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -11,10 +12,6 @@
 #include <cstdlib>
 #include <vector>
 
-/**
- * Particelle billboard 2D (stile Roblox ParticleEmitter semplificato).
- * Preset: sparks / smoke / coins / burst generico.
- */
 struct Particle {
     glm::vec3 pos{0};
     glm::vec3 vel{0};
@@ -34,7 +31,6 @@ enum class ParticlePreset : int {
     Coins,
 };
 
-/** Boom stile Roblox Explosion: sfera che cresce + flash. */
 struct ExplosionBall {
     glm::vec3 pos{0};
     float age = 0.f;
@@ -53,12 +49,13 @@ public:
     GLuint vbo = 0;
     GLuint tex = 0;
     bool ready = false;
-    // Uniform cache (evita glGetUniformLocation ogni draw → meno lag)
     GLint locMVP = -1, locColor = -1, locAlpha = -1, locTex = -1;
 
     static GLuint compile(GLenum type, const char* src) {
         GLuint s = glCreateShader(type);
-        glShaderSource(s, 1, &src, nullptr);
+        const std::string portableSrc = glslForTarget(src);
+        const char* srcPtr = portableSrc.c_str();
+        glShaderSource(s, 1, &srcPtr, nullptr);
         glCompileShader(s);
         GLint ok = 0;
         glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -112,7 +109,6 @@ void main(){
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
         glBindVertexArray(0);
 
-        // Soft blob texture
         const int N = 64;
         std::vector<unsigned char> px((size_t)N * N * 4);
         float c = (N - 1) * 0.5f;
@@ -163,14 +159,10 @@ void main(){
         explosions.clear();
     }
 
-    /**
-     * Boom: SOLO sfera billboard (0 particelle) — evita hitch/freeze.
-     */
-    void spawnExplosion(glm::vec3 origin, float radius = 12.f, int /*count*/ = 0) {
+    void spawnExplosion(glm::vec3 origin, float radius = 12.f, int  = 0) {
         if (radius < 4.f) radius = 4.f;
         if (radius > 18.f) radius = 18.f;
 
-        // Un solo boom alla volta
         explosions.clear();
 
         ExplosionBall ball;
@@ -179,7 +171,6 @@ void main(){
         ball.duration = 0.28f;
         ball.maxRadius = radius;
         explosions.push_back(ball);
-        // Niente emit() qui: i draw call multipli facevano freezare
     }
 
     static float frand(float a, float b) {
@@ -188,7 +179,6 @@ void main(){
 
     void emitOne(const Particle& p) {
         if ((int)particles.size() >= kMaxParticles) {
-            // O(1): sostituisci uno a caso (niente scan del peggiore)
             particles[(size_t)(std::rand() % kMaxParticles)] = p;
         } else {
             particles.push_back(p);
@@ -200,7 +190,7 @@ void main(){
               float size0, float size1, float gravity, float drag,
               glm::vec3 biasDir = {0, 1, 0}, float spread = 1.f) {
         if (count < 1) return;
-        if (count > 16) count = 16; // hard cap anti-hitch
+        if (count > 16) count = 16;
         glm::vec3 bias = glm::length(biasDir) > 1e-4f ? glm::normalize(biasDir) : glm::vec3(0, 1, 0);
         for (int i = 0; i < count; ++i) {
             Particle p;
@@ -278,8 +268,6 @@ void main(){
         if (!ready) return;
         if (particles.empty() && explosions.empty()) return;
 
-        // Assi camera dal world (inverse view) — estrarre dalle colonne di view
-        // lasciava i billboard di taglio / invisibili da certe angolazioni.
         glm::mat4 invView = glm::inverse(view);
         glm::vec3 camRight = glm::normalize(glm::vec3(invView[0]));
         glm::vec3 camUp = glm::normalize(glm::vec3(invView[1]));
@@ -312,7 +300,6 @@ void main(){
             glDrawArrays(GL_TRIANGLES, 0, 6);
         };
 
-        // Boom: 2 billboard max
         glDisable(GL_DEPTH_TEST);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         for (const auto& e : explosions) {

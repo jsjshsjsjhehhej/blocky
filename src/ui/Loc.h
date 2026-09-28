@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Localizzazione Blocky + Blocky Game Engine.
- * Lingua da stato (IT/EN), auto da Windows al primo avvio, persistente.
- *
- * Uso:  ImGui::Button(LB("btn.test", "test"));
- *       ImGui::TextUnformatted(L("hub.games"));
- */
 
 #include <imgui.h>
 
@@ -14,6 +7,12 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+
+#include "platform/Platform.h"
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>   // lingua del telefono, senza passare da Java
+#endif
 #include <unordered_map>
 
 #ifdef _WIN32
@@ -52,24 +51,35 @@ inline Lang locParseLangCode(const std::string& s) {
     }
     if (low == "en" || low == "english" || low == "1") return Lang::En;
     if (low == "it" || low == "italiano" || low == "italian" || low == "0") return Lang::It;
-    // "unknown" o altri → italiano
     return Lang::It;
 }
 
 inline std::string locSettingsPath() {
-#ifdef _WIN32
-    char appdata[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
-    if (n > 0 && n < MAX_PATH)
-        return std::string(appdata) + "\\Blocky\\ui_lang.txt";
-#endif
-    return "ui_lang.txt";
+    // Prima fuori da Windows era il nome relativo "ui_lang.txt": su Android la
+    // cartella di lavoro e' "/", in sola lettura, quindi la lingua scelta non
+    // veniva mai salvata e a ogni avvio si ripartiva da capo.
+    return plat::dataDir() + "/ui_lang.txt";
 }
 
+/**
+ * Lingua del sistema.
+ *
+ * Su Android non c'e' nessuna API Windows da chiamare, e prima il risultato
+ * era sempre "italiano" per chiunque: la lingua del telefono non veniva
+ * guardata affatto. La si legge dalla proprieta' di sistema, che e' un'unica
+ * chiamata e non richiede di passare da Java.
+ */
 inline Lang locDetectOsLang() {
 #ifdef _WIN32
     LANGID id = GetUserDefaultUILanguage();
     if (PRIMARYLANGID(id) == LANG_ENGLISH)
+        return Lang::En;
+#elif defined(__ANDROID__)
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("persist.sys.locale", value) <= 0)
+        __system_property_get("ro.product.locale", value);
+    // "it-IT", "en-US": conta solo la parte prima del trattino.
+    if (value[0] && !(value[0] == 'i' && value[1] == 't'))
         return Lang::En;
 #endif
     return Lang::It;
@@ -81,7 +91,6 @@ struct Loc {
 
     static const std::unordered_map<std::string, LocEntry>& table() {
         static const std::unordered_map<std::string, LocEntry> t = {
-            // —— Lingua / comune ——
             {"lang", {"Lingua", "Language"}},
             {"lang.it", {"Italiano", "Italian"}},
             {"lang.en", {"English", "English"}},
@@ -107,7 +116,6 @@ struct Loc {
             {"player", {"Player", "Player"}},
             {"animation", {"Animazione", "Animation"}},
 
-            // —— Hub Blocky ——
             {"hub.games", {"Games", "Games"}},
             {"hub.shop", {"Shop", "Shop"}},
             {"hub.chat", {"Chat", "Chat"}},
@@ -134,7 +142,6 @@ struct Loc {
             {"hub.hide_chat", {"Nascondi Chat", "Hide Chat"}},
             {"hub.show_chat", {"Chat", "Chat"}},
 
-            // —— Studio toolbar / tools ——
             {"tool.select", {"Seleziona", "Select"}},
             {"tool.move", {"Muovi", "Move"}},
             {"tool.scale", {"Scala", "Scale"}},
@@ -161,7 +168,6 @@ struct Loc {
             {"hint.scripts_test", {"Gli script partono solo con Test (F5)",
                                    "Scripts run only in Test (F5)"}},
 
-            // —— Studio menu File ——
             {"menu.new_place", {"Nuovo place (vuoto)", "New place (empty)"}},
             {"menu.new_map", {"Nuova mappa...", "New map..."}},
             {"menu.open_place", {"Apri Place...", "Open Place..."}},
@@ -174,7 +180,6 @@ struct Loc {
             {"menu.back_blocky", {"Torna a Blocky", "Back to Blocky"}},
             {"menu.exit", {"Esci", "Quit"}},
 
-            // —— Studio menu Inserisci / Modifica / Player ——
             {"menu.part", {"Part", "Part"}},
             {"menu.model", {"Model...", "Model..."}},
             {"menu.label", {"Label (UI)", "Label (UI)"}},
@@ -199,7 +204,6 @@ struct Loc {
             {"menu.animate_model", {"Anima Model (keyframe)...", "Animate Model (keyframes)..."}},
             {"menu.quick_clips", {"Clip Player (Idle/Walk)", "Player clips (Idle/Walk)"}},
 
-            // —— Vista ——
             {"menu.explorer", {"Explorer", "Explorer"}},
             {"menu.properties", {"Properties", "Properties"}},
             {"menu.create_panel", {"Create (mappe/props)", "Create (maps/props)"}},
@@ -207,7 +211,6 @@ struct Loc {
             {"menu.engine_settings", {"Impostazioni engine", "Engine settings"}},
             {"menu.chat", {"Chat", "Chat"}},
 
-            // —— Maps ——
             {"map.baseplate", {"Baseplate", "Baseplate"}},
             {"map.garden", {"Garden", "Garden"}},
             {"map.obby", {"Obby", "Obby"}},
@@ -215,7 +218,6 @@ struct Loc {
             {"map.park", {"Park", "Park"}},
             {"map.city", {"City", "City"}},
 
-            // —— Test HUD ——
             {"test.playing", {"TEST PLAY", "TEST PLAY"}},
             {"test.stop", {"Stop Test", "Stop Test"}},
             {"test.hint", {"WASD · Space · Shift Lock · Esc = Stop",
@@ -227,7 +229,6 @@ struct Loc {
             {"hud.equipped", {"Equipaggiato", "Equipped"}},
             {"hud.unequipped", {"Non equipaggiato", "Unequipped"}},
 
-            // —— Avatar / anim ——
             {"avatar.download_r6", {"1. Scarica modello Player R6 (default)",
                                     "1. Download default Player R6 model"}},
             {"avatar.import_anim", {"2. Importa animazione (FBX / GLB)",
@@ -278,7 +279,6 @@ struct Loc {
 
     void save() const {
 #ifdef _WIN32
-        // assicura cartella Blocky
         char appdata[MAX_PATH] = {};
         if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) > 0) {
             std::string dir = std::string(appdata) + "\\Blocky";
@@ -296,20 +296,14 @@ inline Loc& loc() {
     return L;
 }
 
-/** Testo tradotto. */
 inline const char* L(const char* key) { return loc().tr(key); }
 
-/**
- * Label ImGui con id stabile (non cambia con la lingua).
- * Es: LB("btn.test", "test") → "Test##test" / "Test##test"
- */
 inline const char* LB(const char* key, const char* imguiId) {
     static thread_local char buf[192];
     std::snprintf(buf, sizeof(buf), "%s##%s", loc().tr(key), imguiId);
     return buf;
 }
 
-/** Combo / bottoni lingua (hub + studio). */
 inline bool drawLanguageSelector(const char* id = "lang") {
     loc().load();
     bool changed = false;
@@ -332,7 +326,6 @@ inline bool drawLanguageSelector(const char* id = "lang") {
 inline bool drawLanguageButton(const char* id = "langbtn") {
     loc().load();
     char lab[80];
-    // Mostra "Italiano" / "English" (non codice it/en)
     std::snprintf(lab, sizeof(lab), "%s##%s", locLangLabel(loc().lang), id);
     if (ImGui::Button(lab, {0, 0})) {
         loc().cycle();

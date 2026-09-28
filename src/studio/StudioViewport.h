@@ -1,16 +1,5 @@
 #pragma once
 
-/**
- * Viewport 3D di Blocky Studio.
- *
- * Usa gli stessi shader, mesh e texture di BlockyGameEngine (GlShaders.h,
- * BeveledCube.h, stud.png) invece di averne di propri: quello che si vede
- * nell'editor deve essere quello che si vedrà in gioco, altrimenti si
- * costruisce alla cieca. L'unica cosa in più è la griglia dell'editor.
- *
- * Il rendering avviene in un framebuffer offscreen che finisce in una
- * ImGui::Image, così il 3D sta dentro il layout a pannelli.
- */
 
 #include <glad/gl.h>
 #include <glm/glm.hpp>
@@ -34,9 +23,8 @@
 
 namespace studio {
 
-constexpr float kStudTile = 4.f;   // stessa scala del gioco
+constexpr float kStudTile = 4.f;
 
-/** Griglia dell'editor: l'unico shader che il gioco non ha. */
 inline const char* kGridVS = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 uniform mat4 uViewProj;
@@ -122,11 +110,8 @@ inline GLuint buildProgram(const char* vs, const char* fs, std::string* log) {
     return p;
 }
 
-/** Camera orbitale attorno a un bersaglio, come in ogni editor 3D. */
 struct OrbitCamera {
     glm::vec3 target{0.f, 2.f, 0.f};
-    // Lo spawn di default guarda verso -X (yaw -90): partendo da questo lato
-    // si vede la faccia dell'avatar invece della nuca.
     float yaw = -1.25f;
     float pitch = 0.35f;
     float distance = 26.f;
@@ -143,8 +128,6 @@ struct OrbitCamera {
     }
 
     void zoom(float steps) {
-        // Moltiplicativo: da vicino i passi si accorciano da soli, altrimenti
-        // una rotella sola attraversa l'oggetto.
         distance = std::clamp(distance * std::pow(0.88f, steps), 1.5f, 400.f);
     }
 
@@ -155,16 +138,19 @@ struct OrbitCamera {
         target += (-right * dx + up * dy) * (distance * 0.0016f);
     }
 
+    // Volo stile FPS (WASD+QE mentre si tiene il tasto destro), come in
+    // Roblox Studio: right=+X locale, up=+Y mondo, forward=+Z locale.
+    void flyMove(const glm::vec3& local) {
+        const glm::vec3 fwd = glm::normalize(target - eye());
+        const glm::vec3 right = glm::normalize(glm::cross(fwd, {0, 1, 0}));
+        target += right * local.x + glm::vec3(0, 1, 0) * local.y + fwd * local.z;
+    }
+
     glm::mat4 view() const { return glm::lookAt(eye(), target, {0, 1, 0}); }
 };
 
 struct Viewport;
 
-/**
- * BlockPlayer::draw vuole un puntatore a funzione nudo, che non può catturare
- * nulla. Questo puntatore fa da ponte per la durata della sola chiamata: è
- * sicuro perché il rendering è single-thread e viene azzerato subito dopo.
- */
 inline Viewport* g_drawViewport = nullptr;
 
 void studioDrawAvatarCube(GLuint vao, GLuint prog, const glm::mat4& model,
@@ -175,19 +161,18 @@ struct Viewport {
     GLuint fbo = 0, colorTex = 0, depthRbo = 0;
     int width = 0, height = 0;
 
-    GLuint partProgram = 0;    // kPartVS + kPartFS  — materiali, luci, Neon
-    GLuint studProgram = 0;    // kPartVS + kStudFS  — idem, con stud sulla faccia top
+    GLuint partProgram = 0;
+    GLuint studProgram = 0;
     GLuint gridProgram = 0;
 
-    // Il gioco smussa solo il player: le Part del mondo restano spigolose.
-    GLuint cubeVao = 0, cubeVbo = 0;   // Part e baseplate
-    BeveledCubeMesh bevelCube;         // solo avatar, bevel 0.11 come in gioco
-    PartMeshes shapes;                 // ball / cylinder / wedge
+    GLuint cubeVao = 0, cubeVbo = 0;
+    BeveledCubeMesh bevelCube;
+    PartMeshes shapes;
     Texture2D studTex;
     bool studReady = false;
 
     LightingService lighting;
-    BlockPlayer blockPlayer;   // stesso avatar R6 del gioco, faccia smile inclusa
+    BlockPlayer blockPlayer;
     bool showCharacter = true;
 
     GLuint quadVao = 0, quadVbo = 0;
@@ -195,12 +180,19 @@ struct Viewport {
     float fovY = glm::radians(50.f);
     std::string buildLog;
 
-    // Matrici del frame corrente: gli shader del gioco vogliono view e proj
-    // separate, non una MVP già moltiplicata.
     glm::mat4 frameView{1.f};
     glm::mat4 frameProj{1.f};
     glm::vec3 frameEye{0.f};
     glm::vec3 frameSun{0.f, -1.f, 0.f};
+    // Stessi shader condivisi di GlShaders.h dell'engine principale: senza
+    // questi uniform (tinta sole, ambient, cielo, nebbia) restano a zero in
+    // GLSL e la scena viene fuori quasi tutta nera, in particolare la
+    // nebbia che sfumerebbe verso il nero gia' a un paio di stud.
+    glm::vec3 frameSunColor{1.f};
+    glm::vec3 frameAmbientTint{1.f};
+    glm::vec3 frameSkyZenith{0.42f, 0.65f, 0.95f};
+    glm::vec3 frameSkyHorizon{0.69f, 0.84f, 0.95f};
+    float frameNight = 0.f;
 
     bool init() {
         partProgram = buildProgram(kPartVS, kPartFS, &buildLog);
@@ -208,7 +200,7 @@ struct Viewport {
         gridProgram = buildProgram(kGridVS, kGridFS, &buildLog);
         if (!partProgram || !gridProgram) return false;
 
-        bevelCube.build(0.11f);   // stesso bevel del player in gioco
+        bevelCube.build(0.11f);
         shapes.buildAll();
         buildCube();
         buildQuad();
@@ -270,13 +262,11 @@ struct Viewport {
     glm::mat4 projection() const { return glm::perspective(fovY, aspect(), 0.08f, 2000.f); }
     glm::mat4 viewProjection() const { return projection() * camera.view(); }
 
-    // ---------------------------------------------------------------- render
 
     void render(const DataModel& world, int selectedPart, bool showGrid) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, width, height);
 
-        // Stesso colore della foschia del gioco: l'orizzonte non stacca.
         const glm::vec3 sky = lighting.fogColor;
         glClearColor(sky.r, sky.g, sky.b, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -288,14 +278,12 @@ struct Viewport {
         frameProj = projection();
         frameEye = camera.eye();
         frameSun = lighting.sunDirection();
+        frameSunColor = lighting.sunTint();
+        frameAmbientTint = lighting.ambientTint();
+        lighting.skyColors(frameSkyZenith, frameSkyHorizon);
+        frameNight = lighting.nightAmount();
 
         collectLights(world);
-
-        if (world.hasBaseplate) {
-            const glm::mat4 m = glm::translate(glm::mat4(1.f), {0.f, -world.baseplateSize.y * 0.5f, 0.f})
-                              * glm::scale(glm::mat4(1.f), world.baseplateSize);
-            drawShape(PartShape::Block, m, world.baseplateColor, 0.f, PartMaterial::Plastic, true);
-        }
 
         for (const WorkspacePart& p : world.parts) {
             if (p.isTransparent()) continue;
@@ -306,8 +294,6 @@ struct Viewport {
 
         if (showGrid) drawGrid();
 
-        // Trasparenti in coda e senza scrivere profondità, altrimenti
-        // cancellano quello che sta dietro.
         for (const WorkspacePart& p : world.parts) {
             if (!p.isTransparent()) continue;
             drawShape(p.shape, partModelMatrix(p), p.color, p.emissive, p.material, p.useStud);
@@ -319,7 +305,6 @@ struct Viewport {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    /** Point light delle Part → uniform array degli shader del gioco. */
     void collectLights(const DataModel& world) {
         lightPos.clear();
         lightCol.clear();
@@ -341,9 +326,22 @@ struct Viewport {
             glUniform3fv(glGetUniformLocation(prog, "uLightCol"), n, glm::value_ptr(lightCol[0]));
             glUniform1fv(glGetUniformLocation(prog, "uLightRange"), n, lightRange.data());
         }
+        glUniform1f(glGetUniformLocation(prog, "uNight"), frameNight);
+        glUniform3fv(glGetUniformLocation(prog, "uSunColor"), 1, glm::value_ptr(frameSunColor));
+        glUniform3fv(glGetUniformLocation(prog, "uAmbientTint"), 1, glm::value_ptr(frameAmbientTint));
+        glUniform3fv(glGetUniformLocation(prog, "uSkyZenith"), 1, glm::value_ptr(frameSkyZenith));
+        glUniform3fv(glGetUniformLocation(prog, "uSkyHorizon"), 1, glm::value_ptr(frameSkyHorizon));
+        glUniform3fv(glGetUniformLocation(prog, "uFogColor"), 1, glm::value_ptr(lighting.fogColor));
+        glUniform1f(glGetUniformLocation(prog, "uFogStart"), lighting.fogStart);
+        glUniform1f(glGetUniformLocation(prog, "uFogEnd"), lighting.fogEnd);
+        // Niente shadow map/occluder in questo viewport semplice: 0 disattiva
+        // in sicurezza i rami corrispondenti negli shader (skyLightVisibility
+        // torna 1.0, contactAO torna 1.0 con nOcc<=0).
+        glUniform1i(glGetUniformLocation(prog, "uSunShadow"), 0);
+        glUniform1i(glGetUniformLocation(prog, "uOccCount"), 0);
+        glUniform1i(glGetUniformLocation(prog, "uAoOccStart"), 0);
     }
 
-    /** Stessa sequenza di uniform di drawCube() in main.cpp. */
     void drawShape(PartShape shape, const glm::mat4& model, const glm::vec3& color,
                    float emissive, PartMaterial material, bool useStud) {
         if ((int)material < 0 || material >= PartMaterial::Count) material = PartMaterial::Plastic;
@@ -383,20 +381,14 @@ struct Viewport {
             glUniform1f(glGetUniformLocation(prog, "uStudScale"), kStudTile);
         }
 
-        switch (shape) {
-        case PartShape::Ball:
-            bindAndDraw(shapes.ball.vao, shapes.ball.vertexCount);
-            break;
-        case PartShape::Cylinder:
-            bindAndDraw(shapes.cylinder.vao, shapes.cylinder.vertexCount);
-            break;
-        case PartShape::Wedge:
-            bindAndDraw(shapes.wedge.vao, shapes.wedge.vertexCount);
-            break;
-        default:
-            bindAndDraw(cubeVao, 36);   // spigoloso, come le Part in gioco
-            break;
-        }
+        // Vedi PartMeshes::meshFor: prima questa era una switch a mano che
+        // andava tenuta sincronizzata con la lista delle forme in
+        // PartShape.h — ogni forma nuova richiedeva ricordarsi di questo
+        // punto esatto. Block non ha una mesh qui: usa il cubo condiviso.
+        if (ShapeMesh* m = shapes.meshFor(shape))
+            bindAndDraw(m->vao, m->vertexCount);
+        else
+            bindAndDraw(cubeVao, 36);
 
         if (transparent) {
             glDepthMask(GL_TRUE);
@@ -404,12 +396,6 @@ struct Viewport {
         }
     }
 
-    /**
-     * Avatar R6 nel punto di spawn, disegnato da BlockPlayer — la stessa classe
-     * che usa il gioco. Reimplementare la catena degli arti qui dentro avrebbe
-     * significato dimenticarsi pezzi (il bob, la faccia smile) e vederli
-     * divergere al primo ritocco: meglio chiamare l'originale.
-     */
     void drawCharacter(const glm::vec3& position, float yawDegrees) {
         const BlockDrawContext ctx{bevelCube.vao, partProgram, frameView, frameProj, frameSun};
         g_drawViewport = this;
@@ -455,7 +441,6 @@ struct Viewport {
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
 
-    // --------------------------------------------------------------- picking
 
     glm::vec3 rayDirection(float u, float v) const {
         const float ndcX = u * 2.f - 1.f;
@@ -486,7 +471,6 @@ struct Viewport {
         return best;
     }
 
-    /** Slab test in spazio locale: becca anche le Part ruotate, non solo le AABB. */
     static bool rayHitsPart(const WorkspacePart& p, const glm::vec3& origin,
                             const glm::vec3& dir, float& outT) {
         const glm::mat4 inv = glm::inverse(glm::translate(glm::mat4(1.f), p.position)
@@ -533,7 +517,6 @@ private:
         glBindVertexArray(0);
     }
 
-    /** Cubo unitario spigoloso: posizione + normale, 36 vertici. */
     void buildCube() {
         const float v[] = {
              .5f,-.5f, .5f, 1,0,0,   .5f,-.5f,-.5f, 1,0,0,   .5f, .5f,-.5f, 1,0,0,
@@ -577,10 +560,6 @@ private:
     }
 };
 
-/**
- * Un cubo dell'avatar. Stessa sequenza di uniform di drawCube() in main.cpp,
- * senza materiali né luci: le parti del corpo sono tinte piatte.
- */
 inline void studioDrawAvatarCube(GLuint vao, GLuint prog, const glm::mat4& model,
                                  const glm::mat4& view, const glm::mat4& proj,
                                  const glm::vec3& color, const glm::vec3& sun) {
@@ -601,8 +580,7 @@ inline void studioDrawAvatarCube(GLuint vao, GLuint prog, const glm::mat4& model
     glUniform1i(glGetUniformLocation(prog, "uMaterial"), (int)PartMaterial::Plastic);
     g_drawViewport->uploadLights(prog);
 
-    // Cubi smussati come le Part in gioco, non spigolosi.
     g_drawViewport->bevelCube.draw();
 }
 
-} // namespace studio
+}

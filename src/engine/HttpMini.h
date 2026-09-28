@@ -1,18 +1,5 @@
 #pragma once
 
-/**
- * Server HTTP/1.1 minimale, bloccante, senza keep-alive.
- *
- * Copre esattamente quello che serve a blocky_hostd: GET per servire file
- * statici, PUT per ricevere un pacchetto da pubblicare. Niente chunked
- * transfer in ingresso (il client deve dichiarare Content-Length), niente
- * pipelining, una connessione = una richiesta = una risposta, poi si chiude.
- *
- * Va bene per LAN e per uso da studio: non è un web server per produzione
- * esposta su internet — niente TLS, niente limiti di concorrenza raffinati.
- * Se un giorno serve di più, qui è il punto di incapsulamento: il resto del
- * motore parla solo con HttpRequest/le funzioni sendXxx, non con i socket.
- */
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -32,8 +19,8 @@ namespace HttpMini {
 
 struct Request {
     std::string method;
-    std::string path;                          // solo il path, senza query string
-    std::map<std::string, std::string> headers; // chiavi già minuscole
+    std::string path;
+    std::map<std::string, std::string> headers;
     std::vector<std::uint8_t> body;
 
     std::string header(const char* key, const std::string& def = {}) const {
@@ -49,10 +36,7 @@ inline std::string toLower(std::string s) {
     return s;
 }
 
-// ---------------------------------------------------------------- lettura
 
-/** Legge esattamente `n` byte, con timeout già impostato sul socket. False se la
- *  connessione cade o il timeout scatta prima di riempire il buffer. */
 inline bool recvExact(SOCKET s, std::vector<std::uint8_t>& out, size_t n) {
     out.resize(n);
     size_t got = 0;
@@ -64,11 +48,6 @@ inline bool recvExact(SOCKET s, std::vector<std::uint8_t>& out, size_t n) {
     return true;
 }
 
-/**
- * Legge finché non trova "\r\n\r\n". Ritorna false se la connessione cade
- * prima. `leftover` riceve i byte letti oltre il terminatore — capita quasi
- * sempre, perché recv() non si ferma esattamente al bordo degli header.
- */
 inline bool recvUntilHeadersEnd(SOCKET s, std::string& headerBlock,
                                 std::vector<std::uint8_t>& leftover) {
     std::string buf;
@@ -82,7 +61,7 @@ inline bool recvUntilHeadersEnd(SOCKET s, std::string& headerBlock,
             leftover.assign(buf.begin() + (long)(marker + 4), buf.end());
             return true;
         }
-        if (buf.size() > 64 * 1024) return false;   // header abnormemente grande: rifiuta
+        if (buf.size() > 64 * 1024) return false;
 
         const int r = recv(s, chunk, sizeof(chunk), 0);
         if (r <= 0) return false;
@@ -90,7 +69,6 @@ inline bool recvUntilHeadersEnd(SOCKET s, std::string& headerBlock,
     }
 }
 
-/** Uscita false = richiesta malformata o connessione caduta durante la lettura. */
 inline bool parseRequest(SOCKET s, Request& req, std::string& error,
                          size_t maxBodyBytes = 256ull * 1024 * 1024) {
     std::string headerBlock;
@@ -114,7 +92,6 @@ inline bool parseRequest(SOCKET s, Request& req, std::string& error,
         error = "request line malformata";
         return false;
     }
-    // Via la query string: nessuna rotta qui dentro ne ha bisogno.
     req.path = fullPath.substr(0, fullPath.find('?'));
 
     std::string headerLine;
@@ -146,14 +123,13 @@ inline bool parseRequest(SOCKET s, Request& req, std::string& error,
             }
             req.body.insert(req.body.end(), rest.begin(), rest.end());
         } else if (req.body.size() > (size_t)want) {
-            req.body.resize((size_t)want);   // pipelining non supportato: si scarta l'eccesso
+            req.body.resize((size_t)want);
         }
     }
 
     return true;
 }
 
-// ---------------------------------------------------------------- scrittura
 
 inline bool sendAll(SOCKET s, const char* data, size_t n) {
     size_t sent = 0;
@@ -192,7 +168,6 @@ inline void sendJson(SOCKET s, int status, const char* statusText, const std::st
                 (const std::uint8_t*)json.data(), json.size());
 }
 
-// ------------------------------------------------------------------- MIME
 
 inline std::string mimeFor(const std::string& path) {
     const size_t dot = path.find_last_of('.');
@@ -213,8 +188,6 @@ inline std::string mimeFor(const std::string& path) {
     return "application/octet-stream";
 }
 
-/** Serve un file dal disco, a blocchi: gli asset possono pesare decine di MB
- *  e non conviene caricarli interi in RAM per ogni richiesta. */
 inline bool sendFile(SOCKET s, const std::string& fsPath) {
     std::ifstream f(fsPath, std::ios::binary | std::ios::ate);
     if (!f) return false;
@@ -229,7 +202,7 @@ inline bool sendFile(SOCKET s, const std::string& fsPath) {
       << "Content-Length: " << size << "\r\n"
       << "Connection: close\r\n\r\n";
     const std::string head = h.str();
-    if (!sendAll(s, head.data(), head.size())) return true;   // header inviato: risposta "gestita"
+    if (!sendAll(s, head.data(), head.size())) return true;
 
     char buf[65536];
     while (f) {
@@ -241,4 +214,4 @@ inline bool sendFile(SOCKET s, const std::string& fsPath) {
     return true;
 }
 
-} // namespace HttpMini
+}

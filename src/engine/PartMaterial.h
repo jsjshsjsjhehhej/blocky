@@ -4,7 +4,6 @@
 #include <cstring>
 #include <string>
 
-/** Materiali Part stile Roblox (semplificati). */
 enum class PartMaterial : int {
     Plastic = 0,
     SmoothPlastic,
@@ -41,7 +40,6 @@ inline PartMaterial partMaterialFromName(const std::string& name) {
     std::string s = name;
     for (char& c : s)
         if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    // rimuovi spazi / underscore
     s.erase(std::remove_if(s.begin(), s.end(),
                             [](char c) { return c == ' ' || c == '_' || c == '-'; }),
             s.end());
@@ -58,7 +56,6 @@ inline PartMaterial partMaterialFromName(const std::string& name) {
     return PartMaterial::Plastic;
 }
 
-/** Parametri shading per materiale → shader (specular, roughness, emissive bias, alpha). */
 inline void partMaterialShading(PartMaterial m, float& specular, float& roughness,
                                 float& emissiveBias, float& alpha) {
     specular = 0.12f;

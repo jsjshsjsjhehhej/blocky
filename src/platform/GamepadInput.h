@@ -1,12 +1,5 @@
 #pragma once
 
-/**
- * Input controller USB — Xbox (XInput) + DualSense/PS5 (GLFW + fallback raw).
- * Senza UI dedicata. Hotplug: collega/scollega in qualsiasi momento.
- *
- * LS muovi · RS guarda · A/Cross salta · Y/Triangle Shift Lock
- * RT/R2 sprint · Start/Options menu · LB/RB camera Studio
- */
 
 #include <GLFW/glfw3.h>
 #include <cmath>
@@ -31,8 +24,8 @@ enum class GamepadKind {
 
 struct GamepadState {
     bool connected = false;
-    int  jid = -1;           // GLFW joystick id, o -1 se solo XInput
-    int  xinputIndex = -1;   // 0..3 se da XInput
+    int  jid = -1;
+    int  xinputIndex = -1;
     GamepadKind kind = GamepadKind::None;
     char name[96] = {};
 
@@ -50,8 +43,8 @@ struct GamepadState {
     bool startPressed = false, backPressed = false;
     bool dpadUPressed = false, dpadDPressed = false;
     bool dpadLPressed = false, dpadRPressed = false;
-    bool lbPressed = false, rbPressed = false; // L1 / R1
-    bool ltPressed = false, rtPressed = false; // L2 / R2 (edge)
+    bool lbPressed = false, rbPressed = false;
+    bool ltPressed = false, rtPressed = false;
 
     bool prevA = false, prevB = false, prevX = false, prevY = false;
     bool prevStart = false, prevBack = false;
@@ -60,21 +53,9 @@ struct GamepadState {
     float prevLt = 0.f, prevRt = 0.f;
 };
 
-/**
- * Vibrazione.
- *
- * `left` è il motore pesante (rombo grave), `right` quello leggero (ronzio
- * acuto), entrambi 0..1. `seconds` a 0 lascia acceso finché non lo si ferma:
- * è il chiamante a doverlo spegnere, e gpRumbleTick() lo fa per lui quando la
- * durata scade.
- *
- * Solo XInput: DualShock e DualSense vogliono un report HID in uscita, che
- * cambia fra USB e Bluetooth e va scritto a parte. Meglio non vibrare che
- * mandare byte a caso a un dispositivo.
- */
 struct RumbleState {
     float left = 0.f, right = 0.f;
-    float remaining = 0.f;     // secondi; <= 0 = continuo o spento
+    float remaining = 0.f;
     bool active = false;
 };
 
@@ -113,7 +94,6 @@ inline void gpStopRumble(int xinputIndex) {
     gpApplyRumbleRaw(xinputIndex, 0.f, 0.f);
 }
 
-/** Da chiamare ogni frame: spegne la vibrazione quando la durata è finita. */
 inline void gpRumbleTick(int xinputIndex, float dt) {
     RumbleState& r = gpRumble();
     if (!r.active || r.remaining <= 0.f) return;
@@ -121,13 +101,6 @@ inline void gpRumbleTick(int xinputIndex, float dt) {
     if (r.remaining <= 0.f) gpStopRumble(xinputIndex);
 }
 
-/**
- * Zona morta radiale con riscalatura.
- *
- * Applicarla per asse squadra il movimento diagonale e lascia uno scatto al
- * bordo della soglia. Qui la si applica al vettore intero e si riespande il
- * resto su 0..1, così il minimo movimento oltre la soglia parte da zero.
- */
 inline void gpDeadzoneStick(float& x, float& y, float dz = 0.14f) {
     const float mag = std::sqrt(x * x + y * y);
     if (mag <= dz || mag <= 1e-6f) { x = 0.f; y = 0.f; return; }
@@ -163,12 +136,11 @@ inline bool gpContainsI(const char* hay, const char* needle) {
 }
 
 inline bool gpIsSonyGuid(const char* guid) {
-    // Vendor Sony = 0x054C → bytes "4c05" in GLFW GUID (little-endian hex)
     return guid && std::strstr(guid, "4c05") != nullptr;
 }
 
 inline bool gpIsMicrosoftGuid(const char* guid) {
-    return guid && std::strstr(guid, "5e04") != nullptr; // 0x045E
+    return guid && std::strstr(guid, "5e04") != nullptr;
 }
 
 inline GamepadKind gpDetectKind(const char* name, const char* guid) {
@@ -181,25 +153,20 @@ inline GamepadKind gpDetectKind(const char* name, const char* guid) {
     return GamepadKind::Generic;
 }
 
-/** Mapping SDL aggiornati (Windows) — DualSense + Xbox Series + Edge. */
 inline void gpLoadBuiltinMappings() {
     static const char* kMaps =
-        // DualSense USB / Edge
         "030000004c050000e60c000000000000,PS5 Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,misc1:b14,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Windows,\n"
         "030000004c050000f20d000000000000,PS5 Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,misc1:b14,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Windows,\n"
         "030000004c050000e60c000000010000,PS5 Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,misc1:b14,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Windows,\n"
         "030000004c050000f20d000000010000,PS5 Controller,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,misc1:b14,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,touchpad:b13,x:b0,y:b3,platform:Windows,\n"
-        // Xbox Series / One (DirectInput)
         "030000005e040000130b000000000000,Xbox Series Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b10,leftshoulder:b4,leftstick:b8,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b9,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Windows,\n"
         "030000005e040000120b000000000000,Xbox Series Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b10,leftshoulder:b4,leftstick:b8,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b9,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Windows,\n"
         "030000005e040000fd02000000000000,Xbox One Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Windows,\n"
         "030000005e040000e002000000000000,Xbox One Controller,a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Windows,\n"
-        // XInput virtual GUIDs (GLFW)
         "78696e70757401000000000000000000,XInput Gamepad (GLFW),a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b10,leftshoulder:b4,leftstick:b8,lefttrigger:a4,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b9,righttrigger:a5,rightx:a2,righty:a3,start:b7,x:b2,y:b3,platform:Windows,\n";
     glfwUpdateGamepadMappings(kMaps);
 }
 
-/** Se il GUID non e' in DB, registra mapping DualSense/Xbox generico con quel GUID. */
 inline void gpEnsureMapped(int jid) {
     if (!glfwJoystickPresent(jid)) return;
     if (glfwJoystickIsGamepad(jid)) return;
@@ -210,7 +177,6 @@ inline void gpEnsureMapped(int jid) {
     GamepadKind k = gpDetectKind(name, guid);
     char line[512];
     if (k == GamepadKind::DualSense) {
-        // Layout HID DualSense tipico su Windows USB
         std::snprintf(line, sizeof(line),
             "%s,DualSense USB,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,"
             "guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,"
@@ -270,7 +236,6 @@ inline void gpClear(GamepadState& g) {
     g.startPressed = g.backPressed = false;
     g.dpadUPressed = g.dpadDPressed = g.dpadLPressed = g.dpadRPressed = false;
     g.lbPressed = g.rbPressed = g.ltPressed = g.rtPressed = false;
-    // non azzerare prev* — evita edge spurii al riconnetto; reset soft:
     g.prevA = g.prevB = g.prevX = g.prevY = false;
     g.prevStart = g.prevBack = false;
     g.prevDU = g.prevDD = g.prevDL = g.prevDR = false;
@@ -286,7 +251,6 @@ inline bool gpBtnOr(const unsigned char* btns, int count, int i) {
     return btns && i >= 0 && i < count && btns[i] == GLFW_PRESS;
 }
 
-/** Fallback raw: DualSense HID o generico Xbox-like. */
 inline bool gpPollRawJoystick(int jid, GamepadState& g) {
     if (!glfwJoystickPresent(jid)) return false;
     int axisCount = 0, btnCount = 0, hatCount = 0;
@@ -309,7 +273,6 @@ inline bool gpPollRawJoystick(int jid, GamepadState& g) {
     }
 
     if (g.kind == GamepadKind::DualSense) {
-        // DualSense DirectInput tipico: LX LY RX L2 R2 RY
         g.lx = gpDeadzone(gpAxisOr(axes, axisCount, 0));
         g.ly = gpDeadzone(-gpAxisOr(axes, axisCount, 1));
         g.rx = gpDeadzone(gpAxisOr(axes, axisCount, 2), 0.16f);
@@ -318,25 +281,23 @@ inline bool gpPollRawJoystick(int jid, GamepadState& g) {
         g.ry = gpDeadzone(-gpAxisOr(axes, axisCount, (axisCount > 5) ? 5 : 3), 0.16f);
         g.lt = (l2 + 1.f) * 0.5f;
         g.rt = (r2 + 1.f) * 0.5f;
-        // Bottoni Sony: Square Cross Circle Triangle
-        g.x = gpBtnOr(btns, btnCount, 0); // Square → X
-        g.a = gpBtnOr(btns, btnCount, 1); // Cross → A
-        g.b = gpBtnOr(btns, btnCount, 2); // Circle → B
-        g.y = gpBtnOr(btns, btnCount, 3); // Triangle → Y
+        g.x = gpBtnOr(btns, btnCount, 0);
+        g.a = gpBtnOr(btns, btnCount, 1);
+        g.b = gpBtnOr(btns, btnCount, 2);
+        g.y = gpBtnOr(btns, btnCount, 3);
         g.lb = gpBtnOr(btns, btnCount, 4);
         g.rb = gpBtnOr(btns, btnCount, 5);
-        g.back = gpBtnOr(btns, btnCount, 8);  // Create/Share
-        g.start = gpBtnOr(btns, btnCount, 9); // Options
+        g.back = gpBtnOr(btns, btnCount, 8);
+        g.start = gpBtnOr(btns, btnCount, 9);
         g.l3 = gpBtnOr(btns, btnCount, 10);
         g.r3 = gpBtnOr(btns, btnCount, 11);
     } else {
-        // Xbox-like DirectInput
         g.lx = gpDeadzone(gpAxisOr(axes, axisCount, 0));
         g.ly = gpDeadzone(-gpAxisOr(axes, axisCount, 1));
         if (axisCount >= 6) {
             g.rx = gpDeadzone(gpAxisOr(axes, axisCount, 3), 0.16f);
             g.ry = gpDeadzone(-gpAxisOr(axes, axisCount, 4), 0.16f);
-            float t = gpAxisOr(axes, axisCount, 2); // spesso LT/RT combinati
+            float t = gpAxisOr(axes, axisCount, 2);
             g.lt = std::fabs(t) > 0.05f && t < 0.f ? -t : 0.f;
             g.rt = std::fabs(t) > 0.05f && t > 0.f ? t : ((axisCount > 5) ? (gpAxisOr(axes, axisCount, 5) + 1.f) * 0.5f : 0.f);
             if (axisCount > 5) {
@@ -425,7 +386,7 @@ inline bool gpPollGlfwGamepad(int jid, GamepadState& g) {
 
 #ifdef _WIN32
 inline float gpXInputStick(SHORT v) {
-    const float dead = 7849.f; // ~XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
+    const float dead = 7849.f;
     float f = (float)v;
     if (std::fabs(f) < dead) return 0.f;
     float s = (f > 0.f) ? 1.f : -1.f;
@@ -492,7 +453,6 @@ inline void gpJoystickCallback(int jid, int event) {
     }
 }
 
-/** Chiama dopo glfwInit(). */
 inline void initGamepad() {
     gpLoadBuiltinMappings();
     glfwSetJoystickCallback(gpJoystickCallback);
@@ -514,13 +474,11 @@ inline void initGamepad() {
 #endif
 }
 
-/** Poll ogni frame: prima USB GLFW (DualSense/PS5), poi XInput (Xbox). */
 inline void pollGamepad() {
     auto& g = gamepad();
     static bool wasConnected = false;
     static char lastName[96] = {};
 
-    // 1) DualSense / generici USB via GLFW (prima di XInput: evita pad fantasma XInput)
     for (int jid = GLFW_JOYSTICK_1; jid <= GLFW_JOYSTICK_LAST; ++jid) {
         if (!glfwJoystickPresent(jid)) continue;
         if (gpPollGlfwGamepad(jid, g)) {
@@ -542,7 +500,6 @@ inline void pollGamepad() {
     }
 
 #ifdef _WIN32
-    // 2) Xbox via XInput
     if (gpPollXInput(g)) {
         if (!wasConnected || std::strcmp(lastName, g.name) != 0) {
             std::printf("[Pad] Attivo: %s\n", g.name);

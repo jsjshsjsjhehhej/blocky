@@ -4,10 +4,8 @@
 #include <cmath>
 #include <vector>
 
-/**
- * Mesh unitarie (-0.5..0.5) pos.xyz + n.xyz — stesso layout del cubo Part.
- * Ball / Cylinder / Wedge (rampa triangolare stile Roblox).
- */
+#include "engine/PartShape.h"
+
 struct ShapeMesh {
     GLuint vao = 0;
     GLuint vbo = 0;
@@ -47,6 +45,28 @@ struct PartMeshes {
         wedge.destroy();
     }
 
+    /**
+     * La mesh giusta per una forma, o nullptr per Block (che non ne ha una
+     * qui: usa il cubo condiviso, disegnato a parte da chi chiama).
+     *
+     * Prima chi disegnava faceva una switch a mano su shapes.ball/.cylinder/
+     * .wedge: aggiungere una forma nuova significava ricordarsi di aggiornare
+     * quella switch nel file del renderer, separato da dove la forma e
+     * definita. Ora e' una riga sola qui, e il chiamante non ha piu' un
+     * elenco di casi da tenere aggiornato.
+     */
+    ShapeMesh* meshFor(PartShape s) {
+        switch (s) {
+        case PartShape::Ball:     return &ball;
+        case PartShape::Cylinder: return &cylinder;
+        case PartShape::Wedge:    return &wedge;
+        case PartShape::Block:
+        case PartShape::Count:
+        default:
+            return nullptr;
+        }
+    }
+
     void buildAll() {
         buildBall(24, 16);
         buildCylinder(28);
@@ -79,7 +99,6 @@ struct PartMeshes {
                 float x10 = R * r1 * c0, z10 = R * r1 * s0;
                 float x11 = R * r1 * c1, z11 = R * r1 * s1;
                 float ny0 = y0, ny1 = y1;
-                // due triangoli per quad
                 push(x00, R * y0, z00, r0 * c0, ny0, r0 * s0);
                 push(x10, R * y1, z10, r1 * c0, ny1, r1 * s0);
                 push(x11, R * y1, z11, r1 * c1, ny1, r1 * s1);
@@ -91,7 +110,6 @@ struct PartMeshes {
         ball.upload(v);
     }
 
-    /** Cilindro asse Y: altezza 1, raggio 0.5 (poi scale Part.size). */
     void buildCylinder(int slices) {
         std::vector<float> v;
         auto push = [&](float x, float y, float z, float nx, float ny, float nz) {
@@ -109,18 +127,15 @@ struct PartMeshes {
             float c1 = std::cos(th1), s1 = std::sin(th1);
             float x0 = R * c0, z0 = R * s0;
             float x1 = R * c1, z1 = R * s1;
-            // lato
             push(x0, Y0, z0, c0, 0.f, s0);
             push(x1, Y0, z1, c1, 0.f, s1);
             push(x1, Y1, z1, c1, 0.f, s1);
             push(x0, Y0, z0, c0, 0.f, s0);
             push(x1, Y1, z1, c1, 0.f, s1);
             push(x0, Y1, z0, c0, 0.f, s0);
-            // coperchio top
             push(0.f, Y1, 0.f, 0.f, 1.f, 0.f);
             push(x0, Y1, z0, 0.f, 1.f, 0.f);
             push(x1, Y1, z1, 0.f, 1.f, 0.f);
-            // coperchio bottom
             push(0.f, Y0, 0.f, 0.f, -1.f, 0.f);
             push(x1, Y0, z1, 0.f, -1.f, 0.f);
             push(x0, Y0, z0, 0.f, -1.f, 0.f);
@@ -128,7 +143,6 @@ struct PartMeshes {
         cylinder.upload(v);
     }
 
-    /** Wedge / rampa: pieno a +Z, spigolo basso a -Z (stile WedgePart). */
     void buildWedge() {
         std::vector<float> v;
         auto push = [&](float x, float y, float z, float nx, float ny, float nz) {
@@ -153,15 +167,10 @@ struct PartMeshes {
         };
 
         const float h = 0.5f;
-        // bottom
         quad(-h, -h, -h,  h, -h, -h,  h, -h,  h, -h, -h,  h,  0, -1, 0);
-        // back (+Z) full
         quad(-h, -h,  h,  h, -h,  h,  h,  h,  h, -h,  h,  h,  0, 0, 1);
-        // left (-X) triangle
         tri(-h, -h, -h, -h, -h,  h, -h,  h,  h,  -1, 0, 0);
-        // right (+X) triangle
         tri( h, -h, -h,  h,  h,  h,  h, -h,  h,   1, 0, 0);
-        // slope: from front-bottom to back-top (normale verso fuori/alto)
         {
             float ax = -h, ay = -h, az = -h;
             float bx =  h, by = -h, bz = -h;

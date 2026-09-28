@@ -1,12 +1,9 @@
 #pragma once
 
-/**
- * Esporta il Player R6 default (corpo Blocky beveled) come OBJ per Blender.
- * Ogni part è un object con il nome giusto: Head, Torso, Left Arm, ...
- */
 
 #include "GameHub.h"
 #include "Humanoid.h"
+#include "render/BeveledCube.h"
 
 #include <cstdio>
 #include <fstream>
@@ -19,58 +16,6 @@
 #include <shlobj.h>
 #endif
 
-/** Cubo unitario beveled (CPU) — stesso stile di BeveledCube, senza OpenGL. */
-inline void r6PushBeveledUnitCube(std::vector<float>& outPos, float bevel = 0.10f) {
-    bevel = std::fmax(0.02f, std::fmin(bevel, 0.22f));
-    const float h = 0.5f;
-    const float i = h - bevel;
-
-    auto push = [&](float x, float y, float z) {
-        outPos.push_back(x); outPos.push_back(y); outPos.push_back(z);
-    };
-    auto tri = [&](float ax, float ay, float az,
-                   float bx, float by, float bz,
-                   float cx, float cy, float cz) {
-        push(ax, ay, az); push(bx, by, bz); push(cx, cy, cz);
-    };
-    auto quad = [&](float ax, float ay, float az,
-                    float bx, float by, float bz,
-                    float cx, float cy, float cz,
-                    float dx, float dy, float dz) {
-        tri(ax, ay, az, bx, by, bz, cx, cy, cz);
-        tri(ax, ay, az, cx, cy, cz, dx, dy, dz);
-    };
-
-    quad(-i, -i,  h,   i, -i,  h,   i,  i,  h,  -i,  i,  h);
-    quad( i, -i, -h,  -i, -i, -h,  -i,  i, -h,   i,  i, -h);
-    quad( h, -i, -i,   h, -i,  i,   h,  i,  i,   h,  i, -i);
-    quad(-h, -i,  i,  -h, -i, -i,  -h,  i, -i,  -h,  i,  i);
-    quad(-i,  h, -i,  -i,  h,  i,   i,  h,  i,   i,  h, -i);
-    quad(-i, -h,  i,  -i, -h, -i,   i, -h, -i,   i, -h,  i);
-
-    quad(-i, -h,  i,   i, -h,  i,   i, -i,  h,  -i, -i,  h);
-    quad(-i,  i,  h,   i,  i,  h,   i,  h,  i,  -i,  h,  i);
-    quad(-h, -i,  i,  -i, -i,  h,  -i,  i,  h,  -h,  i,  i);
-    quad( i, -i,  h,   h, -i,  i,   h,  i,  i,   i,  i,  h);
-    quad( i, -h, -i,  -i, -h, -i,  -i, -i, -h,   i, -i, -h);
-    quad( i,  h, -i,  -i,  h, -i,  -i,  i, -h,   i,  i, -h);
-    quad(-i, -i, -h,  -h, -i, -i,  -h,  i, -i,  -i,  i, -h);
-    quad( h, -i, -i,   i, -i, -h,   i,  i, -h,   h,  i, -i);
-    quad( i,  h, -i,   i,  h,  i,   h,  i,  i,   h,  i, -i);
-    quad(-i,  h,  i,  -i,  h, -i,  -h,  i, -i,  -h,  i,  i);
-    quad( i, -h,  i,   i, -h, -i,   h, -i, -i,   h, -i,  i);
-    quad(-i, -h, -i,  -i, -h,  i,  -h, -i,  i,  -h, -i, -i);
-
-    for (float sx : {-1.f, 1.f})
-        for (float sy : {-1.f, 1.f})
-            for (float sz : {-1.f, 1.f}) {
-                float a[3] = { sx * i, sy * i, sz * h };
-                float b[3] = { sx * i, sy * h, sz * i };
-                float c[3] = { sx * h, sy * i, sz * i };
-                tri(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-            }
-}
-
 inline std::string r6ObjSafeName(const std::string& n) {
     std::string o;
     for (char c : n) {
@@ -80,7 +25,6 @@ inline std::string r6ObjSafeName(const std::string& n) {
     return o;
 }
 
-/** Scrive OBJ + MTL del player R6 default (corpo beveled). */
 inline bool exportDefaultR6PlayerObj(const std::string& objPath, std::string& err) {
     if (objPath.empty()) {
         err = "percorso vuoto";
@@ -88,7 +32,7 @@ inline bool exportDefaultR6PlayerObj(const std::string& objPath, std::string& er
     }
     Humanoid h = Humanoid::createR6Blocky();
     std::vector<float> unit;
-    r6PushBeveledUnitCube(unit, 0.11f);
+    pushBeveledCubePositions(unit, 0.11f);
     const int nVerts = (int)(unit.size() / 3);
 
     std::string mtlPath = objPath;
@@ -127,7 +71,6 @@ inline bool exportDefaultR6PlayerObj(const std::string& objPath, std::string& er
         std::string oname = r6ObjSafeName(p.name);
         obj << "o " << oname << "\n";
         obj << "usemtl " << oname << "\n";
-        // Cube unitario centrato → scala size + offset
         for (int i = 0; i < nVerts; ++i) {
             float lx = unit[i * 3 + 0] * p.size.x;
             float ly = unit[i * 3 + 1] * p.size.y;
@@ -145,7 +88,6 @@ inline bool exportDefaultR6PlayerObj(const std::string& objPath, std::string& er
     }
     obj.close();
 
-    // README accanto
     std::string readme = objPath;
     if (dot != std::string::npos) readme = objPath.substr(0, objPath.find_last_of('.'));
     readme += "_LEGGIMI.txt";
@@ -189,7 +131,6 @@ inline bool saveR6PlayerObjDialog(std::string& outPath, void* hwndOwner = nullpt
 inline bool saveR6PlayerObjDialog(std::string&, void* = nullptr) { return false; }
 #endif
 
-/** Download rapido in %APPDATA%/Blocky/models/Blocky_R6_Default.obj */
 inline bool exportDefaultR6ToLibrary(std::string& outPath, std::string& err) {
     std::string dir = blockyDataDir() + "/models";
 #ifdef _WIN32

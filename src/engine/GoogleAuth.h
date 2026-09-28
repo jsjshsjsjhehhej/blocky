@@ -1,14 +1,13 @@
 #pragma once
 
-/**
- * Accesso Google (desktop): apre il browser su Google Account.
- * Dopo il login, l'utente conferma l'email Gmail nell'app Blocky.
- */
 
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <string>
+
+#include "platform/Platform.h"
+#include "platform/SystemApi.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -18,32 +17,34 @@
 #include <shellapi.h>
 #endif
 
+/**
+ * Apre un indirizzo nel browser di sistema.
+ *
+ * Ogni piattaforma ha il suo modo, e nessuno dei tre funziona sulle altre:
+ * Windows ha ShellExecute, macOS il comando "open", i desktop Linux
+ * "xdg-open", e Android non ha un comando affatto — li' serve un Intent, che
+ * richiede Java, quindi passa dal gancio installato da android_entry.cpp.
+ */
 inline bool openUrlInBrowser(const char* url) {
-    if (!url || !url[0]) return false;
-#ifdef _WIN32
-    HINSTANCE h = ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
-    return (INT_PTR)h > 32;
-#else
-    std::string cmd = std::string("xdg-open \"") + url + "\"";
-    return std::system(cmd.c_str()) == 0;
-#endif
+    // L'implementazione vera sta in plat::sys::openUrl. Stava qui, dentro un
+    // file di autenticazione, e intanto sei altri punti del motore chiamavano
+    // ShellExecute per conto loro: una primitiva di sistema con sette copie e
+    // nessun proprietario. Questo nome resta solo per i chiamanti esistenti.
+    return plat::sys::openUrl(url ? url : "");
 }
 
-/** Apre la pagina di accesso / scelta account Google nel browser. */
+
 inline bool openGoogleAccountSignIn() {
-    // AccountChooser → se non sei loggato chiede email/password Google
     return openUrlInBrowser(
         "https://accounts.google.com/AccountChooser"
         "?hl=it"
         "&continue=https%3A%2F%2Fmyaccount.google.com%2F");
 }
 
-/** Da email → username Blocky (parte prima di @, sanitizzata). */
 inline bool googleEmailToUsername(const char* email, char* out, size_t outN) {
     if (!email || !out || outN < 3) return false;
     const char* at = std::strchr(email, '@');
     if (!at || at == email) return false;
-    // Deve sembrare un'email
     if (std::strchr(at + 1, '.') == nullptr) return false;
 
     std::string local(email, at);

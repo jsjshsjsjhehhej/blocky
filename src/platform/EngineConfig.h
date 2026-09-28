@@ -1,10 +1,8 @@
 #pragma once
 
-/**
- * Config runtime dell'engine — unico punto per ottimizzazioni cross-platform.
- */
 
 #include "QualityProfile.h"
+#include "platform/PlatformServices.h"
 #include "TargetPlatform.h"
 
 #include <cstdio>
@@ -40,7 +38,7 @@ struct EngineConfig {
             "  Platform : %s\n"
             "  Graphics : %s\n"
             "  Quality  : %s (scale=%.2f MSAA=%dx parts=%d)\n"
-            "========================================\n",
+            "----------------------------------------\n",
             buildStamp.c_str(),
             targetPlatformName(platform),
             gfxApiName(gfxApi),
@@ -48,10 +46,15 @@ struct EngineConfig {
             quality.renderScale,
             quality.msaaSamples,
             quality.maxVisibleParts);
+
+        // Cosa questa piattaforma sa fare DAVVERO. Vedi PlatformServices.h:
+        // e' l'informazione che e' mancata per tutta la porta Android, dove i
+        // servizi assenti fallivano in silenzio invece di dirlo.
+        plat::reportServices();
+        std::fprintf(stdout, "========================================\n");
     }
 };
 
-/** Backend grafico: interfaccia minima (OpenGL oggi; Vulkan/Metal/AGC dopo). */
 struct IGfxDevice {
     virtual ~IGfxDevice() = default;
     virtual const char* name() const = 0;
@@ -61,10 +64,3 @@ struct IGfxDevice {
     virtual int  msaaSamples() const = 0;
 };
 
-/**
- * Note toolchain (non incluse nel repo open):
- *  - iOS/Metal : Xcode + Metal SDK, target arm64-apple-ios
- *  - Android   : NDK + GLES3/Vulkan, Gradle
- *  - PS5       : Sony Prospero SDK (NDA) — AGC/GNM, Prospero target
- * Il layer QualityProfile + EngineConfig resta identico su tutte.
- */

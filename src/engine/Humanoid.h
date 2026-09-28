@@ -7,17 +7,46 @@
 #include <vector>
 
 /**
- * Humanoid R6 Blocky — 6 cubi, zero skinning.
- * Animazioni = solo rotazione arti (codice minimo, ottimo su PC/mobile/console).
+ * Trasformazione di animazione di una singola parte del corpo.
+ *
+ * E AGGIUNTIVA rispetto alla posa di riposo: pos si somma all offset, rot si
+ * somma alle rotazioni gia esistenti, scale moltiplica la dimensione. Cosi le
+ * animazioni che c erano gia (camminata, salto, oggetto in mano) continuano a
+ * funzionare identiche, e una clip di keyframe si sovrappone senza doverle
+ * riscrivere.
+ *
+ * rot e in GRADI, non radianti: e quello che l utente digita nell editor, e
+ * convertirlo una volta sola al momento di disegnare evita numeri illeggibili
+ * nell interfaccia e negli file salvati.
  */
+struct RigPose {
+    glm::vec3 pos{0.f};
+    glm::vec3 rot{0.f};
+    glm::vec3 scale{1.f};
+
+    bool isIdentity() const {
+        return pos == glm::vec3(0.f) && rot == glm::vec3(0.f) && scale == glm::vec3(1.f);
+    }
+};
+
+inline RigPose rigPoseLerp(const RigPose& a, const RigPose& b, float t) {
+    RigPose r;
+    r.pos   = a.pos   + (b.pos   - a.pos)   * t;
+    r.rot   = a.rot   + (b.rot   - a.rot)   * t;
+    r.scale = a.scale + (b.scale - a.scale) * t;
+    return r;
+}
+
 struct HumanoidPartDef {
     std::string name;
     glm::vec3 offset{0};
     glm::vec3 size{1};
     glm::vec3 color{1};
-    glm::vec3 pivot{0}; // pivot relativo al centro della part (spalla/anca)
+    glm::vec3 pivot{0};
     bool isLimb = false;
     float rotX = 0, rotZ = 0;
+    // Posa dei keyframe, sovrapposta a rotX/rotZ invece che al posto loro.
+    RigPose anim;
     int parent = -1;
 };
 
@@ -25,24 +54,17 @@ struct Humanoid {
     float health = 100.f;
     float maxHealth = 100.f;
     bool  dead = false;
-    float deathTimer = 0.f; // secondi da morto (respawn ~3s)
-    float walkSpeed = 16.f; // default Roblox-like
+    float deathTimer = 0.f;
+    float walkSpeed = 16.f;
     float jumpPower = 52.f;
     float walkPhase = 0.f;
     bool rigEnabled = true;
-    bool userRigged = false; // true dopo conferma "Vuoi riggare il Player?"
+    bool userRigged = false;
 
     float velocityY = 0.f;
     bool  grounded  = true;
     float jumpArmBlend = 0.f;
-    /**
-     * True se chi ha scritto le rotazioni questo frame ha applicato una posa
-     * di salto. Serve al disegno per sapere se deve metterla lui: in aria la
-     * posa di salto deve vedersi comunque, anche se a monte qualcosa ha
-     * scritto una camminata.
-     */
     bool poseIsJump = false;
-    /** Tempo dall'inizio salto (secondi) — guida i keyframe braccia/gambe. */
     float jumpAnimTime = 0.f;
 
     float healthPct() const {
@@ -81,14 +103,12 @@ struct Humanoid {
 
     std::vector<HumanoidPartDef> parts;
 
-    /** Avatar R6 Blocky — torso blu, pantaloni verdi, testa/braccia bianchi. */
     static Humanoid createR6Blocky() {
         Humanoid h;
         const glm::vec3 white{0.95f, 0.95f, 0.97f};
         const glm::vec3 blue{0.18f, 0.45f, 0.92f};
         const glm::vec3 green{0.22f, 0.72f, 0.32f};
 
-        // Offset = centro part in spazio personaggio (piedi a y≈0)
         h.parts = {
             {"HumanoidRootPart", {0, 2.5f, 0}, {0.2f, 0.2f, 0.2f}, white, {0, 0, 0}, false},
             {"Torso",     {0, 3.0f, 0}, {2.0f, 2.0f, 1.0f}, blue,  {0, 0, 0}, false},
@@ -101,12 +121,10 @@ struct Humanoid {
         return h;
     }
 
-    /** Alias legacy */
     static Humanoid createR6Noob() { return createR6Blocky(); }
     static Humanoid createR6Bacon() { return createR6Blocky(); }
 
     void update(float dt, bool walking) {
-        // ciclo ~0.56s fluido (2π / 11.2 ≈ 0.56)
         if (walking && grounded) walkPhase += dt * 11.2f;
         else walkPhase = 0.f;
 
@@ -157,7 +175,6 @@ struct Humanoid {
     }
 };
 
-// --- Animazioni R6 (fluido, stile Roblox) ---
 inline float humanoidLegSwing(const Humanoid& h) {
     if (!h.grounded) return 0.f;
     float s = std::sin(h.walkPhase);
@@ -174,9 +191,6 @@ inline float humanoidBob(const Humanoid& h) {
     if (!h.grounded) return 0.f;
     return std::fabs(std::cos(h.walkPhase)) * 0.11f;
 }
-/**
- * Jump R6: crouch → braccia SU, gambe ferme.
- */
 inline void humanoidJumpPose(const Humanoid& h,
                              float& armL, float& armR,
                              float& legL, float& legR) {
@@ -192,36 +206,20 @@ inline void humanoidJumpPose(const Humanoid& h,
         { 0.75f,  -22.f,  -18.f,    2.f,   -2.f },
         { 0.92f,   -8.f,   -8.f,    0.f,    0.f },
     };
-    (void)k;   // tabella storica: tenuta come riferimento degli angoli
+    (void)k;
 
-    // Guidata dalla velocità verticale, non da un timer.
-    //
-    // Due motivi. Primo: un timer può restare fermo a zero se qualcosa a monte
-    // non lo aggiorna, e la posa muore in silenzio. La velocità invece è un
-    // dato fisico che esiste sempre. Secondo: così la posa è giusta anche
-    // cadendo da un bordo senza aver saltato, dove un timer di salto non è
-    // mai partito.
-    //
-    // Non c'è più la moltiplicazione per jumpArmBlend: prima l'intera posa
-    // veniva scalata per quel valore, e se restava a zero il salto era
-    // invisibile qualunque altra cosa funzionasse. L'attenuazione, dove
-    // serve, la applica il chiamante.
     const float v = h.velocityY;
-    const float rise = std::min(1.f, std::max(0.f,  v / 26.f));   // 1 = spinta piena
-    const float fall = std::min(1.f, std::max(0.f, -v / 30.f));   // 1 = caduta veloce
+    const float rise = std::min(1.f, std::max(0.f,  v / 26.f));
+    const float fall = std::min(1.f, std::max(0.f, -v / 30.f));
 
-    // Braccia: alzate nello slancio, riaperte scendendo a bilanciare.
     const float arms = -32.f - 128.f * rise - 46.f * fall;
     armL = arms;
-    armR = arms * 1.05f;   // una posa perfettamente speculare sembra un manichino
+    armR = arms * 1.05f;
 
-    // Gambe: raccolte salendo, distese cadendo. Nella tabella storica restavano
-    // quasi immobili, e chi guardava le gambe non vedeva partire nessun salto.
     legL =  12.f + 34.f * rise - 24.f * fall;
     legR = -14.f + 20.f * rise - 16.f * fall;
 }
 
-/** Compat: media braccia (accessori / fallback). */
 inline float humanoidJumpArmRaise(const Humanoid& h) {
     float aL = 0.f, aR = 0.f, lL = 0.f, lR = 0.f;
     humanoidJumpPose(h, aL, aR, lL, lR);

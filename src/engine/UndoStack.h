@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-/** Undo/Redo Studio — Part insert/delete/transform. */
 enum class UndoKind : int {
     InsertPart = 0,
     DeletePart,
@@ -54,7 +53,6 @@ struct UndoStack {
 
     void recordTransform(int index, const WorkspacePart& before, const WorkspacePart& after) {
         if (index < 0) return;
-        // Ignora no-op
         if (before.position == after.position && before.size == after.size
             && before.rotation == after.rotation)
             return;

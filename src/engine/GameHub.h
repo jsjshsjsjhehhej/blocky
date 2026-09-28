@@ -20,14 +20,9 @@
 #include <direct.h>
 #else
 #include <sys/stat.h>
-/**
- * Shim storico: _mkdir non crea le cartelle intermedie su nessuno dei due
- * sistemi. Per i percorsi annidati usa plat::makeDirs, che le crea tutte.
- */
 static inline void _mkdir(const char* p) { mkdir(p, 0755); }
 #endif
 
-/** Hub giochi — definizione place nel menu principale. */
 struct GameEntry {
     std::string id;
     std::string title;
@@ -36,33 +31,26 @@ struct GameEntry {
     int playersOnline = 0;
     glm::vec3 accent{0.2f, 0.62f, 0.35f};
     bool isPublished = false;
-    std::string placePath; // JSON place pubblicato
+    std::string placePath;
     std::string creator;
-    int maxPlayers = 8; // impostato in Blocky Game Engine alla publish
-    /** Unix time della pubblicazione (per quota 10 giochi / 2 mesi). */
+    int maxPlayers = 8;
     long long publishedAt = 0;
+    ScriptType scriptType = ScriptType::Legacy;
+    std::string iconPath; // vuoto = usa il colore accent come prima
+    // Viene da un server e non da questo dispositivo: va scaricato prima di
+    // poterci giocare.
+    bool remote = false;
 };
 
-/** Max giochi pubblicati per utente in finestra rolling ~2 mesi. */
 inline constexpr int kMaxPublishedGamesPerUser = 10;
-inline constexpr long long kPublishQuotaWindowSecs = 60LL * 24 * 3600; // ~2 mesi
+inline constexpr long long kPublishQuotaWindowSecs = 60LL * 24 * 3600;
 
-/**
- * Cartella dati utente.
- *
- * Su Windows resta esattamente %APPDATA%\Blocky come prima: i salvataggi
- * esistenti non si spostano. Fuori da Windows prima tornava "blocky_data",
- * un path RELATIVO: i dati finivano dove capitava lanciare il gioco, e due
- * scorciatoie diverse davano due mondi diversi. Ora ogni sistema usa la sua
- * cartella corretta (vedi plat::dataDir).
- */
 inline std::string blockyDataDir() {
     std::string dir = plat::dataDir();
     plat::makeDirs(dir + "/published");
     return dir;
 }
 
-/** Cartella dell'eseguibile: da qui si risolvono assets/ e shaders/. */
 inline std::string assetRoot() {
     return plat::selfDir();
 }
@@ -83,6 +71,27 @@ inline std::string jsonFindStr(const std::string& json, const std::string& key, 
     auto q2 = json.find('"', q1 + 1);
     if (q2 == std::string::npos) return {};
     return json.substr(q1 + 1, q2 - q1 - 1);
+}
+
+inline std::string jsonFindEscapedStr(const std::string& json, const std::string& key, size_t from = 0) {
+    auto k = json.find("\"" + key + "\"", from);
+    if (k == std::string::npos) return {};
+    auto c = json.find(':', k);
+    if (c == std::string::npos) return {};
+    auto q1 = json.find('"', c);
+    if (q1 == std::string::npos) return {};
+    std::string out;
+    size_t i = q1 + 1;
+    while (i < json.size() && json[i] != '"') {
+        if (json[i] == '\\' && i + 1 < json.size()) {
+            char nc = json[i + 1];
+            if (nc == 'n') { out += '\n'; i += 2; continue; }
+            if (nc == '"' || nc == '\\') { out += nc; i += 2; continue; }
+        }
+        out += json[i];
+        ++i;
+    }
+    return out;
 }
 
 inline int jsonFindInt(const std::string& json, const std::string& key, size_t from = 0) {
@@ -131,16 +140,9 @@ inline bool fileExistsPath(const std::string& path) {
     return false;
 }
 
-#ifdef _WIN32
-inline bool wideToUtf8(const wchar_t* w, std::string& out) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-    if (n <= 1) return false;
-    out.resize((size_t)n - 1);
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
-    return true;
-}
-
-/** Assicura estensione .blocky (o mantiene .json legacy). */
+// Solo manipolazione di stringa, nessuna API di sistema: sta qui sopra il
+// ramo #ifdef _WIN32 perche' la usano sia i dialoghi file di Windows (poco
+// sotto) sia il resto del motore su ogni piattaforma.
 inline void ensureBlockyPlaceExt(std::string& path) {
     if (path.empty()) return;
     auto lower = path;
@@ -150,7 +152,16 @@ inline void ensureBlockyPlaceExt(std::string& path) {
     path += ".blocky";
 }
 
-/** Dialog Apri place (.blocky / .json BlockyPlace). */
+#ifdef _WIN32
+inline bool wideToUtf8(const wchar_t* w, std::string& out) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return false;
+    out.resize((size_t)n - 1);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
+    return true;
+}
+
+
 inline bool openPlaceFileDialog(std::string& outPath, void* hwndOwner = nullptr) {
     wchar_t file[MAX_PATH] = {};
     OPENFILENAMEW ofn{};
@@ -169,7 +180,6 @@ inline bool openPlaceFileDialog(std::string& outPath, void* hwndOwner = nullptr)
     return wideToUtf8(file, outPath);
 }
 
-/** Dialog Salva place (.blocky). */
 inline bool savePlaceFileDialog(std::string& outPath, void* hwndOwner = nullptr,
                                 const char* suggestedName = "place.blocky") {
     wchar_t file[MAX_PATH] = {};
@@ -193,12 +203,27 @@ inline bool savePlaceFileDialog(std::string& outPath, void* hwndOwner = nullptr,
     ensureBlockyPlaceExt(outPath);
     return true;
 }
+inline bool openImageFileDialog(std::string& outPath, void* hwndOwner = nullptr) {
+    wchar_t file[MAX_PATH] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = (HWND)hwndOwner;
+    ofn.lpstrFilter =
+        L"Immagini (*.png;*.jpg;*.jpeg)\0*.png;*.jpg;*.jpeg\0"
+        L"Tutti i file\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    ofn.lpstrTitle = L"Blocky — Scegli icona del gioco";
+    if (!GetOpenFileNameW(&ofn)) return false;
+    return wideToUtf8(file, outPath);
+}
 #else
 inline bool openPlaceFileDialog(std::string&, void* = nullptr) { return false; }
 inline bool savePlaceFileDialog(std::string&, void* = nullptr, const char* = nullptr) { return false; }
+inline bool openImageFileDialog(std::string&, void* = nullptr) { return false; }
 #endif
 
-/** Carica un place JSON esportato/pubblicato in DataModel (+ Lighting se richiesto). */
 inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                               LightingService* lighting = nullptr) {
     std::string json = readTextFile(path);
@@ -229,7 +254,6 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     if (sp != std::string::npos) {
         size_t spEnd = json.find('}', sp);
         if (spEnd == std::string::npos) spEnd = sp + 80;
-        // Preferisci "pos":[x,y,z], altrimenti x/y/z singoli
         if (!jsonFindVec3(json, "pos", sp, dm.spawn.position)) {
             float x = 0, y = 0, z = 0;
             jsonFindFloat(json, "x", sp, x);
@@ -241,18 +265,21 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         (void)spEnd;
     }
 
+    // Formato legacy: la Baseplate non era una Part ma un blob a parte nel
+    // JSON. I place vecchi la portano ancora cosi' — la convertiamo in una
+    // Part vera al volo, cosi' risulta editabile come tutte le altre.
     auto bp = json.find("\"baseplate\"");
-    if (bp != std::string::npos) {
-        dm.hasBaseplate = jsonFindBool(json, "enabled", bp, true);
-        jsonFindVec3(json, "size", bp, dm.baseplateSize);
-        jsonFindVec3(json, "color", bp, dm.baseplateColor);
+    if (bp != std::string::npos && jsonFindBool(json, "enabled", bp, true)) {
+        glm::vec3 bpSize{120, 2, 120}, bpColor{0.55f, 0.56f, 0.55f};
+        jsonFindVec3(json, "size", bp, bpSize);
+        jsonFindVec3(json, "color", bp, bpColor);
+        dm.addBaseplate(bpSize, bpColor);
     }
 
     size_t partsKey = json.find("\"parts\"");
     if (partsKey == std::string::npos) return true;
     size_t arr = json.find('[', partsKey);
     if (arr == std::string::npos) return true;
-    // Trova la fine dell'array parts (bracket matching grezzo)
     int depth = 0;
     size_t arrEnd = arr;
     for (size_t i = arr; i < json.size(); ++i) {
@@ -295,11 +322,17 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         p.canDestroy = jsonFindBool(json, "canDestroy", pos, true);
         jsonFindFloat(json, "health", pos, p.health);
         jsonFindFloat(json, "maxHealth", pos, p.maxHealth);
+        p.script = jsonFindEscapedStr(json, "script", pos);
+        {
+            int st = jsonFindInt(json, "scriptType", pos);
+            p.scriptType = (st == 1) ? ScriptType::Server
+                          : (st == 2) ? ScriptType::Client
+                          : ScriptType::Legacy;
+        }
         dm.parts.push_back(std::move(p));
         pos = end + 1;
     }
 
-    // ScreenGui Label / TextLabel
     size_t labKey = json.find("\"labels\"");
     if (labKey != std::string::npos) {
         size_t larr = json.find('[', labKey);
@@ -347,7 +380,6 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                 if (!jsonFindVec3(json, "bgColor", lpos, lab.bgColor))
                     lab.bgColor = {0.f, 0.f, 0.f};
                 if (!jsonFindFloat(json, "bgTransparency", lpos, lab.bgTransparency)) {
-                    // compat: vecchio campo bool "bg"
                     bool oldBg = jsonFindBool(json, "bg", lpos, true);
                     lab.bgTransparency = oldBg ? 0.35f : 1.f;
                 }
@@ -358,7 +390,6 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
-    // Backpack items (inventario Play/Test)
     size_t bpKey = json.find("\"backpack\"");
     if (bpKey != std::string::npos) {
         size_t barr = json.find('[', bpKey);
@@ -383,6 +414,9 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                 it.tool = (BackpackTool)jsonFindInt(json, "tool", bpos);
                 it.meshPath = jsonFindStr(json, "meshPath", bpos);
                 it.animId = jsonFindStr(json, "animId", bpos);
+                jsonFindVec3(json, "gripOffset", bpos, it.gripOffset);
+                jsonFindVec3(json, "gripRotation", bpos, it.gripRotation);
+                jsonFindFloat(json, "gripScale", bpos, it.gripScale);
                 if (it.name.empty()) it.name = "Item";
                 if (it.id.empty()) it.id = "bp_" + std::to_string(dm.backpack.size());
                 if (it.tool == BackpackTool::None) {
@@ -403,7 +437,6 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     if (dm.equippedBackpack < -1 || dm.equippedBackpack >= DataModel::kHotbarSlots)
         dm.equippedBackpack = -1;
 
-    // Player amici (NPC follower)
     size_t frKey = json.find("\"friends\"");
     if (frKey != std::string::npos) {
         size_t farr = json.find('[', frKey);
@@ -463,6 +496,7 @@ inline std::vector<GameEntry> loadPublishedGames() {
         e.subtitle = jsonFindStr(json, "subtitle", pos);
         e.creator = jsonFindStr(json, "creator", pos);
         e.placePath = jsonFindStr(json, "placePath", pos);
+        e.iconPath = jsonFindStr(json, "iconPath", pos);
         e.playersOnline = jsonFindInt(json, "players", pos);
         e.maxPlayers = jsonFindInt(json, "maxPlayers", pos);
         e.publishedAt = jsonFindLongLong(json, "publishedAt", pos);
@@ -488,6 +522,7 @@ inline bool savePublishedGamesList(const std::vector<GameEntry>& all) {
         j << "    {\"id\":\"" << e.id << "\",\"title\":\"" << e.title
           << "\",\"subtitle\":\"" << e.subtitle << "\",\"creator\":\"" << e.creator
           << "\",\"placePath\":\"" << e.placePath
+          << "\",\"iconPath\":\"" << e.iconPath
           << "\",\"players\":" << e.playersOnline
           << ",\"maxPlayers\":" << e.maxPlayers
           << ",\"publishedAt\":" << e.publishedAt << "}";
@@ -510,7 +545,6 @@ inline std::string normalizeCreatorKey(const std::string& c) {
     return o.empty() ? "builder" : o;
 }
 
-/** Quanti giochi dell'utente contano nella finestra di 2 mesi. */
 inline int countUserPublishedInWindow(const std::vector<GameEntry>& games,
                                       const std::string& creator,
                                       long long nowSecs) {
@@ -519,14 +553,13 @@ inline int countUserPublishedInWindow(const std::vector<GameEntry>& games,
     for (const auto& g : games) {
         if (!g.isPublished) continue;
         if (normalizeCreatorKey(g.creator) != key) continue;
-        long long at = g.publishedAt > 0 ? g.publishedAt : nowSecs; // legacy = conta
+        long long at = g.publishedAt > 0 ? g.publishedAt : nowSecs;
         if (nowSecs - at <= kPublishQuotaWindowSecs)
             ++n;
     }
     return n;
 }
 
-/** true se può pubblicare (update stesso id oppure slot libero). */
 inline bool canPublishGame(const std::vector<GameEntry>& games,
                            const std::string& gameId,
                            const std::string& creator,
@@ -537,7 +570,7 @@ inline bool canPublishGame(const std::vector<GameEntry>& games,
         if (g.isPublished && g.id == gameId && normalizeCreatorKey(g.creator) == key) {
             if (outUsed)
                 *outUsed = countUserPublishedInWindow(games, creator, nowSecs);
-            return true; // aggiornamento non consuma slot nuovo
+            return true;
         }
     }
     int used = countUserPublishedInWindow(games, creator, nowSecs);
@@ -545,7 +578,6 @@ inline bool canPublishGame(const std::vector<GameEntry>& games,
     return used < kMaxPublishedGamesPerUser;
 }
 
-/** Parser JSON minimale per manifest giochi (no dipendenze). */
 inline std::vector<GameEntry> loadGameManifest() {
     std::vector<std::string> paths = {
         assetRoot() + "/assets/places/manifest.json",
@@ -559,9 +591,10 @@ inline std::vector<GameEntry> loadGameManifest() {
 
     std::vector<GameEntry> games;
     if (json.empty()) {
+        // Solo Baseplate: e la lista di ripiego se assets/places/manifest.json
+        // manca o non si legge. Deve rispecchiare il manifest, altrimenti un
+        // asset mancante farebbe ricomparire giochi che non ci sono piu.
         games.push_back({"baseplate", "Baseplate", "Costruisci libero", "scripts/baseplate.lua", 1247, {0.2f, 0.62f, 0.35f}});
-        games.push_back({"garden", "Grow a Garden", "Pianta e raccogli", "scripts/garden.lua", 8932, {0.15f, 0.55f, 0.22f}});
-        games.push_back({"obby", "Mega Obby", "Salta i blocchi!", "scripts/obby.lua", 4521, {0.75f, 0.2f, 0.15f}});
     } else {
         size_t pos = 0;
         while ((pos = json.find("\"id\"", pos)) != std::string::npos) {
@@ -570,6 +603,13 @@ inline std::vector<GameEntry> loadGameManifest() {
             e.title = jsonFindStr(json, "title", pos);
             e.subtitle = jsonFindStr(json, "subtitle", pos);
             e.script = jsonFindStr(json, "script", pos);
+            {
+                int st = jsonFindInt(json, "scriptType", pos);
+                e.scriptType = (st == 1) ? ScriptType::Server
+                              : (st == 2) ? ScriptType::Client
+                              : ScriptType::Legacy;
+            }
+            e.iconPath = jsonFindStr(json, "iconPath", pos);
             e.playersOnline = jsonFindInt(json, "players", pos);
             e.maxPlayers = jsonFindInt(json, "maxPlayers", pos);
             if (e.maxPlayers < 1) e.maxPlayers = 8;
@@ -587,15 +627,13 @@ inline std::vector<GameEntry> loadGameManifest() {
             pos += 4;
         }
         if (games.empty()) {
+            // Stessa lista del ripiego sopra: un solo gioco.
             games = {
                 {"baseplate", "Baseplate", "Costruisci libero", "scripts/baseplate.lua", 1247, {0.2f, 0.62f, 0.35f}},
-                {"garden", "Grow a Garden", "Pianta e raccogli", "scripts/garden.lua", 8932, {0.15f, 0.55f, 0.22f}},
-                {"obby", "Mega Obby", "Salta i blocchi!", "scripts/obby.lua", 4521, {0.75f, 0.2f, 0.15f}},
             };
         }
     }
 
-    // Aggiungi giochi pubblicati dagli utenti (manifest legacy)
     auto pub = loadPublishedGames();
     for (auto& e : pub) {
         bool exists = false;
@@ -609,12 +647,9 @@ inline std::vector<GameEntry> loadGameManifest() {
         if (!exists) games.push_back(e);
     }
 
-    // Game Package professionali (%APPDATA%/Blocky/games/<id>/game.blocky.json)
-    // Inclusione lazy via forward decl — implementata in BlockyProject.h
     return games;
 }
 
-/** Merge giochi da cartelle package (chiamare dopo aver incluso BlockyProject.h). */
 inline void mergeGamePackages(std::vector<GameEntry>& games,
                               const std::vector<GameEntry>& packaged) {
     for (const auto& e : packaged) {
@@ -638,21 +673,21 @@ inline void applyGamePlace(const GameEntry& game, DataModel& dm,
             return;
         }
     }
-    if (game.id == "garden") dm.loadGardenPlace();
-    else if (game.id == "obby") dm.loadObbyPlace();
-    else dm.loadBaseplatePlace();
+    // Garden e Obby non sono piu' giochi dell'Hub, quindi qui non arriva piu'
+    // nessuno con quegli id. Le loro mappe NON sono state cancellate: restano
+    // come modelli di partenza in Studio (Mappa -> Garden / Obby), che e' una
+    // cosa diversa dall'essere un gioco giocabile dall'Hub.
+    dm.loadBaseplatePlace();
     dm.placeName = game.title;
 }
 
 inline std::string resolveScriptPath(const std::string& rel) {
     if (rel.empty()) return {};
-    // Percorso assoluto / già risolto (es. package in %APPDATA%/Blocky/games/...)
     if (fileExistsPath(rel)) return rel;
     std::vector<std::string> bases = { assetRoot() + "/", "" };
     for (const auto& base : bases) {
         std::string p = base + "assets/" + rel;
         if (fileExistsPath(p)) return p;
-        // Anche senza prefisso assets/ se rel lo include già
         p = base + rel;
         if (fileExistsPath(p)) return p;
     }

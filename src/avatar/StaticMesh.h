@@ -25,45 +25,34 @@
 #include <windows.h>
 #endif
 
-/**
- * Mesh statica accessori avatar (GLB / GLTF / FBX / OBJ).
- * - Submesh per materiale + texture (embedded o file esterno)
- * - Filtra collision / LOD / helper che Assimp importa spesso come "parti strane"
- */
 class StaticMesh {
 public:
     struct SubMesh {
         GLuint vao = 0, vbo = 0;
         int vertexCount = 0;
-        GLuint texId = 0;          // base color / diffuse (0 = solo colore)
-        GLuint emissiveTex = 0;    // mappa emissiva (0 = nessuna)
+        GLuint texId = 0;
+        GLuint emissiveTex = 0;
         glm::vec3 baseColor{1.f};
         glm::vec3 emissive{0.f};
-        float alpha = 1.f;         // base color alpha × opacity del materiale
+        float alpha = 1.f;
         float metallic = 0.f;
         float roughness = 0.85f;
-        bool twoSided = false;     // materiale double-sided (fogliame, tessuti)
+        bool twoSided = false;
         bool ownsTex = false;
         bool ownsEmissiveTex = false;
         std::string name;
         std::string matName;
-        std::string missingTex;    // texture dichiarata dal materiale ma non trovata
+        std::string missingTex;
     };
 
     std::vector<SubMesh> subs;
     bool loaded = false;
-    bool hasBones = false; // scheletro rilevato durante load (niente secondo ReadFile)
+    bool hasBones = false;
     glm::vec3 boundsMin{0}, boundsMax{0};
     std::string path;
-    int vertexCount = 0; // totale (compat)
-    /**
-     * Import fedele: tiene ogni submesh e ogni materiale così com'è nel file.
-     * Gli accessori avatar usano false (scarta collision/LOD/pezzi minuscoli),
-     * l'import modelli del Game Engine usa true.
-     */
+    int vertexCount = 0;
     bool exactImport = false;
 
-    // Compat con codice che usa mesh.vao
     GLuint vao = 0, vbo = 0;
 
     void clear() {
@@ -129,7 +118,6 @@ public:
         return s;
     }
 
-    /** Nomi tipici di mesh inutili / collision / LOD. */
     static bool isJunkMeshName(const std::string& raw) {
         std::string n = toLower(raw);
         static const char* junk[] = {
@@ -216,7 +204,7 @@ public:
     }
 
     static GLuint loadTextureFile(const std::string& texPath, bool quiet = false) {
-        stbi_set_flip_vertically_on_load(false); // UV Assimp già FlipUVs
+        stbi_set_flip_vertically_on_load(false);
         int w = 0, h = 0, ch = 0;
         unsigned char* px = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
         if (!px) {
@@ -241,7 +229,6 @@ public:
 #endif
         }
         if (!px) {
-            // quiet: stiamo provando più percorsi candidati, il fallimento è normale
             if (!quiet)
                 std::fprintf(stderr, "[StaticMesh] Texture mancante: %s\n", texPath.c_str());
             return 0;
@@ -259,7 +246,6 @@ public:
         if (!t) return 0;
 
         if (t->mHeight == 0) {
-            // Compressed (png/jpg in GLB)
             int w = 0, h = 0, ch = 0;
             stbi_set_flip_vertically_on_load(false);
             unsigned char* px = stbi_load_from_memory(
@@ -271,7 +257,6 @@ public:
             return id;
         }
 
-        // Uncompressed BGRA
         std::vector<unsigned char> rgba((size_t)t->mWidth * t->mHeight * 4);
         for (unsigned i = 0; i < t->mWidth * t->mHeight; ++i) {
             const aiTexel& tx = t->pcData[i];
@@ -283,7 +268,6 @@ public:
         return uploadRgba(rgba.data(), (int)t->mWidth, (int)t->mHeight, false);
     }
 
-    /** Risolve una texture del materiale: embedded (*N) oppure file accanto al modello. */
     GLuint loadTextureOfTypes(const aiScene* sc, const aiMaterial* mat,
                               const std::string& modelDir,
                               const aiTextureType* types, int nTypes,
@@ -300,8 +284,6 @@ public:
                 GLuint id = loadEmbeddedTexture(sc, p);
                 if (id) return id;
             } else {
-                // Assimp risolve anche i nomi (non solo "*N") in texture embedded:
-                // capita con FBX che incorporano le immagini
                 if (const aiTexture* emb = sc->GetEmbeddedTexture(p)) {
                     for (unsigned i = 0; i < sc->mNumTextures; ++i) {
                         if (sc->mTextures[i] != emb) continue;
@@ -318,7 +300,6 @@ public:
                 std::string parent = modelDir;
                 auto up = parent.find_last_of("\\/");
                 if (up != std::string::npos) parent = parent.substr(0, up);
-                // Cartelle usate di solito dagli export (Blender, Maya, Substance)
                 const char* subdirs[] = { "", "textures/", "Textures/", "tex/",
                                           "maps/", "Materials/", "materials/",
                                           "source/", "images/" };
@@ -343,7 +324,7 @@ public:
         static const aiTextureType types[] = {
             aiTextureType_BASE_COLOR,
             aiTextureType_DIFFUSE,
-            aiTextureType_UNKNOWN, // glTF a volte finisce qui
+            aiTextureType_UNKNOWN,
         };
         return loadTextureOfTypes(sc, mat, modelDir, types, 3, outMissing);
     }
@@ -376,13 +357,10 @@ public:
 
             std::string name = mesh->mName.C_Str();
             if (name.empty()) name = node->mName.C_Str();
-            // In import fedele si tiene tutto: i filtri per nome servono agli
-            // accessori avatar, su un modello vero buttano via pezzi legittimi
             if (!exactImport
                 && (isJunkMeshName(name) || isJunkMeshName(node->mName.C_Str())))
                 continue;
 
-            // Bounds locali grezzi
             glm::vec3 bmin(1e9f), bmax(-1e9f);
             for (unsigned v = 0; v < mesh->mNumVertices; ++v) {
                 glm::vec4 wp = xform * glm::vec4(mesh->mVertices[v].x, mesh->mVertices[v].y,
@@ -404,7 +382,6 @@ public:
             collectMeshes(sc, node->mChildren[c], xform, out);
     }
 
-    /** pos3 + n3 + uv2 — xform include già correzione + normalizzazione */
     void buildSubmesh(const Gathered& g, const aiScene* sc, const std::string& modelDir,
                       const glm::mat4& xformWorld, std::vector<SubMesh>& outSubs,
                       glm::vec3& bmin, glm::vec3& bmax) {
@@ -413,7 +390,6 @@ public:
         glm::mat4 xform = xformWorld * g.xform;
         glm::mat3 nmat = glm::mat3(glm::transpose(glm::inverse(xform)));
 
-        // Layout: pos3 + n3 + uv2 + rgb3 (colore per-vertice, bianco se assente)
         const int kStride = 11;
         const bool hasVCol = mesh->HasVertexColors(0);
 
@@ -467,7 +443,7 @@ public:
             if (mat->Get(AI_MATKEY_BASE_COLOR, c) == AI_SUCCESS
                 || mat->Get(AI_MATKEY_COLOR_DIFFUSE, c) == AI_SUCCESS) {
                 sm.baseColor = {c.r, c.g, c.b};
-                sm.alpha = c.a; // glTF: l'alpha sta nel base color factor
+                sm.alpha = c.a;
             }
             float opacity = 1.f;
             if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS)
@@ -484,7 +460,6 @@ public:
             if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, rf) == AI_SUCCESS)
                 sm.roughness = std::clamp(rf, 0.f, 1.f);
             else {
-                // Materiali non-PBR (OBJ/FBX classici): ricava dalla shininess
                 float shin = 0.f;
                 if (mat->Get(AI_MATKEY_SHININESS, shin) == AI_SUCCESS && shin > 0.f)
                     sm.roughness = std::clamp(1.f - std::sqrt(shin / 1000.f), 0.05f, 1.f);
@@ -519,28 +494,15 @@ public:
         outSubs.push_back(std::move(sm));
     }
 
-    /**
-     * `targetMaxDim` è la dimensione (in studs) a cui viene normalizzato il
-     * lato più lungo della mesh. Il default 1.6 è tarato per gli accessori
-     * dell'avatar — cappelli, armi, oggetti in mano — che devono restare a
-     * scala di mano indipendentemente dalle unità del file sorgente.
-     *
-     * Un modello importato nel mondo (un mostro, un edificio, un veicolo) non
-     * deve subire la stessa compressione: schiacciare tutto a 1.6 unità è il
-     * motivo per cui gli import nel mondo sembravano minuscoli. Il chiamante
-     * passa un target più realistico — vedi importModelIntoWorld().
-     */
     bool load(const std::string& file, float targetMaxDim = 1.6f) {
         clear();
         Assimp::Importer imp;
         imp.SetPropertyInteger(AI_CONFIG_PP_SBP_REMOVE,
             aiPrimitiveType_POINT | aiPrimitiveType_LINE);
         imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
-        // Limiti anti-crash su file enormi / corrotti
         imp.SetPropertyInteger(AI_CONFIG_PP_SLM_VERTEX_LIMIT, 250000);
         imp.SetPropertyInteger(AI_CONFIG_PP_SLM_TRIANGLE_LIMIT, 500000);
 
-        // Flag “soft”: FindDegenerates / CalcTangentSpace crashano spesso su mesh sporche
         const unsigned flags =
             aiProcess_Triangulate |
             aiProcess_GenSmoothNormals |
@@ -558,7 +520,6 @@ public:
                     std::fprintf(stderr, "StaticMesh cannot open: %s\n", file.c_str());
                     return false;
                 }
-                // Cap memoria ~120 MB
                 if (bytes.size() > 120u * 1024u * 1024u) {
                     std::fprintf(stderr, "StaticMesh troppo grande: %s\n", file.c_str());
                     return false;
@@ -604,7 +565,6 @@ public:
 
         std::vector<Gathered> keep;
         if (exactImport) {
-            // Nessuno scarto: occhi, bottoni, maniglie... restano al loro posto
             keep = gathered;
         } else {
             float maxVol = 0.f;
@@ -619,7 +579,6 @@ public:
             if (keep.empty()) keep = gathered;
         }
 
-        // Bounds grezzi (solo Y-up corr FBX) per normalizzare
         std::string ext = extensionOf(file);
         glm::mat4 axisCorr(1.f);
         if (ext == ".fbx")
@@ -688,7 +647,6 @@ public:
         return true;
     }
 
-    /** Materiali che dichiarano una texture che non è stata trovata su disco. */
     int missingTextureCount() const {
         int n = 0;
         for (const auto& s : subs)
@@ -712,11 +670,6 @@ public:
         glBindVertexArray(0);
     }
 
-    /**
-     * Disegna applicando il materiale di ogni submesh così com'è nel file:
-     * base color + texture, emissive, metallic/roughness, opacità, double-sided.
-     * Le uniform assenti nel programma (es. depth pass) vengono ignorate.
-     */
     void drawTextured(GLuint prog, const glm::vec3& tintMul, float alpha = 1.f) const {
         if (!loaded) return;
         GLint locColor = glGetUniformLocation(prog, "uColor");
@@ -737,7 +690,6 @@ public:
         for (const auto& sm : subs) {
             if (!sm.vao || sm.vertexCount <= 0) continue;
 
-            // Materiale double-sided: niente culling su questa submesh
             if (sm.twoSided && !cullOff) { glDisable(GL_CULL_FACE); cullOff = true; }
             else if (!sm.twoSided && cullOff) {
                 if (cullWas) glEnable(GL_CULL_FACE);
@@ -748,9 +700,6 @@ public:
             if (locColor >= 0) glUniform3fv(locColor, 1, glm::value_ptr(col));
             if (locAlpha >= 0) glUniform1f(locAlpha, alpha * sm.alpha);
             if (locEmCol >= 0) glUniform3fv(locEmCol, 1, glm::value_ptr(sm.emissive));
-            // Metallico = riflesso più forte, ruvido = riflesso più debole.
-            // (glTF mette metallic=1/roughness=1 come default: senza il fattore
-            //  di roughness ogni modello sarebbe lucido come uno specchio.)
             if (locSpec >= 0)
                 glUniform1f(locSpec, (0.04f + sm.metallic * 0.60f)
                                      * (1.f - sm.roughness * 0.85f));

@@ -1,11 +1,3 @@
-// SkinnedModel.h - Caricamento e riproduzione di modelli animati (skeletal animation)
-// tramite Assimp. Supporta FBX/glTF con ossa e keyframe.
-//
-// NOTA sul multi-mesh: un modello puo' essere composto da piu' mesh che
-// condividono gli stessi nomi di ossa ma con offset matrix (bind) diverse.
-// Per questo le ossa sono gestite PER MESH, non in una mappa globale:
-// ogni frame calcoliamo la posa globale di ogni nodo (nodeGlobal) e poi,
-// per ciascuna mesh, componiamo le sue matrici finali con le sue offset.
 #pragma once
 
 #include <glad/gl.h>
@@ -19,6 +11,7 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstddef>
 #include <cctype>
@@ -29,7 +22,6 @@
 
 static const int MAX_BONES = 100;
 
-// ---- Conversioni Assimp -> GLM ----
 static inline glm::mat4 aiToGlm(const aiMatrix4x4& m) {
     glm::mat4 r;
     r[0][0]=m.a1; r[1][0]=m.a2; r[2][0]=m.a3; r[3][0]=m.a4;
@@ -41,12 +33,10 @@ static inline glm::mat4 aiToGlm(const aiMatrix4x4& m) {
 static inline glm::vec3 aiToGlm(const aiVector3D& v) { return { v.x, v.y, v.z }; }
 static inline glm::quat aiToGlm(const aiQuaternion& q) { return glm::quat(q.w, q.x, q.y, q.z); }
 
-// ---- Keyframe ----
 struct KeyPosition { glm::vec3 position; float time; };
 struct KeyRotation { glm::quat orientation; float time; };
 struct KeyScale    { glm::vec3 scale;    float time; };
 
-// Un osso animato: contiene i suoi keyframe e sa interpolarsi nel tempo
 struct Bone {
     std::string name;
     std::vector<KeyPosition> positions;
@@ -87,11 +77,6 @@ struct Bone {
         localTransform = interpPosition(t) * interpRotation(t) * interpScale(t);
     }
 
-    /**
-     * Componenti separate invece della matrice già composta: per fondere due
-     * clip bisogna interpolare le rotazioni come quaternioni. Mescolare le
-     * matrici direttamente storce e schiaccia il modello a metà transizione.
-     */
     void sample(float t, glm::vec3& outPos, glm::quat& outRot, glm::vec3& outScale) const {
         if (positions.empty()) outPos = glm::vec3(0.0f);
         else if (positions.size() == 1) outPos = positions[0].position;
@@ -119,7 +104,6 @@ struct Bone {
     }
 };
 
-/** Una clip animata del file: walk, patrol, chase... */
 struct SkinnedClip {
     std::string name;
     float duration = 0.0f;
@@ -129,7 +113,6 @@ struct SkinnedClip {
     bool valid() const { return duration > 0.0f && !bones.empty(); }
 };
 
-// Nodo della gerarchia (copia leggera dell'albero di Assimp)
 struct NodeData {
     glm::mat4 transformation;
     std::string name;
@@ -138,7 +121,6 @@ struct NodeData {
 
 class AnimatedModel {
 public:
-    // Ogni mesh porta i propri nomi di ossa e le proprie offset matrix
     struct SubMesh {
         GLuint vao = 0;
         GLsizei count = 0;
@@ -150,20 +132,14 @@ public:
     std::vector<SubMesh> meshes;
     glm::mat4 globalInverse{ 1.0f };
 
-    /** Tutte le clip del file. Un mostro con walk/patrol/chase ne ha tre. */
     std::vector<SkinnedClip> clips;
     NodeData rootNode;
     float currentTime = 0.0f;
 
-    // --- Transizione fra clip -------------------------------------------
-    // Cambiare posa di colpo si vede: la fusione dura pochi decimi e toglie
-    // lo scatto senza che il cambio di stato sembri in ritardo.
     float blendSeconds = 0.18f;
 
-    std::map<std::string, glm::mat4> nodeGlobal; // posa globale corrente per nome nodo
+    std::map<std::string, glm::mat4> nodeGlobal;
     glm::vec3 bbMin{ 0.0f }, bbMax{ 0.0f };
-    // Correzione d'orientamento: molti FBX (Blender/Roblox) sono Z-up,
-    // qui li ruotiamo di -90 gradi su X per portarli nel nostro mondo Y-up.
     glm::mat4 correction = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
     bool loaded = false;
 
@@ -174,7 +150,7 @@ public:
             aiProcess_Triangulate |
             aiProcess_GenSmoothNormals |
             aiProcess_JoinIdenticalVertices |
-            aiProcess_LimitBoneWeights // massimo 4 ossa per vertice
+            aiProcess_LimitBoneWeights
         );
         if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode) {
             std::fprintf(stderr, "[AnimatedModel] Errore: %s\n", importer.GetErrorString());
@@ -183,12 +159,10 @@ public:
 
         globalInverse = glm::inverse(aiToGlm(scene->mRootNode->mTransformation));
 
-        // Vertici CPU-side, per mesh, per calcolare il bounding box skinnato reale
         std::vector<std::vector<SVert>> cpuVerts;
 
         for (unsigned m = 0; m < scene->mNumMeshes; ++m) {
             const aiMesh* mesh = scene->mMeshes[m];
-            // Accetta mesh skinnate E statiche (GLB noob spesso senza bones)
             std::vector<SVert> verts;
             processMesh(scene, mesh, verts);
             cpuVerts.push_back(std::move(verts));
@@ -200,12 +174,10 @@ public:
 
         copyHierarchy(rootNode, scene->mRootNode);
         loadAnimation(scene);
-        computeBindBounds(cpuVerts); // bounding box sulla geometria realmente renderizzata
+        computeBindBounds(cpuVerts);
 
         loaded = true;
 
-        // Elencare le clip trovate serve: se il mostro non cambia posa, la
-        // prima cosa da sapere è come le ha chiamate l'esportatore.
         std::string clipList;
         for (const SkinnedClip& c : clips) {
             if (!clipList.empty()) clipList += ", ";
@@ -217,8 +189,6 @@ public:
         return true;
     }
 
-    // Matrice di posizionamento: scala il modello a "targetHeight" studs e lo appoggia a terra.
-    // bbMin/bbMax sono gia' calcolati nello spazio corretto (post-correzione Y-up).
     glm::mat4 placement(float targetHeight, float groundY, glm::vec3 offset) const {
         glm::vec3 dim = bbMax - bbMin;
         float scale = targetHeight / glm::max(dim.y, 1e-4f);
@@ -227,11 +197,10 @@ public:
         t = glm::translate(t, offset + glm::vec3(0.0f, groundY - bbMin.y * scale, 0.0f));
         t = glm::scale(t, glm::vec3(scale));
         t = glm::translate(t, glm::vec3(-center.x, 0.0f, -center.z));
-        t = t * correction; // la correzione agisce per prima sui vertici
+        t = t * correction;
         return t;
     }
 
-    // ---- Clip -----------------------------------------------------------
 
     int clipCount() const { return (int)clips.size(); }
 
@@ -253,23 +222,17 @@ public:
         return c ? c->name : none;
     }
 
-    /**
-     * Cerca per sottostringa senza distinguere maiuscole: gli esportatori
-     * antepongono quasi sempre il nome dell'armatura, quindi "chase" deve
-     * trovare anche "Armature|ChasingAction".
-     */
     int findClip(const std::string& needle) const {
         const std::string want = toLowerCopy(needle);
         int loose = -1;
         for (size_t i = 0; i < clips.size(); ++i) {
             const std::string have = toLowerCopy(clips[i].name);
-            if (have == want) return (int)i;                       // esatto vince
+            if (have == want) return (int)i;
             if (loose < 0 && have.find(want) != std::string::npos) loose = (int)i;
         }
         return loose;
     }
 
-    /** Passa a una clip per nome. False se non esiste: il chiamante decide. */
     bool setClip(const std::string& name, bool restart = true) {
         const int idx = findClip(name);
         if (idx < 0) return false;
@@ -280,7 +243,6 @@ public:
         if (index < 0 || index >= (int)clips.size()) return false;
         if (index == activeIndex) return true;
 
-        // La clip che lasciamo continua a essere campionata durante la fusione.
         previousIndex = activeIndex;
         previousTime = currentTime;
         blendLeft = (previousIndex >= 0) ? blendSeconds : 0.0f;
@@ -309,7 +271,7 @@ public:
         }
 
         nodeGlobal.clear();
-        buildPose(&rootNode, glm::mat4(1.0f)); // calcola la posa globale di ogni nodo
+        buildPose(&rootNode, glm::mat4(1.0f));
     }
 
     void draw(GLuint prog) const {
@@ -317,7 +279,6 @@ public:
         GLint locColor = glGetUniformLocation(prog, "uColor");
 
         for (const SubMesh& sm : meshes) {
-            // Compone le matrici finali di QUESTA mesh usando le sue offset
             std::vector<glm::mat4> mats;
             if (sm.boneNames.empty()) {
                 mats.push_back(glm::mat4(1.0f));
@@ -360,11 +321,21 @@ private:
         }
 
         SubMesh sm;
-        sm.boneNames.resize(mesh->mNumBones);
-        sm.boneOffsets.resize(mesh->mNumBones);
+        // uFinalBones nello shader ha solo MAX_BONES slot: un mesh con piu'
+        // ossa di cosi' (rig complessi, tante dita/spina dorsale in un
+        // unico sottomesh) sforerebbe l'array uniform — undefined behavior
+        // che si vede come mesh deformata/rotta. Le ossa oltre il limite
+        // vengono ignorate invece di corrompere la memoria della GPU.
+        unsigned numBones = std::min(mesh->mNumBones, (unsigned)MAX_BONES);
+        if (mesh->mNumBones > (unsigned)MAX_BONES) {
+            std::fprintf(stderr,
+                "[SkinnedModel] '%s': %u ossa oltre il limite di %d — le ossa in eccesso sono ignorate\n",
+                mesh->mName.C_Str(), mesh->mNumBones, MAX_BONES);
+        }
+        sm.boneNames.resize(numBones);
+        sm.boneOffsets.resize(numBones);
 
-        // Bone locali a questa mesh: l'indice del bone e' l'id usato dai vertici
-        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+        for (unsigned b = 0; b < numBones; ++b) {
             const aiBone* bone = mesh->mBones[b];
             sm.boneNames[b]   = bone->mName.C_Str();
             sm.boneOffsets[b] = aiToGlm(bone->mOffsetMatrix);
@@ -425,7 +396,6 @@ private:
         }
     }
 
-    // Calcola le trasformazioni globali in posa di BIND (senza animazione)
     void buildBind(const NodeData* node, const glm::mat4& parent,
                    std::map<std::string, glm::mat4>& out) const {
         glm::mat4 global = parent * node->transformation;
@@ -434,7 +404,6 @@ private:
             buildBind(&child, global, out);
     }
 
-    // Bounding box della geometria realmente renderizzata (dopo skinning + correzione)
     void computeBindBounds(const std::vector<std::vector<SVert>>& cpuVerts) {
         std::map<std::string, glm::mat4> gb;
         buildBind(&rootNode, glm::mat4(1.0f), gb);
@@ -466,7 +435,6 @@ private:
         }
     }
 
-    /** Carica *tutte* le clip del file, non solo una. */
     void loadAnimation(const aiScene* scene) {
         if (scene->mNumAnimations == 0) return;
 
@@ -497,8 +465,6 @@ private:
             clips.push_back(std::move(clip));
         }
 
-        // Clip iniziale: stessa scelta di prima, così i modelli già in uso
-        // partono esattamente come partivano.
         int chosen = 0, bestScore = -1;
         for (size_t i = 0; i < clips.size(); ++i) {
             const std::string nm = toLowerCopy(clips[i].name);
@@ -526,7 +492,6 @@ private:
         return nullptr;
     }
 
-    // Calcola la posa globale di ogni nodo (con override dell'animazione)
     void buildPose(const NodeData* node, const glm::mat4& parent) {
         glm::mat4 local = node->transformation;
 
@@ -535,13 +500,12 @@ private:
             glm::quat rot;
             b->sample(currentTime, pos, rot, scl);
 
-            // In transizione: fondi con la posa della clip precedente.
             if (blendLeft > 0.0f && blendSeconds > 0.0f) {
                 if (const Bone* prev = findBoneIn(previousClip(), node->name)) {
                     glm::vec3 p2, s2;
                     glm::quat r2;
                     prev->sample(previousTime, p2, r2, s2);
-                    const float w = 1.0f - (blendLeft / blendSeconds);  // 0 = vecchia, 1 = nuova
+                    const float w = 1.0f - (blendLeft / blendSeconds);
                     pos = glm::mix(p2, pos, w);
                     rot = glm::normalize(glm::slerp(r2, rot, w));
                     scl = glm::mix(s2, scl, w);

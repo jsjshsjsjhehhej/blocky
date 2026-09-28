@@ -1,9 +1,5 @@
 #pragma once
 
-/**
- * Animator — R6 built-in + libreria animazioni con ID (script).
- * OpenGL non è coinvolto: solo rotazioni arti Humanoid.
- */
 
 #include "Humanoid.h"
 #include "R6WalkAnim.h"
@@ -21,7 +17,7 @@ enum class AnimClip {
     Wave,
     Dance,
     Jump,
-    Custom, // clip da libreria (FancyWalk, Shoot, ...)
+    Custom,
     Count
 };
 
@@ -46,7 +42,7 @@ inline AnimClip animClipFromName(const std::string& n) {
     if (s == "dance" || s == "disco") return AnimClip::Dance;
     if (s == "jump" || s == "fall") return AnimClip::Jump;
     if (s == "idle" || s == "stop" || s == "none") return AnimClip::Idle;
-    return AnimClip::Custom; // tratta come ID libreria
+    return AnimClip::Custom;
 }
 
 class Animator {
@@ -64,10 +60,8 @@ public:
     R6WalkClip jumpOverride;
     bool hasJumpOverride = false;
 
-    /** Clip one-shot / custom da script (Shoot, Emote, ...). */
     R6WalkClip customClip;
     bool hasCustomClip = false;
-    /** Clip realmente scelta nell'ultimo apply(): serve a diagnosticare. */
     AnimClip lastActive = AnimClip::Idle;
     float customPhase = 0.f;
     bool customFinished = false;
@@ -84,7 +78,19 @@ public:
         walkPhase = 0.f;
     }
 
+    /**
+     * Rifiuta una clip di camminata: e' il bug capitato stasera. setWalkAnimId
+     * gia' rifiuta una clip di salto (riga sotto, c->kind == R6AnimKind::Jump)
+     * ma il lato opposto non c'era — assegnare "Jump" a una clip Walk dal
+     * catalogo (Studio) passava senza controlli, forzava kind=Jump sull'
+     * ETICHETTA ma i dati restavano quelli della camminata: l'animatore
+     * diceva "Jump" ovunque (F3, log) mentre disegnava il ciclo di passi.
+     */
     void setJumpOverride(const R6WalkClip& c) {
+        if (c.kind == R6AnimKind::Walk) {
+            clearJumpOverride();
+            return;
+        }
         jumpOverride = c;
         hasJumpOverride = c.valid();
         if (hasJumpOverride) {
@@ -99,7 +105,6 @@ public:
         hasJumpOverride = false;
     }
 
-    /** Pistola / shoot / tool: non vanno usati come camminata (braccio "incollato"). */
     static bool looksLikeToolAnim(const R6WalkClip& c) {
         if (c.kind == R6AnimKind::Tool) return true;
         if (c.kind == R6AnimKind::Jump) return false;
@@ -128,7 +133,6 @@ public:
         return false;
     }
 
-    /** Play per nome: built-in oppure AnimationId in libreria. */
     void play(const std::string& name) {
         AnimClip built = animClipFromName(name);
         if (built != AnimClip::Custom) {
@@ -144,7 +148,6 @@ public:
         if (!c) c = animLibrary().resolve(name);
         if (!c) c = animLibrary().get(sanitizeGameId(name));
         if (!c) {
-            // fallback idle
             clip = AnimClip::Idle;
             lastPlayed = name;
             hasCustomClip = false;
@@ -197,12 +200,9 @@ public:
     }
 
     void apply(Humanoid& h, float dt, bool isWalking) {
-        // Se l'Animator è fermo non scrive nulla, quindi non ha messo nessuna
-        // posa di salto: il disegno deve saperlo per metterla lui.
         if (!playing) { h.poseIsJump = false; return; }
         time += dt;
 
-        // Sync walk override da libreria se impostata (mai tool/pistola)
         if (!hasWalkOverride && !animLibrary().defaultWalkId.empty()) {
             if (const R6WalkClip* w = animLibrary().get(animLibrary().defaultWalkId)) {
                 if (!looksLikeToolAnim(*w) && w->kind != R6AnimKind::Jump)
@@ -211,14 +211,17 @@ public:
         }
         if (hasWalkOverride && (looksLikeToolAnim(walkOverride) || walkOverride.kind == R6AnimKind::Jump))
             clearWalkOverride();
+        // Simmetrico al controllo sopra: una jumpOverride rimasta di tipo Walk
+        // (es. da un anim_library.json salvato prima di questo controllo)
+        // va scartata qui, non solo bloccata all'assegnazione futura.
+        if (hasJumpOverride && jumpOverride.kind == R6AnimKind::Walk)
+            clearJumpOverride();
 
-        // Sync jump override da libreria (default = classic_jump file)
         if (!hasJumpOverride && !animLibrary().defaultJumpId.empty()) {
             if (const R6WalkClip* j = animLibrary().get(animLibrary().defaultJumpId))
                 setJumpOverride(*j);
         }
 
-        // Script override walkSpeed / jumpPower
         auto& sc = scriptControls();
         if (sc.walkSpeedOverride >= 0.f) h.walkSpeed = sc.walkSpeedOverride;
         if (sc.jumpPowerOverride >= 0.f) h.jumpPower = sc.jumpPowerOverride;
@@ -226,19 +229,10 @@ public:
         AnimClip active = clip;
         if (clip == AnimClip::Idle && isWalking && h.grounded && sc.walkEnabled)
             active = AnimClip::Walk;
-        // Il salto ha SEMPRE priorita' quando sei in aria: prima scattava solo
-        // partendo da Idle, quindi saltando mentre camminavi restava la walk.
-        //
-        // Una clip custom *loopata* e' uno stato (una camminata importata da
-        // Blender), e il salto deve poterla scavalcare. Una one-shot e' un
-        // gesto che va lasciato finire. Prima bastava avere una custom
-        // qualsiasi per bloccare il salto: con una camminata importata il
-        // personaggio continuava a camminare in aria.
         const bool customOneShot = hasCustomClip && !customFinished && !customClip.looped;
         if (!h.grounded && !customOneShot)
             active = AnimClip::Jump;
 
-        // Custom one-shot ha priorità finché non finisce
         if (hasCustomClip && clip == AnimClip::Custom && !customFinished
             && active != AnimClip::Jump) {
             float dur = std::max(0.05f, customClip.duration);
@@ -256,7 +250,6 @@ public:
                 r6ApplyKeyToHumanoid(h, k, std::clamp(weight, 0.f, 1.f));
                 return;
             }
-            // fine one-shot → azzera arti e passa a Idle/Walk (niente braccio bloccato)
             customFinished = true;
             hasCustomClip = false;
             clip = AnimClip::Idle;
@@ -268,11 +261,9 @@ public:
         }
 
         lastActive = active;
-        // Dichiara al disegno se la posa di questo frame è quella di salto.
         h.poseIsJump = (active == AnimClip::Jump);
         float w = std::clamp(weight, 0.f, 1.f);
 
-        // Solo walk loopate e non-tool come override camminata
         if (active == AnimClip::Walk && hasWalkOverride && walkOverride.valid()
             && walkOverride.looped && !looksLikeToolAnim(walkOverride)
             && walkOverride.kind != R6AnimKind::Jump) {
@@ -293,7 +284,6 @@ public:
 
         switch (active) {
         case AnimClip::Walk: {
-            // Fluido stile Roblox: gambe ±48°, braccia ±68°, ritardo braccia
             float ph = h.walkPhase;
             float sLeg = std::sin(ph);
             float sArm = std::sin(ph + 0.18f);
@@ -320,8 +310,6 @@ public:
             break;
         }
         case AnimClip::Jump: {
-            // In aria la posa deve vedersi: jumpArmBlend serve ad ammorbidire
-            // l'entrata, non a poter annullare il salto se resta a zero.
             float ease = std::clamp(h.jumpArmBlend, 0.f, 1.f);
             if (!h.grounded) ease = std::max(ease, 0.75f);
             const float blend = ease * w;
@@ -330,10 +318,6 @@ public:
                 r6ApplyKeyToHumanoid(h, k, blend);
                 return;
             }
-            // fallback procedurale (stesso contenuto di classic_jump).
-            // Usa `blend`, non `w`: jumpArmBlend sale da 0 a 1 nei primi
-            // centesimi di volo, ed è quello che fa entrare le braccia
-            // gradualmente invece di farle scattare a piena escursione.
             float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
             humanoidJumpPose(h, jL, jR, jl, jr);
             for (auto& p : h.parts) {

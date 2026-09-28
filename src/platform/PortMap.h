@@ -1,23 +1,5 @@
 #pragma once
 
-/**
- * Apertura automatica della porta sul router (UPnP IGD).
- *
- * Ospitare una partita fra regioni diverse funziona già: LanNet accetta
- * qualsiasi indirizzo IP. Quello che manca è che il router di chi ospita
- * consegni i pacchetti al computer giusto, e configurarlo a mano è il
- * passaggio su cui la gente si ferma.
- *
- * Qui si fa da soli, in tre passi:
- *   1. SSDP — un messaggio in multicast chiede "chi è il router?"
- *   2. HTTP — si scarica la sua descrizione e si trova il servizio giusto
- *   3. SOAP — si chiede di inoltrare la porta, e si legge l'IP pubblico
- *
- * Limiti dichiarati: non funziona se il router ha UPnP disattivato (comune
- * per scelta di sicurezza) né dietro CGNAT, tipico delle connessioni mobili.
- * In quei casi resta il port forwarding manuale, e va detto all'utente invece
- * di lasciarlo davanti a un errore muto.
- */
 
 #ifdef _WIN32
 
@@ -32,14 +14,12 @@ namespace PortMap {
 
 struct Result {
     bool mapped = false;
-    std::string externalIp;    // IP pubblico visto dal router
-    std::string localIp;       // IP di questa macchina sulla rete di casa
-    std::string error;         // vuoto se è andata
+    std::string externalIp;
+    std::string localIp;
+    std::string error;
 };
 
-// --------------------------------------------------------------- utilità
 
-/** Cerca il testo fra due tag, senza tirare dentro un parser XML. */
 inline std::string between(const std::string& src, const std::string& openTag,
                            const std::string& closeTag, size_t from = 0) {
     const size_t a = src.find(openTag, from);
@@ -57,7 +37,6 @@ inline bool containsNoCase(const std::string& hay, const char* needle) {
     return h.find(n) != std::string::npos;
 }
 
-/** Spezza "http://192.168.1.1:5000/rootDesc.xml" in host, porta e percorso. */
 inline bool splitUrl(const std::string& url, std::string& host, int& port, std::string& path) {
     const std::string prefix = "http://";
     if (url.compare(0, prefix.size(), prefix) != 0) return false;
@@ -80,7 +59,6 @@ inline bool splitUrl(const std::string& url, std::string& host, int& port, std::
     return !host.empty();
 }
 
-/** Richiesta HTTP grezza; ritorna il corpo della risposta. */
 inline std::string httpRequest(const std::string& host, int port, const std::string& raw,
                                int timeoutMs = 4000) {
     addrinfo hints{};
@@ -115,7 +93,7 @@ inline std::string httpRequest(const std::string& host, int port, const std::str
         const int n = recv(s, buf, sizeof(buf), 0);
         if (n <= 0) break;
         response.append(buf, (size_t)n);
-        if (response.size() > 256 * 1024) break;   // descrizioni patologiche
+        if (response.size() > 256 * 1024) break;
     }
     closesocket(s);
 
@@ -123,19 +101,16 @@ inline std::string httpRequest(const std::string& host, int port, const std::str
     return bodyStart == std::string::npos ? response : response.substr(bodyStart + 4);
 }
 
-/** IP di questa macchina sulla rete che porta al router. */
 inline std::string localAddressToward(const std::string& routerHost) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return {};
 
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
-    dest.sin_port = htons(9);   // discard: non viene inviato nulla
+    dest.sin_port = htons(9);
     inet_pton(AF_INET, routerHost.c_str(), &dest.sin_addr);
 
     std::string out;
-    // Un socket UDP "connesso" non manda pacchetti: sceglie solo l'interfaccia,
-    // che è il modo pulito per sapere con quale IP usciremmo verso il router.
     if (connect(s, (sockaddr*)&dest, sizeof(dest)) == 0) {
         sockaddr_in local{};
         int len = sizeof(local);
@@ -149,9 +124,7 @@ inline std::string localAddressToward(const std::string& routerHost) {
     return out;
 }
 
-// --------------------------------------------------------------- SSDP
 
-/** Chiede in multicast chi è il gateway. Ritorna l'URL della sua descrizione. */
 inline std::string discoverGateway(int timeoutMs = 2000) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return {};
@@ -173,7 +146,6 @@ inline std::string discoverGateway(int timeoutMs = 2000) {
 
     sendto(s, kSearch, (int)std::strlen(kSearch), 0, (sockaddr*)&dest, sizeof(dest));
 
-    // Più router possono rispondere: si prende il primo con un LOCATION.
     char buf[2048];
     for (int attempt = 0; attempt < 4; ++attempt) {
         const int n = recv(s, buf, sizeof(buf) - 1, 0);
@@ -194,10 +166,8 @@ inline std::string discoverGateway(int timeoutMs = 2000) {
     return {};
 }
 
-/** Nella descrizione del router trova l'URL di controllo del servizio WAN. */
 inline bool findControlUrl(const std::string& xml, std::string& outControl,
                            std::string& outServiceType) {
-    // WANIPConnection copre le connessioni via cavo/fibra, WANPPPConnection l'ADSL.
     for (const char* want : {"WANIPConnection", "WANPPPConnection"}) {
         size_t pos = 0;
         while ((pos = xml.find("<service>", pos)) != std::string::npos) {
@@ -244,13 +214,7 @@ inline std::string soapCall(const std::string& host, int port, const std::string
     return httpRequest(host, port, std::string(header) + body);
 }
 
-// --------------------------------------------------------------- API
 
-/**
- * Apre `port` in UDP verso questa macchina.
- * `leaseSeconds` a 0 = permanente finché non si chiude (alcuni router
- * rifiutano le durate limitate, quindi 0 è il default più compatibile).
- */
 inline Result open(int port, const char* description = "Blocky", int leaseSeconds = 0) {
     Result r;
 
@@ -291,12 +255,10 @@ inline Result open(int port, const char* description = "Blocky", int leaseSecond
         return r;
     }
 
-    // --- IP pubblico: è quello da dare agli amici ---
     const std::string extResp = soapCall(host, httpPort, control, serviceType,
                                          "GetExternalIPAddress", "");
     r.externalIp = between(extResp, "<NewExternalIPAddress>", "</NewExternalIPAddress>");
 
-    // --- inoltro della porta ---
     char args[1024];
     std::snprintf(args, sizeof(args),
         "<NewRemoteHost></NewRemoteHost>"
@@ -321,7 +283,6 @@ inline Result open(int port, const char* description = "Blocky", int leaseSecond
     return r;
 }
 
-/** Chiude l'inoltro. Da chiamare quando il server si spegne. */
 inline bool close(int port) {
     const std::string location = discoverGateway(1200);
     if (location.empty()) return false;
@@ -351,9 +312,9 @@ inline bool close(int port) {
     return resp.find("DeletePortMappingResponse") != std::string::npos;
 }
 
-} // namespace PortMap
+}
 
-#else   // --- piattaforme non Windows: stub, si compila e non fa nulla ---
+#else
 
 #include <string>
 

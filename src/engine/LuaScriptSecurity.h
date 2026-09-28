@@ -1,20 +1,31 @@
 #pragma once
 
-/**
- * Blocky Lua — sicurezza anti-executor (client).
- * - Congela API engine (game/workspace/...)
- * - Blocca overwrite di globali protetti
- * - Limiti connessioni / particelle / stats
- * Nota: client non è inviolabile; multiplayer → authority server.
- */
 
-extern "C" {
 #include "lua.h"
-#include "lauxlib.h"
-}
+#include "lualib.h"
 
 #include <cstring>
 #include <string>
+
+// ---- Adattatori Luau condivisi: qui perche' LuaRuntime.h include questo
+// file PRIMA che la classe LuaRuntime esista (quindi i suoi shim privati
+// non sono ancora visibili a questo punto). Stesso nome/comportamento
+// delle funzioni di Lua 5.4 che il codice gia' chiamava ovunque. ----
+
+// lua_pushcfunction di Luau vuole un terzo argomento (nome di debug, usato
+// negli stack trace) rispetto a Lua 5.4 — #fn lo ricava automaticamente
+// dal nome della funzione passata.
+#define blockyPushCFunction(L, fn) lua_pushcfunction(L, fn, #fn)
+
+// luaL_error di Luau e' void (macro luaL_errorL) invece che int come in
+// Lua 5.4 — "return blockyLuaError(...)" smetteva di compilare. Questo
+// adattatore torna a restituire int (mai davvero, dato che dentro solleva
+// comunque l'errore Lua che salta fuori).
+template <typename... Args>
+static int blockyLuaError(lua_State* ls, const char* fmt, Args... args) {
+    luaL_error(ls, fmt, args...);
+    return 0;
+}
 
 namespace LuaScriptSecurity {
 
@@ -25,7 +36,13 @@ inline constexpr int kMaxParticles = 128;
 inline constexpr int kMaxTaskWaits = 128;
 inline constexpr float kMaxWalkSpeed = 28.f;
 inline constexpr float kMaxJumpPower = 70.f;
-inline constexpr int kInstructionBudget = 2000000; // più stretto vs executor busy-loop
+// Luau non ha un hook "ogni N istruzioni" come Lua 5.4 (lua_sethook +
+// LUA_MASKCOUNT) — al suo posto un callback "interrupt" che scatta ai
+// safepoint (salti di loop, chiamate, GC). Invece di contare istruzioni,
+// il limite duro ora e' in tempo reale: se un singolo script gira oltre
+// questa soglia senza restituire il controllo, viene fermato — stessa
+// funzione di prima (bloccare un "while true do end"), granularita' diversa.
+inline constexpr int kScriptHardTimeoutMs = 50;
 
 inline bool isLockedGlobal(const char* k) {
     if (!k) return false;
@@ -45,30 +62,27 @@ inline bool isLockedGlobal(const char* k) {
 
 inline int luaProtectedNewIndex(lua_State* ls) {
     const char* k = lua_tostring(ls, 2);
-    return luaL_error(ls, "API Blocky protetta (anti-executor): non modificare '%s'",
+    return blockyLuaError(ls, "API Blocky protetta (anti-executor): non modificare '%s'",
                       k ? k : "?");
 }
 
 inline int luaGlobalNewIndex(lua_State* ls) {
-    // __newindex(_G, key, value) — blocca overwrite engine, permette variabili utente
     const char* k = lua_tostring(ls, 2);
-    // "script" si aggiorna a ogni Part script (bindScriptParent usa rawset; qui per sicurezza)
     if (k && std::strcmp(k, "script") == 0) {
         lua_rawset(ls, 1);
         return 0;
     }
     if (isLockedGlobal(k))
-        return luaL_error(ls, "Globale protetto: '%s' (anti-executor)", k ? k : "?");
-    lua_rawset(ls, 1); // C rawset (Lua rawset è tolto)
+        return blockyLuaError(ls, "Globale protetto: '%s' (anti-executor)", k ? k : "?");
+    lua_rawset(ls, 1);
     return 0;
 }
 
-/** Metatable read-only su tabella in cima allo stack (o a idx). */
 inline void protectTable(lua_State* L, int idx) {
     if (idx < 0) idx = lua_gettop(L) + 1 + idx;
     if (!lua_istable(L, idx)) return;
     lua_newtable(L);
-    lua_pushcfunction(L, luaProtectedNewIndex);
+    blockyPushCFunction(L, luaProtectedNewIndex);
     lua_setfield(L, -2, "__newindex");
     lua_pushstring(L, "BlockyProtected");
     lua_setfield(L, -2, "__metatable");
@@ -82,7 +96,6 @@ inline void protectGlobal(lua_State* L, const char* name) {
     lua_pop(L, 1);
 }
 
-/** Dopo registerApi: congela superficie + _G selettivo. */
 inline void lockApiSurface(lua_State* L) {
     if (!L) return;
     const char* names[] = {
@@ -92,7 +105,6 @@ inline void lockApiSurface(lua_State* L) {
     for (int i = 0; names[i]; ++i)
         protectGlobal(L, names[i]);
 
-    // game.RunService / Particles / ... già dentro game — proteggi sotto-tabelle
     lua_getglobal(L, "game");
     if (lua_istable(L, -1)) {
         const char* sub[] = {
@@ -104,7 +116,6 @@ inline void lockApiSurface(lua_State* L) {
             if (lua_istable(L, -1))
                 protectTable(L, -1);
             lua_pop(L, 1);
-            // Heartbeat sotto RunService
             if (std::strcmp(sub[i], "RunService") == 0) {
                 lua_getfield(L, -1, "RunService");
                 if (lua_istable(L, -1)) {
@@ -119,9 +130,9 @@ inline void lockApiSurface(lua_State* L) {
     }
     lua_pop(L, 1);
 
-    lua_pushglobaltable(L);
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
     lua_newtable(L);
-    lua_pushcfunction(L, luaGlobalNewIndex);
+    blockyPushCFunction(L, luaGlobalNewIndex);
     lua_setfield(L, -2, "__newindex");
     lua_pushstring(L, "BlockyGlobalLock");
     lua_setfield(L, -2, "__metatable");
@@ -129,7 +140,6 @@ inline void lockApiSurface(lua_State* L) {
     lua_pop(L, 1);
 }
 
-/** Path trusted: script engine in assets/ (dev / builtin). */
 inline bool isTrustedAssetScript(const std::string& path) {
     auto has = [&](const char* s) {
         return path.find(s) != std::string::npos;
@@ -138,4 +148,4 @@ inline bool isTrustedAssetScript(const std::string& path) {
         || has("/scripts/") || has("\\scripts\\");
 }
 
-} // namespace LuaScriptSecurity
+}

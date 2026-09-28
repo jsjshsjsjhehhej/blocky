@@ -30,6 +30,31 @@ compile_commands.json
 # --- Gradle (progetti Android affiancati) -------------------------------
 .gradle/
 local.properties
+android/app/build/
+android/app/.cxx/
+android/build/
+*.apk
+*.aab
+
+# --- Segreti: non devono MAI finire su GitHub --------------------------
+.token
+*.token
+blocky_dev_offline.txt
+*.keystore
+*.jks
+*.pfx
+google-services.json
+
+# --- Stato locale dell'editor ------------------------------------------
+imgui.ini
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
+
+# --- Generati / dati del server ----------------------------------------
+# dist/ la ricrea tools/make_release_pc.sh; hosted/ sono i giochi e il
+# catalogo caricati sul server di hosting, non sorgente del motore.
+dist/
+hosted/
 
 # --- Editor e IDE -------------------------------------------------------
 .vs/

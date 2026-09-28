@@ -13,34 +13,30 @@
 #include <string>
 #include <vector>
 
-/** Part nel Workspace (stile Roblox Instance Part). */
+enum class ScriptType : int { Legacy = 0, Server = 1, Client = 2 };
+
 struct WorkspacePart {
     std::string name = "Part";
     glm::vec3 position{0};
     glm::vec3 size{4, 1, 2};
-    glm::vec3 rotation{0}; // gradi Euler XYZ (Orientation)
+    glm::vec3 rotation{0};
     glm::vec3 color{0.64f, 0.64f, 0.64f};
     bool anchored = true;
-    bool canCollide = true; // false = No Collision (attraversa)
+    bool canCollide = true;
     bool useStud = true;
     PartShape shape = PartShape::Block;
     PartMaterial material = PartMaterial::Plastic;
-    /** 0 = opaco, 1+ = glow (Neon / ForceField). */
     float emissive = 0.f;
-    /** PointLight dinamico: illumina le parti vicine. */
     bool pointLight = false;
     float lightRange = 20.f;
     float lightBrightness = 1.25f;
-    /** Se false, Destroy/Explode/spada non rimuovono la Part. */
     bool canDestroy = true;
-    /** Vita residua (spada / esplosioni a catena). <=0 → Destroy. */
     float health = 100.f;
     float maxHealth = 100.f;
-    /** Se true, in Test il tocco/avvicinamento player fa boom C++ (anche senza Lua). */
     bool boomOnTouch = false;
-    /** Se > 0: in Test esplode da solo dopo N secondi (0 = solo al tocco). */
     float boomAutoSecs = 0.f;
-    std::string script; // Script Lua figlio (vuoto = nessuno)
+    std::string script;
+    ScriptType scriptType = ScriptType::Legacy;
 
     bool isNeon() const { return material == PartMaterial::Neon; }
     bool isTransparent() const {
@@ -67,7 +63,6 @@ struct WorkspacePart {
     }
 };
 
-/** Modello 3D importato nel Workspace (mesh esterna). */
 struct WorkspaceModel {
     std::string name = "Model";
     std::string sourcePath;
@@ -77,47 +72,31 @@ struct WorkspaceModel {
     glm::vec3 tint{1, 1, 1};
     ModelRigInfo rig;
     ModelAnimClip anim;
-    /** Tracce caricate dal file: walk, patrol, chase... comandate da Lua. */
     ModelAnimator animator;
-    /**
-     * Nome tuo → nome nel file. Blender esporta "Armature|ChasingAction": se
-     * lo script cerca quello, basta rinominare l'azione per romperlo. Con
-     * l'alias lo script dice "chase" e l'associazione si aggiusta in un punto
-     * solo. Vuoto = si usa la ricerca per sottostringa.
-     */
     std::map<std::string, std::string> clipAlias;
-    /** True se il file importato ha uno scheletro: deciso al caricamento. */
     bool rigged = false;
-    /**
-     * Blocca il player. Default false: i modelli finora non collidevano, e
-     * renderli solidi d'ufficio incastrerebbe il player dentro quelli
-     * decorativi dei place già salvati. Si accende quando serve.
-     */
     bool canCollide = false;
-    /** Script Lua figlio, stessa API di WorkspacePart::script (vuoto = nessuno). */
     std::string script;
+    ScriptType scriptType = ScriptType::Legacy;
 };
 
-/**
- * Label / TextLabel / TextButton — UI a schermo (ScreenGui), non testo 3D nel mondo.
- * Posizione = anchor (0..1 sullo schermo) + offset in pixel.
- * sizeW/sizeH = dimensioni box (0 = auto dal testo).
- */
 struct WorkspaceLabel {
     std::string name = "TextLabel";
     std::string text = "TextLabel";
-    std::string className = "TextLabel"; // "TextLabel" | "Label" | "TextButton"
+    std::string className = "TextLabel";
     float anchorX = 0.5f;
     float anchorY = 0.12f;
     float offsetX = 0.f;
     float offsetY = 0.f;
-    float sizeW = 0.f; // 0 = auto
+    float sizeW = 0.f;
     float sizeH = 0.f;
     glm::vec3 color{1.f, 1.f, 1.f};
-    float fontScale = 1.f;   // 0.5 – 2.5
-    glm::vec3 bgColor{0.f, 0.f, 0.f}; // background nero stile Roblox classico
-    float bgTransparency = 0.35f; // 0 = opaco, 1 = solo testo+outline
+    float fontScale = 1.f;
+    glm::vec3 bgColor{0.f, 0.f, 0.f};
+    float bgTransparency = 0.35f;
     bool visible = true;
+    std::string script;
+    ScriptType scriptType = ScriptType::Legacy;
 
     bool isButton() const {
         return className == "TextButton" || className == "Button";
@@ -129,30 +108,54 @@ struct SpawnLocation {
     float yaw = -90.f;
 };
 
-/** Player amico (NPC) nel place — in Test/Play segue il locale. */
 struct WorkspaceFriend {
     std::string name = "Amico";
     glm::vec3 position{0, 0, 0};
     float yaw = 180.f;
 };
 
-/** Tipo tool inventariato (Play/Test). */
 enum class BackpackTool : int {
     None = 0,
     Sword = 1,
     Pistol = 2,
+    Torch = 3,
 };
 
-/** Item nel Backpack del place (appare nell'inventario in Play/Test). */
+// Quanto si alza il braccio destro quando si ha qualcosa in mano.
+// Sta qui, in un posto solo, perche lo usano sia il disegno del corpo sia
+// quello della mesh tenuta: se i due numeri divergessero, l oggetto
+// resterebbe staccato dalla mano.
+// -90 = braccio orizzontale, puntato in avanti. Era -55, cioe alzato a meta:
+// un oggetto tenuto cosi sembra appoggiato al fianco invece che impugnato.
+inline constexpr float kEquippedArmHoldDeg = -90.f;
+
+// Lunghezza di riferimento di un oggetto tenuto in mano, in stud: circa quanto
+// un avambraccio del personaggio, che e la scala giusta per un attrezzo.
+inline constexpr float kGripTargetLen = 3.2f;
+
 struct BackpackItem {
     std::string id;
     std::string name = "Item";
-    int iconHue = 0; // 0..5 palette colore cerchio
+    int iconHue = 0;
     BackpackTool tool = BackpackTool::None;
-    /** Mesh opzionale (OBJ/GLB da Blender) per disegnare il tool in mano. */
     std::string meshPath;
-    /** AnimationId da tenere mentre e' equipaggiata (es. PistolFire). */
     std::string animId;
+
+    // Come l oggetto sta in mano (l equivalente del Grip di Roblox).
+    //
+    // Prima non esisteva: la mesh veniva piazzata con uno scostamento fisso e
+    // alla sua dimensione originale, quindi un modello importato poteva
+    // risultare minuscolo, gigantesco o girato di traverso, e non c era modo
+    // di correggerlo.
+    //
+    // gripScale MOLTIPLICA la dimensione adattata automaticamente, non quella
+    // grezza del file: 1 = come l adatta il motore, 2 = il doppio, 0.5 = meta.
+    // Cosi il numero significa sempre la stessa cosa a prescindere da come il
+    // modello e stato esportato, e "piu grande" e semplicemente un numero piu
+    // alto invece di un valore assoluto da indovinare.
+    glm::vec3 gripOffset{0.f};
+    glm::vec3 gripRotation{0.f};   // gradi, X Y Z
+    float     gripScale = 1.f;
 };
 
 inline glm::mat4 partRotationMatrix(const glm::vec3& rotDeg) {
@@ -163,7 +166,6 @@ inline glm::mat4 partRotationMatrix(const glm::vec3& rotDeg) {
     return r;
 }
 
-/** Model matrix: Translate * Rotate * Scale (stile Roblox). */
 inline glm::mat4 partModelMatrix(const WorkspacePart& p) {
     return glm::translate(glm::mat4(1.f), p.position)
          * partRotationMatrix(p.rotation)
@@ -178,12 +180,9 @@ public:
     std::vector<WorkspaceLabel> labels;
     std::vector<WorkspaceFriend> friends;
     std::vector<BackpackItem> backpack;
-    static constexpr int kHotbarSlots = 9; // slot 1-9 sempre selezionabili (anche vuoti)
-    int equippedBackpack = -1; // indice hotbar 0..8, -1 = nessuno (anche se slot empty)
+    static constexpr int kHotbarSlots = 9;
+    int equippedBackpack = -1;
     SpawnLocation spawn;
-    bool hasBaseplate = true;
-    glm::vec3 baseplateSize{120, 2, 120};
-    glm::vec3 baseplateColor{0.55f, 0.56f, 0.55f};
 
     void clear() {
         parts.clear();
@@ -192,11 +191,8 @@ public:
         friends.clear();
         backpack.clear();
         equippedBackpack = -1;
-        hasBaseplate = true;
         placeName = "Baseplate";
         spawn = SpawnLocation{};
-        baseplateSize = {120, 2, 120};
-        baseplateColor = {0.55f, 0.56f, 0.55f};
     }
 
     BackpackItem& addBackpackItem(const std::string& name, int hue = 0,
@@ -206,7 +202,6 @@ public:
         it.id = "bp_" + std::to_string(backpack.size() + 1) + "_" + it.name;
         it.iconHue = hue % 6;
         it.tool = tool;
-        // Nome → tool automatico
         if (it.tool == BackpackTool::None) {
             std::string low = it.name;
             for (char& c : low) c = (char)std::tolower((unsigned char)c);
@@ -215,12 +210,13 @@ public:
             else if (low.find("pistol") != std::string::npos || low.find("pistola") != std::string::npos
                      || low.find("gun") != std::string::npos || low.find("fucile") != std::string::npos)
                 it.tool = BackpackTool::Pistol;
+            else if (low.find("torch") != std::string::npos || low.find("torcia") != std::string::npos)
+                it.tool = BackpackTool::Torch;
         }
         backpack.push_back(std::move(it));
         return backpack.back();
     }
 
-    /** Slot hotbar 0..8. toggleSame=true → stesso tasto = deseleziona. Funziona anche se empty. */
     void equipBackpackSlot(int idx, bool toggleSame = true) {
         if (idx < 0 || idx >= kHotbarSlots) return;
         if (toggleSame && equippedBackpack == idx) equippedBackpack = -1;
@@ -242,6 +238,7 @@ public:
     void loadBaseplatePlace() {
         clear();
         placeName = "Baseplate";
+        addBaseplate({120, 2, 120}, {0.55f, 0.56f, 0.55f});
         addPart("Part", {8, 2, -4}, {4, 4, 4}, {0.64f, 0.64f, 0.64f});
         addLabel("Welcome", "Benvenuto su Blocky", 0.5f, 0.10f, {0.35f, 0.75f, 1.f});
     }
@@ -249,8 +246,7 @@ public:
     void loadGardenPlace() {
         clear();
         placeName = "Grow a Garden";
-        hasBaseplate = true;
-        baseplateColor = {0.25f, 0.62f, 0.28f};
+        addBaseplate({120, 2, 120}, {0.25f, 0.62f, 0.28f});
         for (int i = -1; i <= 1; ++i)
             for (int j = -1; j <= 1; ++j)
                 addPart("Plot_" + std::to_string(i) + "_" + std::to_string(j),
@@ -261,6 +257,7 @@ public:
     void loadObbyPlace() {
         clear();
         placeName = "Mega Obby";
+        addBaseplate({120, 2, 120}, {0.55f, 0.56f, 0.55f});
         for (int i = 0; i < 8; ++i)
             addPart("Step" + std::to_string(i),
                 {i * 4.f, 1.f + i * 1.5f, 0}, {3, 1, 3},
@@ -270,12 +267,10 @@ public:
         addLabel("Finish", "FINISH", 0.85f, 0.12f, {1.f, 0.4f, 0.3f}, "Label");
     }
 
-    /** Arena PvP: muri + piattaforme. */
     void loadArenaPlace() {
         clear();
         placeName = "Arena";
-        baseplateColor = {0.35f, 0.38f, 0.42f};
-        baseplateSize = {80, 2, 80};
+        addBaseplate({80, 2, 80}, {0.35f, 0.38f, 0.42f});
         addPart("WallN", {0, 4, -38}, {76, 8, 2}, {0.55f, 0.2f, 0.2f});
         addPart("WallS", {0, 4, 38}, {76, 8, 2}, {0.55f, 0.2f, 0.2f});
         addPart("WallE", {38, 4, 0}, {2, 8, 76}, {0.55f, 0.2f, 0.2f});
@@ -286,11 +281,10 @@ public:
         addLabel("ArenaTitle", "ARENA", 0.5f, 0.08f, {1.f, 0.55f, 0.25f});
     }
 
-    /** Parco: alberi stilizzati + laghetto. */
     void loadParkPlace() {
         clear();
         placeName = "Park";
-        baseplateColor = {0.28f, 0.68f, 0.32f};
+        addBaseplate({120, 2, 120}, {0.28f, 0.68f, 0.32f});
         auto tree = [&](float x, float z) {
             addPart("Trunk", {x, 2, z}, {1.2f, 4, 1.2f}, {0.42f, 0.26f, 0.12f});
             addPart("Leaves", {x, 5.5f, z}, {4, 3.5f, 4}, {0.18f, 0.55f, 0.22f});
@@ -302,12 +296,10 @@ public:
         addLabel("ParkSign", "PARCO BLOCKY", 0.5f, 0.10f, {0.95f, 0.95f, 1.f}, "Label");
     }
 
-    /** Città: strade + edifici semplici. */
     void loadCityPlace() {
         clear();
         placeName = "City";
-        baseplateColor = {0.32f, 0.34f, 0.36f};
-        baseplateSize = {140, 2, 140};
+        addBaseplate({140, 2, 140}, {0.32f, 0.34f, 0.36f});
         addPart("RoadX", {0, 0.15f, 0}, {120, 0.3f, 10}, {0.18f, 0.18f, 0.2f});
         addPart("RoadZ", {0, 0.15f, 0}, {10, 0.3f, 120}, {0.18f, 0.18f, 0.2f});
         for (int i = 0; i < 4; ++i) {
@@ -338,6 +330,16 @@ public:
         p.color = col;
         parts.push_back(std::move(p));
         return parts.back();
+    }
+
+    // La Baseplate e' semplicemente una Part chiamata "Baseplate" (come su
+    // Roblox) — nessun campo speciale: gizmo, materiale, script funzionano
+    // gia' perche' e' una WorkspacePart come le altre. Posizionata cosi' la
+    // faccia superiore resta a Y=0, come nel vecchio rendering fisso.
+    WorkspacePart& addBaseplate(glm::vec3 size, glm::vec3 col) {
+        WorkspacePart& p = addPart("Baseplate", {0.f, -size.y * 0.5f, 0.f}, size, col);
+        p.material = PartMaterial::Plastic;
+        return p;
     }
 
     WorkspaceModel& addModel(const std::string& name, const std::string& path, glm::vec3 pos) {

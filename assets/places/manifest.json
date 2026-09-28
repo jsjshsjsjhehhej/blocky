@@ -7,30 +7,6 @@
       "script": "scripts/baseplate.lua",
       "players": 1247,
       "accent": [0.20, 0.62, 0.35]
-    },
-    {
-      "id": "garden",
-      "title": "Grow a Garden",
-      "subtitle": "Pianta, cresci e raccogli",
-      "script": "scripts/garden.lua",
-      "players": 8932,
-      "accent": [0.15, 0.55, 0.22]
-    },
-    {
-      "id": "obby",
-      "title": "Mega Obby",
-      "subtitle": "Salta i blocchi rossi!",
-      "script": "scripts/obby.lua",
-      "players": 4521,
-      "accent": [0.75, 0.20, 0.15]
-    },
-    {
-      "id": "zombie_survival",
-      "title": "Zombie Survival",
-      "subtitle": "Sopravvivi alle ondate di zombie!",
-      "script": "scripts/zombie.lua",
-      "players": 666,
-      "accent": [0.20, 0.55, 0.20]
     }
   ]
 }

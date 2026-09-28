@@ -1,15 +1,5 @@
 #pragma once
 
-/**
- * Editor Lua di Blocky Studio.
- *
- * Lo script vive dentro la Part (`WorkspacePart::script`), come in gioco, e
- * gira sul LuaRuntime del progetto — stesso sandbox, stesse API, stesso budget
- * di istruzioni. Nessun interprete separato: quello che gira qui girerà uguale.
- *
- * print() di LuaRuntime scrive su stdout, e un eseguibile WIN32 non ha console:
- * qui stdout viene dirottato su una pipe e svuotato ogni frame nell'Output.
- */
 
 #include <imgui.h>
 
@@ -26,13 +16,12 @@
 #include "engine/LuaRuntime.h"
 #include "platform/CrashHandler.h"
 #include "studio/StudioIcons.h"
-#include "studio/StudioPanels.h"   // panelTitle
+#include "studio/StudioPanels.h"
 #include "studio/StudioState.h"
-#include "ui/StudioChrome.h"       // studioAccentButton
+#include "ui/StudioChrome.h"
 
 namespace studio {
 
-/** Dirotta stdout su una pipe e la legge senza bloccare. */
 struct StdoutCapture {
 #ifdef _WIN32
     int readFd = -1;
@@ -50,14 +39,11 @@ struct StdoutCapture {
         writeFd = fds[1];
         savedStdout = _dup(_fileno(stdout));
         if (_dup2(writeFd, _fileno(stdout)) != 0) return;
-        // Senza unbuffered le righe resterebbero nel buffer della CRT
-        // finché non si riempie, e l'Output sembrerebbe muto.
         setvbuf(stdout, nullptr, _IONBF, 0);
         active = true;
 #endif
     }
 
-    /** Aggiunge al log tutto ciò che è stato stampato dall'ultimo giro. */
     void drain(OutputLog& log) {
 #ifdef _WIN32
         if (!active) return;
@@ -100,12 +86,11 @@ struct StdoutCapture {
     }
 };
 
-/** Stato dell'editor di script, separato dal mondo. */
 struct ScriptEditor {
     LuaRuntime lua;
     StdoutCapture capture;
     std::vector<char> buffer;
-    int boundPart = -1;        // Part di cui stiamo editando lo script
+    int boundPart = -1;
     bool runtimeReady = false;
 
     ScriptEditor() { buffer.resize(16 * 1024, '\0'); }
@@ -119,7 +104,6 @@ struct ScriptEditor {
 
     void stop() { capture.end(); }
 
-    /** Carica lo script della Part nel buffer quando cambia la selezione. */
     void syncTo(StudioState& s) {
         if (s.selected == boundPart) return;
         boundPart = s.selected;
@@ -142,8 +126,6 @@ struct ScriptEditor {
             return;
         }
 
-        // Breadcrumb prima di eseguire: se lo script fa crashare il motore,
-        // il report deve dire quale script stava girando.
         {
             std::string crumb = "esegue script";
             if (const WorkspacePart* p = s.selectedPart()) crumb += " di " + p->name;
@@ -181,11 +163,26 @@ inline void drawScriptPanel(StudioState& s, ScriptEditor& editor) {
     }
     ImGui::SameLine();
 
-    if (part) ImGui::TextDisabled("Script di %s", part->name.c_str());
-    else      ImGui::TextDisabled("Nessuna Part — lo script gira sul mondo");
+    if (part) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Script di %s", part->name.c_str());
+
+        // Script (gira lato server) vs LocalScript (gira lato client), come
+        // in Roblox — prima il tipo esisteva solo come dato salvato
+        // (ScriptType) ma non si poteva scegliere da nessuna UI.
+        static const char* const kTypes[] = {"Script (Legacy)", "Script", "LocalScript"};
+        int typeIdx = (int)part->scriptType;
+        ImGui::SetNextItemWidth(160.f);
+        if (ImGui::Combo("Tipo", &typeIdx, kTypes, IM_ARRAYSIZE(kTypes))) {
+            part->scriptType = (ScriptType)typeIdx;
+            s.dirty = true;
+        }
+    } else {
+        ImGui::TextDisabled("Nessuna Part — lo script gira sul mondo");
+    }
 
     ImGui::InputTextMultiline("##code", editor.buffer.data(), editor.buffer.size(),
                               {-FLT_MIN, -FLT_MIN}, ImGuiInputTextFlags_AllowTabInput);
 }
 
-} // namespace studio
+}

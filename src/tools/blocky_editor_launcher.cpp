@@ -1,19 +1,15 @@
-/**
- * BlockyStudio.exe — lanciatore minimo dell'editor place.
- *
- * Stessa dll degli altri due, export Blocky_RunEditor(). Prima era un
- * eseguibile a sé con studio_main.cpp compilato per conto suo (il vantaggio
- * era iterare sull'editor senza ricompilare tutto main.cpp); ora
- * studio_main.cpp vive dentro libblocky.dll insieme al resto, quindi quel
- * vantaggio di velocità di build sparisce — resta solo la separazione dei
- * tre punti d'ingresso, ognuno con il proprio piccolo .exe.
- */
 
 #include <windows.h>
+#ifndef BLOCKY_DEV
+#include "AutoUpdater.h"
+#endif
 
 typedef int (*BlockyRunFn)();
 
 int main() {
+#ifndef BLOCKY_DEV
+    blk::AutoUpdater::tryAutoUpdate("Blocky Studio");
+#endif
     HMODULE dll = LoadLibraryA("libblocky.dll");
     if (!dll) {
         MessageBoxA(nullptr,

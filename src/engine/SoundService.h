@@ -1,9 +1,5 @@
 #pragma once
 
-/**
- * SoundService — audio stile Roblox (semplificato).
- * Windows: PlaySound (WAV) + MCI (mp3/ogg dove supportato).
- */
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,15 +7,16 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <mmsystem.h>
-#endif
+// I backend audio (PlaySound/MCI su Windows, OpenSL ES su Android) stanno
+// tutti dietro plat::sys. Questo file non include piu' <windows.h>: non deve
+// sapere su cosa gira, e' esattamente il punto.
+#include "platform/SystemApi.h"
+#include "platform/PlatformServices.h"
 
 struct SoundInstance {
     std::string name = "Sound";
-    std::string soundId; // percorso file .wav / .mp3
-    float volume = 1.f;  // 0..1 (best-effort)
+    std::string soundId;
+    float volume = 1.f;
     bool looped = false;
     bool playing = false;
 };
@@ -48,50 +45,23 @@ public:
             lastError = "SoundId vuoto";
             return false;
         }
-        stopAll(); // un canale alla volta (semplice)
-#ifdef _WIN32
-        std::string path = s.soundId;
-        for (char& c : path)
-            if (c == '/') c = '\\';
+        stopAll();
 
-        // WAV → PlaySound
-        std::string lower = path;
-        for (char& c : lower)
-            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        bool isWav = lower.size() >= 4 && lower.substr(lower.size() - 4) == ".wav";
-
-        if (isWav) {
-            DWORD flags = SND_FILENAME | SND_ASYNC | SND_NODEFAULT;
-            if (s.looped) flags |= SND_LOOP;
-            if (!PlaySoundA(path.c_str(), nullptr, flags)) {
-                lastError = "PlaySound fallito: " + path;
-                s.playing = false;
-                return false;
-            }
-        } else {
-            // MCI per mp3 ecc.
-            mciSendStringA("close blocky_snd", nullptr, 0, nullptr);
-            char cmd[1024];
-            std::snprintf(cmd, sizeof(cmd), "open \"%s\" type mpegvideo alias blocky_snd", path.c_str());
-            if (mciSendStringA(cmd, nullptr, 0, nullptr) != 0) {
-                // fallback: prova come waveaudio
-                std::snprintf(cmd, sizeof(cmd), "open \"%s\" alias blocky_snd", path.c_str());
-                if (mciSendStringA(cmd, nullptr, 0, nullptr) != 0) {
-                    lastError = "MCI open fallito: " + path;
-                    s.playing = false;
-                    return false;
-                }
-            }
-            mciSendStringA(s.looped ? "play blocky_snd repeat" : "play blocky_snd", nullptr, 0, nullptr);
+        // La piattaforma sa dire se l'audio esiste: usiamo quella risposta
+        // invece di scoprirlo da un #else dimenticato.
+        if (!plat::has(plat::Service::Audio)) {
+            lastError = "Audio non supportato su questa piattaforma";
+            s.playing = false;
+            return false;
+        }
+        if (!plat::sys::playSound(s.soundId, s.looped)) {
+            lastError = "Riproduzione fallita: " + s.soundId;
+            s.playing = false;
+            return false;
         }
         s.playing = true;
         lastError.clear();
         return true;
-#else
-        lastError = "Audio non supportato su questa piattaforma";
-        (void)s;
-        return false;
-#endif
     }
 
     bool playPath(const std::string& path, bool looped = false) {
@@ -103,12 +73,7 @@ public:
     }
 
     void stopAll() {
-#ifdef _WIN32
-        // SND_ASYNC|SND_PURGE: non blocca il thread (PlaySound(null) sincrono freezava la chiusura)
-        PlaySoundA(nullptr, nullptr, SND_ASYNC | SND_PURGE);
-        mciSendStringA("stop blocky_snd", nullptr, 0, nullptr);
-        mciSendStringA("close blocky_snd", nullptr, 0, nullptr);
-#endif
+        plat::sys::stopSound();
         for (auto& s : sounds) s.playing = false;
     }
 

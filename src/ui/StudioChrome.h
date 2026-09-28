@@ -1,8 +1,5 @@
 #pragma once
 
-/**
- * Chrome animato per Blocky Studio — pannelli, header, bottoni Create.
- */
 
 #include <imgui.h>
 #include <cmath>

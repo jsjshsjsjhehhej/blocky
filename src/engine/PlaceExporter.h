@@ -18,9 +18,21 @@
 #include <sys/stat.h>
 #endif
 
-/** Esporta place + Humanoid in JSON (formato Blocky). */
 class PlaceExporter {
 public:
+    static std::string escapeScript(const std::string& s) {
+        std::string o;
+        o.reserve(s.size() + 8);
+        for (unsigned char c : s) {
+            if (c == '\\') o += "\\\\";
+            else if (c == '"') o += "\\\"";
+            else if (c == '\n') o += "\\n";
+            else if (c == '\r') continue;
+            else o.push_back((char)c);
+        }
+        return o;
+    }
+
     static std::string exportPlace(const DataModel& dm, const Humanoid& humanoid,
                                    const glm::vec3& playerPos, float playerYaw,
                                    const LightingService* lighting = nullptr) {
@@ -49,9 +61,6 @@ public:
           << ",\"z\":" << playerPos.z << ",\"yaw\":" << playerYaw << "},\n";
         j << "  \"humanoid\": {\"health\":" << humanoid.health << ",\"maxHealth\":" << humanoid.maxHealth
           << ",\"walkSpeed\":" << humanoid.walkSpeed << ",\"jumpPower\":" << humanoid.jumpPower << "},\n";
-        j << "  \"baseplate\": {\"enabled\":" << (dm.hasBaseplate ? "true" : "false")
-          << ",\"size\":[" << dm.baseplateSize.x << "," << dm.baseplateSize.y << "," << dm.baseplateSize.z << "]"
-          << ",\"color\":[" << dm.baseplateColor.r << "," << dm.baseplateColor.g << "," << dm.baseplateColor.b << "]},\n";
         j << "  \"parts\": [\n";
         for (size_t i = 0; i < dm.parts.size(); ++i) {
             const auto& p = dm.parts[i];
@@ -70,7 +79,9 @@ public:
               << ",\"canDestroy\":" << (p.canDestroy ? "true" : "false")
               << ",\"health\":" << p.health
               << ",\"maxHealth\":" << p.maxHealth
-              << ",\"hasScript\":" << (p.script.empty() ? "false" : "true") << "}";
+              << ",\"hasScript\":" << (p.script.empty() ? "false" : "true")
+              << ",\"script\":\"" << escapeScript(p.script) << "\""
+              << ",\"scriptType\":" << (int)p.scriptType << "}";
             if (i + 1 < dm.parts.size()) j << ",";
             j << "\n";
         }
@@ -99,7 +110,12 @@ public:
               << "\",\"iconHue\":" << b.iconHue
               << ",\"tool\":" << (int)b.tool
               << ",\"meshPath\":\"" << b.meshPath << "\""
-              << ",\"animId\":\"" << b.animId << "\"}";
+              << ",\"animId\":\"" << b.animId << "\""
+              << ",\"gripOffset\":[" << b.gripOffset.x << "," << b.gripOffset.y
+              << "," << b.gripOffset.z << "]"
+              << ",\"gripRotation\":[" << b.gripRotation.x << "," << b.gripRotation.y
+              << "," << b.gripRotation.z << "]"
+              << ",\"gripScale\":" << b.gripScale << "}";
             if (i + 1 < dm.backpack.size()) j << ",";
             j << "\n";
         }

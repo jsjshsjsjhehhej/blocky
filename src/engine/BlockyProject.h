@@ -1,28 +1,5 @@
 #pragma once
 
-/**
- * Blocky Project Format — game engine professionale, giochi SOLO per Blocky.
- *
- * Struttura tipica di un progetto:
- *   MyGame/
- *     project.blocky.json     <- manifesto progetto
- *     places/
- *       main.place.json       <- place (BlockyPlace v1+)
- *     scripts/
- *       main.lua
- *     assets/
- *       meshes/ textures/ audio/
- *     packages/               <- build pubblicati (opzionale in repo)
- *
- * Un gioco pubblicato (runtime) vive in:
- *   %APPDATA%/Blocky/games/<gameId>/
- *     game.blocky.json
- *     place.json
- *     scripts/...
- *     assets/...
- *
- * Nessun export verso Roblox / Unity / Unreal: runtime ufficiale = Blocky.exe
- */
 
 #include "GameHub.h"
 #include "SafeBytecode.h"
@@ -86,22 +63,20 @@ inline std::string escapeJson(const std::string& s) {
     return o;
 }
 
-/** Manifesto progetto Studio. */
 struct ProjectManifest {
     std::string format = "BlockyProject";
     int version = 1;
     std::string name = "Nuovo Gioco";
-    std::string id;            // slug univoco
+    std::string id;
     std::string creator;
     std::string description;
     std::string mainPlace = "places/main.place.json";
     std::string mainScript = "scripts/main.lua";
     int maxPlayers = 8;
     std::string engineMin = "1.0.0";
-    bool blockyExclusive = true; // sempre true: solo runtime Blocky
+    bool blockyExclusive = true;
 };
 
-/** Pacchetto gioco installabile nel hub. */
 struct GamePackage {
     std::string format = "BlockyGame";
     int version = 1;
@@ -181,7 +156,6 @@ inline bool copyFileBinary(const std::string& from, const std::string& to) {
     return (bool)out;
 }
 
-/** Crea una cartella progetto Studio pronta all'uso. */
 inline bool createNewProject(const std::string& rootDir, ProjectManifest m,
                              const std::string& starterPlaceJson = {}) {
     if (m.id.empty()) m.id = slugify(m.name);
@@ -238,10 +212,6 @@ inline bool createNewProject(const std::string& rootDir, ProjectManifest m,
     return true;
 }
 
-/**
- * Pubblica un place + script come Game Package installabile nel hub Blocky.
- * Ritorna il percorso della cartella gioco, o stringa vuota se fallisce.
- */
 inline std::string publishGamePackage(const GamePackage& pkgIn,
                                       const std::string& placeJson,
                                       const std::string& scriptSource = {}) {
@@ -261,7 +231,6 @@ inline std::string publishGamePackage(const GamePackage& pkgIn,
     if (!writeTextFile(joinPath(dir, "place.json"), placeJson))
         return {};
     if (!scriptSource.empty()) {
-        // Sorgente Lua (dev) + Safe Bytecode sigillato (Play)
         writeTextFile(joinPath(dir, "scripts\\main.lua"), scriptSource);
         std::string bbcPath = joinPath(dir, "scripts\\main.bbc");
         std::string err;
@@ -277,7 +246,6 @@ inline std::string publishGamePackage(const GamePackage& pkgIn,
     return dir;
 }
 
-/** Elenca i game package installati (cartelle con game.blocky.json). */
 inline std::vector<GamePackage> listInstalledGames() {
     std::vector<GamePackage> out;
     std::string root = gamesInstallDir();
@@ -313,7 +281,6 @@ inline std::vector<GamePackage> listInstalledGames() {
     return out;
 }
 
-/** Converte un GamePackage installato in GameEntry per l'hub. */
 inline GameEntry toGameEntry(const GamePackage& g) {
     GameEntry e;
     e.id = g.id;
@@ -325,7 +292,6 @@ inline GameEntry toGameEntry(const GamePackage& g) {
     std::string dir = joinPath(gamesInstallDir(), g.id);
     e.placePath = joinPath(dir, g.placeFile.empty() ? "place.json" : g.placeFile);
     e.accent = {0.12f, 0.48f, 0.92f};
-    // Preferisci Safe Bytecode sigillato, poi Lua
     std::string bbc = joinPath(dir, "scripts\\main.bbc");
     std::string lua = joinPath(dir, g.scriptFile.empty() ? "scripts/main.lua" : g.scriptFile);
     if (fileExistsPath(bbc) && SafeBytecode::looksLikeBbcMagic(bbc))
@@ -337,4 +303,4 @@ inline GameEntry toGameEntry(const GamePackage& g) {
     return e;
 }
 
-} // namespace BlockyProject
+}

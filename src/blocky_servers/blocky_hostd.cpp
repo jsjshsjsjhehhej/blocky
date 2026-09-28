@@ -1,22 +1,3 @@
-/**
- * blocky_hostd — server di hosting per i giochi pubblicati.
- *
- *   blocky_hostd.exe [--port 8080] [--root ./hosted]
- *
- * Due responsabilità, non di più:
- *   - GET  serve i file statici di un gioco già pubblicato (game_index.json,
- *     place.json, assets/...)
- *   - PUT /publish/<id>  riceve un .zip, lo estrae, lo valida con
- *     GamePublish e lo rende visibile solo se passa l'audit
- *
- * Non esegue Lua, non simula fisica, non sincronizza giocatori — quello resta
- * lavoro di BlockyServer.exe. Questo è un magazzino con un controllo qualità
- * all'ingresso, non un motore di gioco.
- *
- * Solo LAN/uso da studio: niente TLS, thread per connessione senza limite di
- * concorrenza. Non va esposto direttamente su internet senza un reverse
- * proxy davanti.
- */
 
 #include <algorithm>
 #include <cstdio>
@@ -30,6 +11,8 @@
 #include <vector>
 
 #include "engine/GamePublish.h"
+#include "engine/ServerToken.h"
+#include "platform/SystemApi.h"
 #include "engine/HttpMini.h"
 
 namespace fs = std::filesystem;
@@ -37,10 +20,13 @@ namespace fs = std::filesystem;
 namespace {
 
 std::string g_root = "./hosted";
-int g_port = 8080;
-std::mutex g_publishMutex;   // un publish alla volta: e' un'operazione rara, non serve di piu'
 
-/** True se `id` è sicuro da usare come nome di cartella diretto. */
+// Segreto condiviso per le rotte che SCRIVONO. Le GET restano aperte: i
+// giocatori devono poter vedere e scaricare i giochi.
+std::string g_token;
+int g_port = 8080;
+std::mutex g_publishMutex;
+
 bool safeId(const std::string& id) {
     if (id.empty() || id.size() > 128) return false;
     for (char c : id) {
@@ -49,11 +35,6 @@ bool safeId(const std::string& id) {
     return true;
 }
 
-/**
- * Risolve `relPath` dentro `root` e verifica che il risultato resti sotto
- * `root` una volta canonicalizzato. Un ".." nell'URL o un symlink non deve
- * poter far uscire dalla cartella ospitata.
- */
 bool safeJoin(const std::string& root, const std::string& relPath, fs::path& outPath) {
     std::error_code ec;
     const fs::path rootCanon = fs::weakly_canonical(root, ec);
@@ -67,7 +48,6 @@ bool safeJoin(const std::string& root, const std::string& relPath, fs::path& out
     const std::string candStr = candidateCanon.generic_string();
     if (candStr.size() < rootStr.size()) return false;
     if (candStr.compare(0, rootStr.size(), rootStr) != 0) return false;
-    // Deve essere un confine di cartella vero, non "rootX" che combacia come prefisso di "root".
     if (candStr.size() > rootStr.size() && candStr[rootStr.size()] != '/') return false;
 
     outPath = candidateCanon;
@@ -84,7 +64,6 @@ std::string jsonEscape(const std::string& s) {
     return o;
 }
 
-/** GET / — stato in testo semplice, utile con un browser o curl a mano. */
 void handleRoot(SOCKET s) {
     std::error_code ec;
     int count = 0;
@@ -100,12 +79,91 @@ void handleRoot(SOCKET s) {
          << "giochi ospitati  " << count << "\n\n"
          << "GET  /games                    elenco in JSON\n"
          << "GET  /games/<id>/game_index.json\n"
-         << "PUT  /publish/<id>             body = archivio .zip\n";
+         << "PUT  /publish/<id>             body = archivio .zip\n"
+         << "GET  /catalog                  item del catalogo in JSON\n"
+         << "GET  /catalog/<file>           mesh di un item\n"
+         << "PUT  /catalog                  body = archivio .zip del catalogo\n";
     HttpMini::sendText(s, 200, "OK", body.str());
 }
 
-/** GET /games — catalogo: legge il game_index.json di ognuno, non li ricostruisce. */
-void handleCatalog(SOCKET s) {
+/** Estrae "chiave": "valore" da un JSON semplice. Piccolo apposta: qui i file
+ *  sono scritti da noi, non arrivano da Internet. */
+std::string jsonStr(const std::string& json, const char* key) {
+    const std::string pat = std::string("\"") + key + "\"";
+    size_t k = json.find(pat);
+    if (k == std::string::npos) return {};
+    k = json.find(':', k + pat.size());
+    if (k == std::string::npos) return {};
+    const size_t open = json.find('"', k);
+    if (open == std::string::npos) return {};
+    std::string out;
+    for (size_t i = open + 1; i < json.size(); ++i) {
+        if (json[i] == '\\' && i + 1 < json.size()) { out += json[i + 1]; ++i; continue; }
+        if (json[i] == '"') break;
+        out += json[i];
+    }
+    return out;
+}
+
+std::string jsonEsc(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if (c == '\n') o += "\\n";
+        else if ((unsigned char)c < 0x20) continue;
+        else o += c;
+    }
+    return o;
+}
+
+/** Il primo file che nella cartella del gioco somiglia a un'anteprima. */
+std::string findThumbnail(const std::filesystem::path& dir) {
+    std::error_code ec;
+    const char* preferred[] = { "thumbnail.png", "thumb.png", "icon.png",
+                                "thumbnail.jpg", "icon.jpg" };
+    for (const char* name : preferred) {
+        if (fs::exists(dir / name, ec)) return name;
+    }
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        std::string ext = e.path().extension().string();
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg")
+            return e.path().filename().string();
+    }
+    return {};
+}
+
+/** Il file del mondo, con i nomi che il client puo' aspettarsi. */
+std::string findPlaceFileName(const std::filesystem::path& dir) {
+    std::error_code ec;
+    const char* names[] = { "place.blockyplace", "place.blocky", "place.json" };
+    for (const char* n : names) {
+        if (fs::exists(dir / n, ec)) return n;
+    }
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        const std::string ext = e.path().extension().string();
+        if (ext == ".blockyplace" || ext == ".blocky")
+            return e.path().filename().string();
+    }
+    return {};
+}
+
+/**
+ * GET /games — l elenco dei giochi.
+ *
+ * Prima qui si incollavano uno dietro l'altro i game_index.json interi: file
+ * grossi, pieni di collider e checksum, che al client per disegnare una card
+ * non servono a niente. Ora esce un elenco pulito con solo cio' che la pagina
+ * Games mostra davvero — nome, descrizione, anteprima — piu' il nome del file
+ * del mondo da scaricare quando si preme PLAY.
+ *
+ * I dati vengono da info.json se il gioco ce l'ha; altrimenti si ricavano dal
+ * game_index.json, cosi' i giochi pubblicati prima di questo formato
+ * continuano a comparire senza doverli ripubblicare.
+ */
+void handleGamesIndex(SOCKET s) {
     std::error_code ec;
     std::ostringstream j;
     j << "[";
@@ -115,28 +173,44 @@ void handleCatalog(SOCKET s) {
         for (const auto& entry : fs::directory_iterator(g_root, ec)) {
             if (!entry.is_directory(ec)) continue;
             const std::string name = entry.path().filename().string();
-            if (name.empty() || name[0] == '.') continue;   // salta .staging, .old_*
+            if (name.empty() || name[0] == '.') continue;
 
-            const fs::path idxPath = entry.path() / "game_index.json";
-            if (!fs::exists(idxPath, ec)) continue;
+            const std::string info = GamePublish::readTextFile((entry.path() / "info.json").string());
+            const std::string index = GamePublish::readTextFile((entry.path() / "game_index.json").string());
+            if (info.empty() && index.empty()) continue;
 
-            const std::string content = GamePublish::readTextFile(idxPath.string());
-            if (content.empty()) continue;
+            std::string id = jsonStr(info, "id");
+            if (id.empty()) id = jsonStr(index, "gameId");
+            if (id.empty()) id = name;
+
+            std::string title = jsonStr(info, "name");
+            if (title.empty()) title = jsonStr(info, "title");
+            if (title.empty()) title = jsonStr(index, "title");
+            if (title.empty()) title = id;
+
+            std::string desc = jsonStr(info, "description");
+            if (desc.empty()) desc = jsonStr(info, "subtitle");
+
+            std::string thumb = jsonStr(info, "thumbnail");
+            if (thumb.empty()) thumb = findThumbnail(entry.path());
+
+            std::string place = jsonStr(info, "place");
+            if (place.empty()) place = findPlaceFileName(entry.path());
 
             if (!first) j << ",";
             first = false;
-            // Non ri-parsiamo il JSON già scritto da GameIndex: lo passiamo
-            // così com'è, come oggetto della lista.
-            j << content;
+            j << "{\"id\":\"" << jsonEsc(id) << "\""
+              << ",\"title\":\"" << jsonEsc(title) << "\""
+              << ",\"description\":\"" << jsonEsc(desc) << "\""
+              << ",\"thumbnail\":\"" << jsonEsc(thumb) << "\""
+              << ",\"place\":\"" << jsonEsc(place) << "\"}";
         }
     }
     j << "]";
     HttpMini::sendJson(s, 200, "OK", j.str());
 }
 
-/** GET /games/<id>/<resto...> — file statico di un gioco pubblicato. */
 void handleGameFile(SOCKET s, const std::string& path) {
-    // path è già senza il prefisso "/games/"
     const size_t slash = path.find('/');
     const std::string id = slash == std::string::npos ? path : path.substr(0, slash);
     const std::string rest = slash == std::string::npos ? "" : path.substr(slash + 1);
@@ -170,7 +244,100 @@ void handleGameFile(SOCKET s, const std::string& path) {
     }
 }
 
-/** PUT /publish/<id> — riceve un .zip, valida, pubblica solo se pulito. */
+
+// ---- Catalogo degli item ----------------------------------------------
+//
+// Stessa idea dei giochi: il catalogo che un giocatore costruisce sul PC vive
+// solo su quel computer, quindi aprendo Blocky dal telefono i suoi item non
+// esistono. Qui il server ne tiene una copia e la serve a chiunque.
+//
+// Vive in una cartella col punto davanti (".catalog") cosi' non compare
+// nell'elenco dei giochi: quel ciclo salta di proposito le cartelle che
+// iniziano con un punto.
+
+std::string catalogDir() { return (fs::path(g_root) / ".catalog").string(); }
+
+void handleCatalogIndex(SOCKET s) {
+    const std::string json = GamePublish::readTextFile((fs::path(catalogDir()) / "catalog.json").string());
+    if (json.empty()) {
+        // Nessun catalogo pubblicato non e' un errore: e' un elenco vuoto, e il
+        // client lo tratta come "niente da aggiungere" senza doversene accorgere.
+        HttpMini::sendJson(s, 200, "OK", "{\"items\":[]}");
+        return;
+    }
+    HttpMini::sendJson(s, 200, "OK", json);
+}
+
+void handleCatalogFile(SOCKET s, const std::string& relFile) {
+    fs::path filePath;
+    if (relFile.empty() || !safeJoin(catalogDir(), relFile, filePath)) {
+        HttpMini::sendText(s, 400, "Bad Request", "percorso non valido");
+        return;
+    }
+    std::error_code ec;
+    if (!fs::is_regular_file(filePath, ec)) {
+        HttpMini::sendText(s, 404, "Not Found", "file non trovato: " + relFile);
+        return;
+    }
+    if (!HttpMini::sendFile(s, filePath.string()))
+        HttpMini::sendText(s, 500, "Internal Server Error", "lettura fallita");
+}
+
+void handleCatalogPublish(SOCKET s, const std::vector<std::uint8_t>& body) {
+    if (body.empty()) {
+        HttpMini::sendJson(s, 400, "Bad Request", "{\"ok\":false,\"error\":\"body vuoto\"}");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_publishMutex);
+    std::error_code ec;
+    const fs::path dir = catalogDir();
+
+    // Si sostituisce in blocco invece di fondere: il catalogo e' uno solo, e
+    // lasciare in giro i file di una versione precedente significherebbe
+    // servire mesh che nessun item nomina piu'.
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    if (ec) {
+        HttpMini::sendJson(s, 500, "Internal Server Error",
+                           "{\"ok\":false,\"error\":\"cartella non creata\"}");
+        return;
+    }
+
+    const ZipArchive::ExtractResult unz = ZipArchive::extractFromMemory(body, dir.string());
+    if (!unz.ok || unz.entries == 0) {
+        HttpMini::sendJson(s, 422, "Unprocessable Entity",
+                           "{\"ok\":false,\"error\":\"archivio non valido\"}");
+        return;
+    }
+
+    std::printf("[catalogo] aggiornato: %d file\n", unz.entries);
+    std::ostringstream j;
+    j << "{\"ok\":true,\"files\":" << unz.entries << "}";
+    HttpMini::sendJson(s, 200, "OK", j.str());
+}
+
+
+/**
+ * Chi scrive deve conoscere il segreto.
+ *
+ * Solo le rotte che modificano il server: le GET restano aperte, perche'
+ * servono ai giocatori per vedere e scaricare i giochi.
+ *
+ * Il messaggio di errore non dice MAI se il token era assente, corto o
+ * sbagliato: a chi prova a indovinare non si regalano indizi.
+ */
+bool writeAllowed(SOCKET s, const HttpMini::Request& req) {
+    const std::string given = req.header("x-blocky-token");
+    if (!g_token.empty() && blk::servertoken::equalsConstantTime(given, g_token))
+        return true;
+
+    HttpMini::sendJson(s, 401, "Unauthorized",
+                       "{\"ok\":false,\"error\":\"token mancante o non valido\"}");
+    std::printf("[hostd] scrittura RIFIUTATA su %s\n", req.path.c_str());
+    return false;
+}
+
 void handlePublish(SOCKET s, const std::string& id, const std::vector<std::uint8_t>& body) {
     if (!safeId(id)) {
         HttpMini::sendJson(s, 400, "Bad Request", "{\"ok\":false,\"error\":\"id non valido\"}");
@@ -202,8 +369,6 @@ void handlePublish(SOCKET s, const std::string& id, const std::vector<std::uint8
 }
 
 void handleConnection(SOCKET client) {
-    // Timeout: un client lento o silenzioso non deve bloccare il thread per
-    // sempre. 20s è generoso per un upload di un pacchetto di gioco su LAN.
     const DWORD timeoutMs = 20000;
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
@@ -211,8 +376,6 @@ void handleConnection(SOCKET client) {
     HttpMini::Request req;
     std::string err;
     if (!HttpMini::parseRequest(client, req, err)) {
-        // Niente risposta: se la connessione è già a pezzi, provarci
-        // peggiorerebbe soltanto le cose.
         closesocket(client);
         return;
     }
@@ -220,12 +383,22 @@ void handleConnection(SOCKET client) {
     if (req.method == "GET" && req.path == "/") {
         handleRoot(client);
     } else if (req.method == "GET" && req.path == "/games") {
-        handleCatalog(client);
+        handleGamesIndex(client);
     } else if (req.method == "GET" && req.path.rfind("/games/", 0) == 0) {
         handleGameFile(client, req.path.substr(7));
+    } else if (req.method == "GET" && req.path == "/catalog") {
+        handleCatalogIndex(client);
+    } else if (req.method == "GET" && req.path.rfind("/catalog/", 0) == 0) {
+        handleCatalogFile(client, req.path.substr(9));
+    } else if ((req.method == "PUT" || req.method == "POST") && req.path == "/catalog") {
+        // Niente return anticipato: in fondo alla funzione c'e' la
+        // closesocket, e saltarla perderebbe un socket a ogni tentativo
+        // respinto — cioe' un modo per mettere in ginocchio il server
+        // proprio sbagliando il token.
+        if (writeAllowed(client, req)) handleCatalogPublish(client, req.body);
     } else if ((req.method == "PUT" || req.method == "POST") &&
               req.path.rfind("/publish/", 0) == 0) {
-        handlePublish(client, req.path.substr(9), req.body);
+        if (writeAllowed(client, req)) handlePublish(client, req.path.substr(9), req.body);
     } else {
         HttpMini::sendText(client, 404, "Not Found", "rotta sconosciuta: " + req.path);
     }
@@ -233,18 +406,20 @@ void handleConnection(SOCKET client) {
     closesocket(client);
 }
 
-} // namespace
+}
 
 int main(int argc, char** argv) {
-    // Senza, l'output resta nel buffer finché il processo non esce: un
-    // demone a lunga vita con stdout rediretto su file sembrerebbe muto.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) g_port = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--root") == 0 && i + 1 < argc) g_root = argv[++i];
+        else if (std::strcmp(argv[i], "--token") == 0 && i + 1 < argc) g_token = argv[++i];
         else if (std::strcmp(argv[i], "--help") == 0) {
-            std::printf("blocky_hostd [--port 8080] [--root ./hosted]\n");
+            std::printf("blocky_hostd [--port 8080] [--root ./hosted] [--token X]\n"
+                        "  Le rotte PUT richiedono l'intestazione X-Blocky-Token.\n"
+                        "  Senza --token si usa BLOCKY_TOKEN, poi <root>/.token,\n"
+                        "  e se non esiste ne viene creato uno al primo avvio.\n");
             return 0;
         }
     }
@@ -252,9 +427,29 @@ int main(int argc, char** argv) {
     std::error_code ec;
     fs::create_directories(g_root, ec);
 
-    WSADATA wsa{};
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::fprintf(stderr, "WSAStartup fallita\n");
+    // Il token si carica PRIMA di aprire la porta: il server non deve mai
+    // restare in ascolto senza protezione, nemmeno per un istante.
+    {
+        bool created = false;
+        g_token = blk::servertoken::loadOrCreate(g_root, g_token, created);
+        if (created) {
+            std::printf(
+                "\n  ATTENZIONE - creato un nuovo token di pubblicazione:\n\n"
+                "    %s\n\n"
+                "  Scrivilo in Studio (Server giochi) per poter pubblicare.\n"
+                "  E' salvato in %s/.token - chi lo legge puo' pubblicare.\n\n",
+                g_token.c_str(), g_root.c_str());
+        } else {
+            std::printf("[hostd] token di pubblicazione caricato (%d caratteri)\n",
+                        (int)g_token.size());
+        }
+    }
+
+    // Era WSAStartup diretta, SENZA #ifdef: questo file non compilava proprio
+    // su Linux, cioe' sul sistema di qualunque VPS. plat::sys::netInit fa la
+    // cosa giusta su Windows e non fa nulla altrove.
+    if (!plat::sys::netInit()) {
+        std::fprintf(stderr, "rete di sistema non inizializzabile\n");
         return 1;
     }
 
@@ -265,8 +460,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Riuso immediato della porta dopo un riavvio: senza, resta in TIME_WAIT
-    // e il server non ripartirebbe per un minuto o due.
     BOOL reuse = TRUE;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 

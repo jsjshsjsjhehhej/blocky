@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glad/gl.h>
+#include "render/GlslPortable.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -10,10 +11,6 @@
 #include <algorithm>
 #include <vector>
 
-/**
- * Cielo Roblox-like: gradient 2D a schermo intero + sole billboard con texture 2D
- * e shading (alone caldo + alone soft).
- */
 struct SunSky {
     GLuint skyProg = 0;
     GLuint sunProg = 0;
@@ -26,7 +23,9 @@ struct SunSky {
 
     static GLuint compile(GLenum type, const char* src) {
         GLuint s = glCreateShader(type);
-        glShaderSource(s, 1, &src, nullptr);
+        const std::string portableSrc = glslForTarget(src);
+        const char* srcPtr = portableSrc.c_str();
+        glShaderSource(s, 1, &srcPtr, nullptr);
         glCompileShader(s);
         GLint ok = 0;
         glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
@@ -48,7 +47,6 @@ struct SunSky {
         return p;
     }
 
-    /** Texture 2D procedurale: disco sole + alone (stile classic Roblox). */
     void buildSunTexture(int size = 256) {
         texSize = size;
         std::vector<unsigned char> px((size_t)size * size * 4);
@@ -99,7 +97,6 @@ struct SunSky {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     }
 
-    /** Luna: disco freddo con alone tenue e due crateri appena accennati. */
     void buildMoonTexture(int size = 256) {
         std::vector<unsigned char> px((size_t)size * size * 4);
         float cx = (size - 1) * 0.5f;
@@ -114,7 +111,6 @@ struct SunSky {
                 float rf = 0.88f, gf = 0.92f, bf = 1.f;
                 if (r <= coreR) {
                     a = 1.f;
-                    // crateri: due macchie leggermente più scure
                     float c1 = std::sqrt((dx + coreR * 0.30f) * (dx + coreR * 0.30f)
                                        + (dy - coreR * 0.22f) * (dy - coreR * 0.22f));
                     float c2 = std::sqrt((dx - coreR * 0.34f) * (dx - coreR * 0.34f)
@@ -176,6 +172,16 @@ void main(){
   float day = 1.0 - uNight;
   sky += vec3(1.0, 0.85, 0.45) * pow(sunAmt, 32.0) * 0.35 * day;
   sky += vec3(1.0, 0.70, 0.30) * pow(sunAmt, 8.0) * 0.10 * day;
+  // Scattering direzionale semplificato (Rayleigh/Mie): quando il sole e'
+  // basso, l'orizzonte si scalda specificamente verso il suo azimut invece
+  // che restare un alone puntiforme sul disco — l'alba/tramonto "si spande".
+  vec3 sunN = normalize(uSunDir);
+  vec2 sunFlat = normalize(sunN.xz + vec2(1e-5));
+  vec2 dirFlat = normalize(dir.xz + vec2(1e-5));
+  float azimuthAmt = max(dot(dirFlat, sunFlat), 0.0);
+  float lowSun = 1.0 - clamp(abs(sunN.y) * 3.0, 0.0, 1.0);
+  float horizonBand = 1.0 - h;
+  sky += vec3(1.0, 0.42, 0.16) * pow(azimuthAmt, 3.0) * lowSun * horizonBand * 0.5;
   // Stelle: griglia su direzione, solo sopra l'orizzonte e solo di notte
   if(uNight > 0.02 && dir.y > 0.0){
     vec2 cell = floor(dir.xz / max(abs(dir.y), 0.25) * 46.0);
@@ -240,10 +246,6 @@ void main(){
         ready = false;
     }
 
-    /**
-     * toSun = direzione VERSO il sole (può stare sotto l'orizzonte: allora sorge la luna).
-     * night = 0 pieno giorno … 1 piena notte. zenith/horizon = colori cielo per quell'ora.
-     */
     void draw(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& toSun,
               const glm::vec3& camPos, float night = 0.f,
               const glm::vec3& zenith = glm::vec3(0.42f, 0.65f, 0.95f),
@@ -260,7 +262,6 @@ void main(){
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
 
-        // —— Cielo gradient + alone + stelle ——
         glUseProgram(skyProg);
         glUniform3fv(glGetUniformLocation(skyProg, "uZenith"), 1, glm::value_ptr(zenith));
         glUniform3fv(glGetUniformLocation(skyProg, "uHorizon"), 1, glm::value_ptr(horizon));
@@ -271,7 +272,6 @@ void main(){
         glBindVertexArray(quadVao);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        // Basis camera-facing condivisa dai due billboard
         glm::vec3 camRight = glm::normalize(glm::vec3(view[0][0], view[1][0], view[2][0]));
         glm::vec3 camUp = glm::normalize(glm::vec3(view[0][1], view[1][1], view[2][1]));
         glEnable(GL_BLEND);
@@ -281,7 +281,6 @@ void main(){
 
         auto drawBody = [&](const glm::vec3& dir, GLuint tex, float size, float brightness,
                             float extraFade) {
-            // sotto l'orizzonte: sparisce con una dissolvenza corta
             float fade = std::clamp((dir.y + 0.06f) * 9.f, 0.f, 1.f) * extraFade;
             if (fade <= 0.001f) return;
             glm::mat4 model(1.f);
@@ -301,7 +300,6 @@ void main(){
         };
 
         drawBody(sunDir, sunTex, 32.f, 1.05f, 1.f);
-        // di giorno la luna resta appena accennata
         drawBody(moonDir, moonTex, 24.f, 0.95f, 0.15f + 0.85f * night);
 
         glDisable(GL_BLEND);

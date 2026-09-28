@@ -1,12 +1,12 @@
 #pragma once
 
-extern "C" {
 #include "lua.h"
 #include "lualib.h"
-#include "lauxlib.h"
-}
+#include <Luau/Compiler.h>
 
 #include "DataModel.h"
+#include "DataStore.h"
+#include "GameHub.h"
 #include "Humanoid.h"
 #include "NavGrid.h"
 #include "SoundService.h"
@@ -18,6 +18,7 @@ extern "C" {
 #include "AnimLibrary.h"
 #include "LanNet.h"
 #include "LuaScriptSecurity.h"
+#include "platform/CrashHandler.h"
 
 #include <GLFW/glfw3.h>
 #include <chrono>
@@ -25,27 +26,17 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <map>
-#include <fstream>   // runFile pesa il contenuto, non il path
+#include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <glm/glm.hpp>
 
-/**
- * Runtime Lua Blocky (sandbox + budget + anti-executor) + Safe Bytecode (BBCS).
- *
- * API ordinata (stile Roblox, facile):
- *   Vector3 / Color3 / Instance.new
- *   workspace · game:GetService(...)
- *   Part live (Position, Size, Orientation, Touched, Destroy, Explode)
- *   task.wait / task.spawn / task.delay · wait()
- *   Particles · Humanoid · Events · RemoteEvent · Animator · Sound
- *   Explode = API Blocky (non Lua vanilla): part:Explode() / Particles:Explode(pos)
- *
- * Sicurezza: niente io/os/debug/load/require; API congelata; stats clamp;
- * Play preferisce .bbc sigillato.
- */
+// blockyPushCFunction e blockyLuaError sono definiti in LuaScriptSecurity.h
+// (incluso sopra) perche' quel file ne ha bisogno prima che questa classe
+// esista.
+
 class LuaRuntime {
 public:
     DataModel* workspace = nullptr;
@@ -54,43 +45,31 @@ public:
     LightingService* lighting = nullptr;
     ParticleSystem* particles = nullptr;
     LanNet* net = nullptr;
-    /** Player in Play/Test — danno da esplosione (opzionale). */
     Humanoid* playerHumanoid = nullptr;
     glm::vec3* playerPos = nullptr;
-    /** Griglia di navigazione, posseduta dal motore. Null = niente FindPath. */
     NavGrid* nav = nullptr;
-    /** Richiamata dal motore per ricostruire la griglia quando la scena cambia. */
     void (*navRebuild)() = nullptr;
-    /** Impostato dal motore: fa tremare la camera. magnitudeDeg = ampiezza
-     *  di picco in gradi, durationSec = quanto dura prima di spegnersi. */
     void (*cameraShake)(float magnitudeDeg, float durationSec) = nullptr;
-    float* playerYaw = nullptr;   // gradi, direzione sguardo (per mira/pistola)
+    float* playerYaw = nullptr;
     std::string lastError;
     bool ok = false;
 
-    // --- Registro degli script eseguiti ---
-    // Ogni chunk che entra nella VM viene pesato qui. Il client manda questi
-    // hash al server, che li confronta con quelli del gioco: uno che non
-    // c'entra e' uno script iniettato da un executor.
-    // Sta in LuaRuntime e non altrove perche' qui passano TUTTI i percorsi
-    // (runString / runFile / runBytecode); un registro tenuto fuori si
-    // aggirerebbe chiamando l'entrata che si e' dimenticata.
     std::vector<uint32_t> scriptHashes;
-    std::vector<std::string> scriptOrigins;   // parallelo, per il log
-    bool scriptSetChanged = false;            // il client deve rimandare il report
+    std::vector<std::string> scriptOrigins;
+    bool scriptSetChanged = false;
 
     static uint32_t hashChunk(const void* data, size_t n) {
         const unsigned char* p = (const unsigned char*)data;
         uint32_t h = 2166136261u;
         for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 16777619u; }
-        return h ? h : 1u;               // 0 riservato a "vuoto"
+        return h ? h : 1u;
     }
 
     void noteScript(const void* data, size_t n, const std::string& origin) {
         if (!data || !n) return;
         uint32_t h = hashChunk(data, n);
         for (uint32_t x : scriptHashes)
-            if (x == h) return;          // gia' registrato
+            if (x == h) return;
         if (scriptHashes.size() >= 256) return;
         scriptHashes.push_back(h);
         scriptOrigins.push_back(origin);
@@ -102,9 +81,22 @@ public:
         scriptOrigins.clear();
         scriptSetChanged = true;
     }
-    int budgetUs = 4000; // microsecondi/frame (da QualityProfile)
+    int budgetUs = 4000;
     bool budgetExceeded = false;
-    bool requireSealedScripts = false; // Play: solo .bbc (o assets/ trusted)
+    bool requireSealedScripts = false;
+    // Quando e' iniziata la chiamata Lua in corso — impostato all'inizio
+    // di ogni ingresso (runString/runFile/runBytecode/ogni heartbeat) e
+    // controllato dal callback interrupt per il limite duro anti-loop.
+    std::chrono::steady_clock::time_point callStart_ = std::chrono::steady_clock::now();
+    // true SOLO durante init()/registerApi()/openSandboxLibs(): quelle
+    // funzioni allocano decine di tabelle/closure fuori da qualsiasi
+    // lua_pcall, e il GC incrementale di Luau chiama il callback interrupt
+    // anche durante una semplice allocazione (lgc.cpp, non solo durante
+    // l'esecuzione di bytecode). Con "callStart_" ancora fermo al momento
+    // della costruzione dell'oggetto (secondi/minuti prima), il controllo
+    // budget scattava SUBITO e chiamava luaL_error senza nessun pcall che
+    // lo intercettasse — la causa reale dello STACK_OVERFLOW in Test.
+    bool initializing_ = false;
 
     struct TaskWait {
         int coRef = LUA_NOREF;
@@ -113,20 +105,100 @@ public:
 
     ~LuaRuntime() { shutdown(); }
 
-    static void instructionHook(lua_State* ls, lua_Debug*) {
-        // Soft kill: errore se troppe istruzioni in un pcall
-        luaL_error(ls, "Lua budget: troppe istruzioni (script fermato)");
+    // Sostituisce il vecchio lua_sethook(..., LUA_MASKCOUNT, ...) di Lua
+    // 5.4: Luau non conta istruzioni, chiama questo callback ai safepoint
+    // (salti di loop, chiamate, GC). Stesso messaggio di errore di prima
+    // cosi' il controllo "lastError.find(budget)" altrove resta valido.
+    //
+    // NON usare fromState(ls) qui: fa lua_getfield/lua_pop sul registry, e
+    // l'interrupt scatta in mezzo all'esecuzione (call/ret/loop), non con
+    // un frame di chiamata pulito come le altre funzioni C — toccare lo
+    // stack in quel momento corrompe il VM (crash con SIGILL alla prima
+    // chiamata qualsiasi, anche un semplice print). Per questo lua_Callbacks
+    // ha un campo "userdata" pensato apposta: nessun accesso allo stack.
+    //
+    // Il parametro "gc" e' la vera guardia strutturale: nel sorgente di
+    // Luau vale -1 SOLO quando l'interrupt scatta da un safepoint di
+    // bytecode reale (lvmexecute.cpp — dentro una chiamata protetta con
+    // callStart_ appena impostato), mentre vale >=0 quando scatta da un
+    // passo del GC innescato da una semplice allocazione (lgc.cpp) — cosa
+    // che puo' succedere OVUNQUE nel motore (registerApi, bindScriptParent,
+    // qualunque futura funzione che fa lua_newtable/pushcfunction), non
+    // solo mentre uno script gira dentro pcall. Con callStart_ ancora
+    // "vecchio" (mai resettato dall'ultimo runCompiled/fireHeartbeat), un
+    // interrupt da GC in uno di questi punti faceva scattare subito
+    // l'errore Lua FUORI da qualunque pcall che potesse intercettarlo —
+    // la causa reale degli STACK_OVERFLOW visti in Test. Ignorare i gc>=0
+    // rende il controllo budget sicuro ovunque, anche in codice futuro,
+    // senza dover ricordarsi di resettare callStart_ in ogni nuovo punto.
+    static void interruptCallback(lua_State* ls, int gc) {
+        if (gc >= 0) return;
+        LuaRuntime* rt = static_cast<LuaRuntime*>(lua_callbacks(ls)->userdata);
+        if (!rt || rt->initializing_) return;
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - rt->callStart_).count();
+        if (elapsed > LuaScriptSecurity::kScriptHardTimeoutMs)
+            blockyLuaError(ls, "Lua budget: troppe istruzioni (script fermato)");
+    }
+
+    // ---- Adattatori Luau: stesso nome/comportamento delle funzioni di
+    // Lua 5.4 che questo file chiamava ovunque, cosi' le ~160 chiamate
+    // gia' scritte restano quelle, solo rinominate in blocco. ----
+    //
+    // luaL_error di Luau e' void (macro luaL_errorL) invece che int come
+    // in Lua 5.4 — "return blockyLuaError(...)" ovunque nel file smetteva di
+    // compilare. Questo adattatore torna a restituire int (mai davvero,
+    // dato che dentro solleva comunque l'errore Lua che salta fuori).
+    template <typename... Args>
+    static int blockyLuaError(lua_State* ls, const char* fmt, Args... args) {
+        // -Wformat-security (errore di default con l'NDK Android): il
+        // compilatore non riesce a vedere attraverso il template che `fmt`
+        // e' sempre un letterale ai punti di chiamata — nessuna stringa di
+        // formato arriva mai da dati esterni o da uno script.
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-security"
+#endif
+        luaL_error(ls, fmt, args...);
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+        return 0;
+    }
+
+    // luaL_ref(L, LUA_REGISTRYINDEX) di Lua 5.4 referenzia il valore in
+    // cima allo stack E LO RIMUOVE. Il lua_ref(L, idx) di Luau referenzia
+    // il valore all'indice idx ma NON fa il pop da solo, e non accetta
+    // LUA_REGISTRYINDEX come idx (solo come destinazione implicita).
+    static int blockyLuaRef(lua_State* ls) {
+        int ref = lua_ref(ls, -1);
+        lua_pop(ls, 1);
+        return ref;
     }
 
     void openSandboxLibs() {
-        // Librerie sicure + coroutine (solo per task.wait/spawn supervisionati)
-        luaL_requiref(L, "_G", luaopen_base, 1); lua_pop(L, 1);
-        luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1); lua_pop(L, 1);
-        luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1); lua_pop(L, 1);
-        luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1); lua_pop(L, 1);
-        luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1); lua_pop(L, 1);
-        luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1); lua_pop(L, 1);
-        // Rimuovi dangerous base + meta-tampering tipico degli executor
+        // Luau non ha luaL_requiref. Il sorgente di Luau stesso (linit.cpp,
+        // luaL_openlibs) NON chiama le luaopen_xxx come funzioni C dirette:
+        // le pusha come closure + nome argomento e le invoca con
+        // lua_call(L, 1, 0), cioe' PASSANDO DAL VM. lua_call imposta la
+        // contabilita' interna (call-info, contatore di ricorsione C, ecc.)
+        // che il GC incrementale e le chiamate successive si aspettano —
+        // chiamarle dirette come feci prima salta quel setup e lascia lo
+        // stato interno incoerente in un modo che non crasha subito ma
+        // esplode piu' tardi come STACK_OVERFLOW nativo (visto in test reali,
+        // non riprodotto in un harness piccolo perche' dipende dal passo
+        // del GC). Replichiamo esattamente il pattern di linit.cpp.
+        auto openLib = [&](lua_CFunction fn, const char* name) {
+            lua_pushcfunction(L, fn, name);
+            lua_pushstring(L, name);
+            lua_call(L, 1, 0);
+        };
+        openLib(luaopen_base, "_G");
+        openLib(luaopen_table, LUA_TABLIBNAME);
+        openLib(luaopen_string, LUA_STRLIBNAME);
+        openLib(luaopen_math, LUA_MATHLIBNAME);
+        openLib(luaopen_utf8, LUA_UTF8LIBNAME);
+        openLib(luaopen_coroutine, LUA_COLIBNAME);
         lua_pushnil(L); lua_setglobal(L, "dofile");
         lua_pushnil(L); lua_setglobal(L, "loadfile");
         lua_pushnil(L); lua_setglobal(L, "load");
@@ -144,6 +216,7 @@ public:
     }
 
     bool init(DataModel* ws) {
+        CrashHandler::note("LuaRuntime::init: inizio");
         shutdown();
         workspace = ws;
         L = luaL_newstate();
@@ -151,13 +224,21 @@ public:
             lastError = "luaL_newstate fallita";
             return false;
         }
+        initializing_ = true;
+        CrashHandler::note("LuaRuntime::init: pre openSandboxLibs");
         openSandboxLibs();
-        lua_sethook(L, instructionHook, LUA_MASKCOUNT, LuaScriptSecurity::kInstructionBudget);
+        CrashHandler::note("LuaRuntime::init: post openSandboxLibs");
+        lua_callbacks(L)->userdata = this;
+        lua_callbacks(L)->interrupt = interruptCallback;
+        CrashHandler::note("LuaRuntime::init: pre registerApi");
         if (!registerApi()) {
             shutdown();
             return false;
         }
+        CrashHandler::note("LuaRuntime::init: post registerApi");
         LuaScriptSecurity::lockApiSurface(L);
+        CrashHandler::note("LuaRuntime::init: post lockApiSurface");
+        initializing_ = false;
         ok = true;
         lastError.clear();
         budgetExceeded = false;
@@ -168,52 +249,65 @@ public:
         if (L) {
             for (int ref : heartbeatRefs_) {
                 if (ref != LUA_NOREF)
-                    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                    lua_unref(L,ref);
             }
             heartbeatRefs_.clear();
             for (auto& w : taskWaits_) {
                 if (w.coRef != LUA_NOREF)
-                    luaL_unref(L, LUA_REGISTRYINDEX, w.coRef);
+                    lua_unref(L,w.coRef);
             }
             taskWaits_.clear();
             lua_close(L);
             L = nullptr;
         }
+        initializing_ = false;
         ok = false;
     }
 
-    bool runFile(const std::string& path) {
+    // Compila con Luau::compile ed esegue — sostituisce il vecchio
+    // luaL_dostring/luaL_dofile di Lua 5.4, che parlavano al parser
+    // interno in un solo passo. Con Luau il passo di compilazione e'
+    // esplicito (produce bytecode), poi luau_load lo carica, poi
+    // lua_pcall lo esegue — stesso risultato finale, un passo in piu'.
+    bool runCompiled(const std::string& source, const std::string& chunkname) {
         if (!L) return false;
-        {   // il contenuto, non il path: rinominare un file non deve bastare
-            std::ifstream f(path, std::ios::binary);
-            if (f) {
-                std::string src((std::istreambuf_iterator<char>(f)),
-                                std::istreambuf_iterator<char>());
-                noteScript(src.data(), src.size(), path);
-            }
+        const std::string bc = Luau::compile(source);
+        if (luau_load(L, chunkname.c_str(), bc.data(), bc.size(), 0) != 0) {
+            lastError = safeToString(-1);
+            std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
+            lua_pop(L, 1);
+            return false;
         }
-        if (luaL_dofile(L, path.c_str()) != LUA_OK) {
+        callStart_ = std::chrono::steady_clock::now();
+        if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
             lastError = safeToString(-1);
             std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
             lua_pop(L, 1);
             return false;
         }
         return true;
+    }
+
+    bool runFile(const std::string& path) {
+        if (!L) return false;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            lastError = "impossibile aprire " + path;
+            std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
+            return false;
+        }
+        std::string src((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+        noteScript(src.data(), src.size(), path);
+        return runCompiled(src, "=" + path);
     }
 
     bool runString(const std::string& code) {
         if (!L) return false;
         noteScript(code.data(), code.size(), "string");
-        if (luaL_dostring(L, code.c_str()) != LUA_OK) {
-            lastError = safeToString(-1);
-            std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
-            lua_pop(L, 1);
-            return false;
-        }
-        return true;
+        return runCompiled(code, "=string");
     }
 
-    /** Esegue script attaccato a una Part (script.Parent = quella Part). */
     bool runPartScript(const std::string& code, int partIndex) {
         if (!L || !workspace) return false;
         if (partIndex < 0 || partIndex >= (int)workspace->parts.size()) {
@@ -224,7 +318,6 @@ public:
         return runString(code);
     }
 
-    /** Come runPartScript, ma per uno script agganciato a un Model importato. */
     bool runModelScript(const std::string& code, int modelIndex) {
         if (!L || !workspace) return false;
         if (modelIndex < 0 || modelIndex >= (int)workspace->models.size()) {
@@ -235,56 +328,75 @@ public:
         return runString(code);
     }
 
-    void bindModelScriptParent(int modelIndex) {
+    bool runLabelScript(const std::string& code, int labelIndex) {
+        if (!L || !workspace) return false;
+        if (labelIndex < 0 || labelIndex >= (int)workspace->labels.size()) {
+            lastError = "Label index non valido";
+            return false;
+        }
+        bindLabelScriptParent(labelIndex);
+        return runString(code);
+    }
+
+    void bindLabelScriptParent(int labelIndex) {
         if (!L) return;
-        lua_newtable(L); // script
-        pushLiveModel(L, modelIndex);
+        lua_newtable(L);
+        pushLiveLabel(L, labelIndex);
         lua_setfield(L, -2, "Parent");
-        lua_pushglobaltable(L);
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
         lua_pushstring(L, "script");
         lua_pushvalue(L, -3);
         lua_rawset(L, -3);
         lua_pop(L, 2);
     }
 
-    /** Imposta global script = { Parent = live Part } (API nuova stile Roblox). */
+    void bindModelScriptParent(int modelIndex) {
+        if (!L) return;
+        lua_newtable(L);
+        pushLiveModel(L, modelIndex);
+        lua_setfield(L, -2, "Parent");
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        lua_pushstring(L, "script");
+        lua_pushvalue(L, -3);
+        lua_rawset(L, -3);
+        lua_pop(L, 2);
+    }
+
     void bindScriptParent(int partIndex) {
         if (!L) return;
-        lua_newtable(L); // script
+        lua_newtable(L);
         pushLivePart(L, partIndex);
         lua_setfield(L, -2, "Parent");
-        // rawset su _G: "script" e' locked e lua_setglobal triggererebbe
-        // __newindex → luaL_error FUORI da pcall → crash (abort).
-        lua_pushglobaltable(L);
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
         lua_pushstring(L, "script");
-        lua_pushvalue(L, -3);       // script table
-        lua_rawset(L, -3);          // _G["script"] = table
-        lua_pop(L, 2);              // pop _G + script
+        lua_pushvalue(L, -3);
+        lua_rawset(L, -3);
+        lua_pop(L, 2);
     }
 
     void clearHeartbeats() {
         if (!L) return;
         for (int ref : heartbeatRefs_) {
             if (ref != LUA_NOREF)
-                luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                lua_unref(L,ref);
         }
         heartbeatRefs_.clear();
         pendingDestroy_.clear();
         for (auto& w : taskWaits_) {
             if (L && w.coRef != LUA_NOREF)
-                luaL_unref(L, LUA_REGISTRYINDEX, w.coRef);
+                lua_unref(L,w.coRef);
         }
         taskWaits_.clear();
         auto unrefMap = [&](std::map<int, std::vector<int>>& m) {
             for (auto& kv : m)
                 for (int ref : kv.second)
-                    if (ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                    if (ref != LUA_NOREF) lua_unref(L,ref);
             m.clear();
         };
         auto unrefMapS = [&](std::map<std::string, std::vector<int>>& m) {
             for (auto& kv : m)
                 for (int ref : kv.second)
-                    if (ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                    if (ref != LUA_NOREF) lua_unref(L,ref);
             m.clear();
         };
         unrefMap(scriptControls().partTouched);
@@ -294,7 +406,6 @@ public:
         scriptControls().lastGuiButton.clear();
     }
 
-    /** Applica part:Destroy() differiti (dopo Touched/Heartbeat). */
     void flushPendingDestroy() {
         if (!workspace || pendingDestroy_.empty()) return;
         std::sort(pendingDestroy_.begin(), pendingDestroy_.end(), std::greater<int>());
@@ -305,7 +416,6 @@ public:
         pendingDestroy_.clear();
     }
 
-    /** Danno esplosione al player (falloff distanza). */
     void applyExplosionPlayerDamage(glm::vec3 boomPos, float radius, float maxDamage) {
         if (!playerHumanoid || !playerPos) return;
         if (playerHumanoid->dead || maxDamage <= 0.f || radius <= 0.1f) return;
@@ -327,16 +437,16 @@ public:
                      dmg, playerHumanoid->health);
     }
 
-    /** Esegue bytecode Lua grezzo (già verificato). */
     bool runBytecode(const uint8_t* bc, size_t n, const char* name = "=(bbc)") {
         if (!L || !bc || !n) return false;
         noteScript(bc, n, name ? name : "(bbc)");
-        if (luaL_loadbuffer(L, reinterpret_cast<const char*>(bc), n, name) != LUA_OK) {
+        if (luau_load(L, name, reinterpret_cast<const char*>(bc), n, 0) != 0) {
             lastError = safeToString(-1);
             std::fprintf(stderr, "BBC load error: %s\n", lastError.c_str());
             lua_pop(L, 1);
             return false;
         }
+        callStart_ = std::chrono::steady_clock::now();
         if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
             lastError = safeToString(-1);
             std::fprintf(stderr, "BBC run error: %s\n", lastError.c_str());
@@ -346,10 +456,6 @@ public:
         return true;
     }
 
-    /**
-     * Carica file .bbc sigillato: verifica anti-tamper poi esegue.
-     * Rifiuta payload con sigillo rotto.
-     */
     bool runSealedFile(const std::string& path) {
         if (!L) return false;
         auto u = SafeBytecode::unpackSealedFile(path);
@@ -364,16 +470,11 @@ public:
         return runBytecode(u.luaBc.data(), u.luaBc.size(), chunkName.c_str());
     }
 
-    /** Compila sorgente → .bbc sigillato (usato da Studio / Publish). */
     static bool compileSealedFile(const std::string& source, const std::string& gameId,
                                   const std::string& outPath, std::string& err) {
         return SafeBytecode::compileSourceToSealedFile(source, gameId, outPath, err);
     }
 
-    /**
-     * Avvio script place: preferisce .bbc sigillato, poi .lua (dev / builtin).
-     * requireSealedScripts=true → Play: solo .bbc oppure script trusted in assets/.
-     */
     bool runScriptPathSmart(const std::string& path, bool preferSealed = true) {
         if (!L || path.empty()) return false;
         if (SafeBytecode::isBbcPath(path) || SafeBytecode::looksLikeBbcMagic(path))
@@ -410,6 +511,7 @@ public:
                 continue;
             }
             lua_pushnumber(L, dt);
+            callStart_ = std::chrono::steady_clock::now();
             if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Heartbeat error: %s\n", lastError.c_str());
@@ -425,7 +527,7 @@ public:
             lastError = "Lua budget tempo superato (" + std::to_string(us) + "us)";
             for (int ref : heartbeatRefs_) {
                 if (ref != LUA_NOREF)
-                    luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                    lua_unref(L,ref);
             }
             heartbeatRefs_.clear();
             std::fprintf(stderr, "[Lua] %s — Heartbeat disconnesso\n", lastError.c_str());
@@ -435,7 +537,6 @@ public:
         flushPendingDestroy();
     }
 
-    /** Part.Touched — chiama listener quando il player entra in contatto. */
     void firePartTouched(int partIndex) {
         if (!L || !workspace) return;
         if (partIndex < 0 || partIndex >= (int)workspace->parts.size()) return;
@@ -445,12 +546,12 @@ public:
             if (ref == LUA_NOREF) continue;
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-            lua_newtable(L); // hit (other)
+            lua_newtable(L);
             lua_pushstring(L, "Player");
             lua_setfield(L, -2, "Name");
             lua_pushstring(L, "Humanoid");
             lua_setfield(L, -2, "ClassName");
-            // 1 arg = hit object (come Roblox Touched(other))
+            callStart_ = std::chrono::steady_clock::now();
             if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Touched error: %s\n", lastError.c_str());
@@ -459,21 +560,12 @@ public:
         }
     }
 
-    /**
-     * Fa scattare Events.Connect("ItemActivated", ...) dal lato nativo (LMB
-     * o pad X con un item equipaggiato che non è Sword). Riusa il canale
-     * Events già esistente invece di una mappa dedicata: lo script scrive
-     *
-     *   Events.Connect("ItemActivated", function(id, name)
-     *       if name == "Torcia" then ... end
-     *   end)
-     *
-     * esattamente come già farebbe per un evento suo — nessuna API nuova
-     * da imparare per usare chiavi, torce, medikit.
-     */
-    void fireItemActivated(const std::string& itemId, const std::string& itemName) {
+    // Un solo dispatcher per i tre eventi di item (Activated/Equipped/
+    // Unequipped, stile Tool di Roblox) invece di ripetere lo stesso ciclo
+    // lua_rawgeti/lua_pcall tre volte.
+    void fireItemEvent(const char* eventName, const std::string& itemId, const std::string& itemName) {
         if (!L) return;
-        auto it = scriptControls().events.find("ItemActivated");
+        auto it = scriptControls().events.find(eventName);
         if (it == scriptControls().events.end() || it->second.empty()) return;
         for (int ref : it->second) {
             if (ref == LUA_NOREF) continue;
@@ -481,15 +573,24 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             lua_pushstring(L, itemId.c_str());
             lua_pushstring(L, itemName.c_str());
+            callStart_ = std::chrono::steady_clock::now();
             if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
-                std::fprintf(stderr, "ItemActivated error: %s\n", lastError.c_str());
+                std::fprintf(stderr, "%s error: %s\n", eventName, lastError.c_str());
                 lua_pop(L, 1);
             }
         }
     }
+    void fireItemActivated(const std::string& itemId, const std::string& itemName) {
+        fireItemEvent("ItemActivated", itemId, itemName);
+    }
+    void fireItemEquipped(const std::string& itemId, const std::string& itemName) {
+        fireItemEvent("ItemEquipped", itemId, itemName);
+    }
+    void fireItemUnequipped(const std::string& itemId, const std::string& itemName) {
+        fireItemEvent("ItemUnequipped", itemId, itemName);
+    }
 
-    /** TextButton Activated — chiama listener connessi al nome bottone. */
     void fireGuiButtonActivated(const std::string& buttonName) {
         if (!L || buttonName.empty()) return;
         scriptControls().lastGuiButton = buttonName;
@@ -499,6 +600,7 @@ public:
             if (ref == LUA_NOREF) continue;
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            callStart_ = std::chrono::steady_clock::now();
             if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "TextButton Activated error: %s\n", lastError.c_str());
@@ -507,7 +609,6 @@ public:
         }
     }
 
-    /** Scarica RemoteEvent dalla rete → OnServerEvent / OnClientEvent. */
     void drainRemoteEvents() {
         if (!L || !net) return;
         for (const auto& in : net->incomingRemotes) {
@@ -521,6 +622,7 @@ public:
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
                 lua_pushstring(L, in.fromName);
                 lua_pushstring(L, in.payload);
+                callStart_ = std::chrono::steady_clock::now();
                 if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
                     lastError = safeToString(-1);
                     std::fprintf(stderr, "RemoteEvent error: %s\n", lastError.c_str());
@@ -550,10 +652,14 @@ private:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             lua_State* co = lua_tothread(L, -1);
             lua_pop(L, 1);
-            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            lua_unref(L,ref);
             if (!co) continue;
-            int nres = 0;
-            int st = lua_resume(co, L, 0, &nres);
+            callStart_ = std::chrono::steady_clock::now();
+            // Luau non ha il 4o parametro d'uscita "nres" di Lua 5.4:
+            // lo ricaviamo con lua_gettop dopo la resume (i valori
+            // restituiti/yieldati restano comunque sullo stack di co).
+            int st = lua_resume(co, L, 0);
+            int nres = lua_gettop(co);
             if (st != LUA_OK && st != LUA_YIELD) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "task resume error";
                 std::fprintf(stderr, "task error: %s\n", lastError.c_str());
@@ -571,7 +677,7 @@ private:
         if (it != touched.end()) {
             if (L) {
                 for (int ref : it->second)
-                    if (ref != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, ref);
+                    if (ref != LUA_NOREF) lua_unref(L,ref);
             }
             touched.erase(it);
         }
@@ -596,21 +702,18 @@ private:
         auto* rt = static_cast<LuaRuntime*>(lua_touserdata(ls, -1));
         lua_pop(ls, 1);
         if (rt) return rt;
-        // fallback legacy
         lua_getglobal(ls, "__ROBLOX_ENGINE");
         rt = static_cast<LuaRuntime*>(lua_touserdata(ls, -1));
         lua_pop(ls, 1);
         return rt;
     }
 
-    /** Indice della tabella Part: supporta Add(part) e Add(self, part). */
     static int partArgIndex(lua_State* ls) {
-        if (lua_gettop(ls) >= 2 && lua_istable(ls, 2)) return 2; // colon call
+        if (lua_gettop(ls) >= 2 && lua_istable(ls, 2)) return 2;
         if (lua_gettop(ls) >= 1 && lua_istable(ls, 1)) return 1;
         return 0;
     }
 
-    /** Indice della funzione Connect: Connect(fn) oppure Connect(self, fn). */
     static int fnArgIndex(lua_State* ls) {
         if (lua_gettop(ls) >= 2 && lua_isfunction(ls, 2)) return 2;
         if (lua_gettop(ls) >= 1 && lua_isfunction(ls, 1)) return 1;
@@ -627,7 +730,7 @@ private:
         lua_getfield(ls, -1, "x"); out.x = (float)luaL_optnumber(ls, -1, 0); lua_pop(ls, 1);
         lua_getfield(ls, -1, "y"); out.y = (float)luaL_optnumber(ls, -1, 0); lua_pop(ls, 1);
         lua_getfield(ls, -1, "z"); out.z = (float)luaL_optnumber(ls, -1, 0); lua_pop(ls, 1);
-        lua_pop(ls, 1); // vec table
+        lua_pop(ls, 1);
         return true;
     }
 
@@ -659,11 +762,9 @@ private:
         lua_pushnumber(ls, x); lua_setfield(ls, -2, "x");
         lua_pushnumber(ls, y); lua_setfield(ls, -2, "y");
         lua_pushnumber(ls, z); lua_setfield(ls, -2, "z");
-        // Alias Roblox-style
         lua_pushnumber(ls, x); lua_setfield(ls, -2, "X");
         lua_pushnumber(ls, y); lua_setfield(ls, -2, "Y");
         lua_pushnumber(ls, z); lua_setfield(ls, -2, "Z");
-        // Metatable operatori (+ - * /)
         ensureVec3Meta(ls);
         lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyVec3MT");
         lua_setmetatable(ls, -2);
@@ -684,10 +785,10 @@ private:
         if (lua_istable(ls, -1)) { lua_pop(ls, 1); return; }
         lua_pop(ls, 1);
         lua_newtable(ls);
-        lua_pushcfunction(ls, luaVec3Add); lua_setfield(ls, -2, "__add");
-        lua_pushcfunction(ls, luaVec3Sub); lua_setfield(ls, -2, "__sub");
-        lua_pushcfunction(ls, luaVec3Mul); lua_setfield(ls, -2, "__mul");
-        lua_pushcfunction(ls, luaVec3Unm); lua_setfield(ls, -2, "__unm");
+        blockyPushCFunction(ls, luaVec3Add); lua_setfield(ls, -2, "__add");
+        blockyPushCFunction(ls, luaVec3Sub); lua_setfield(ls, -2, "__sub");
+        blockyPushCFunction(ls, luaVec3Mul); lua_setfield(ls, -2, "__mul");
+        blockyPushCFunction(ls, luaVec3Unm); lua_setfield(ls, -2, "__unm");
         lua_pushstring(ls, "Vector3"); lua_setfield(ls, -2, "__metatable");
         lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyVec3MT");
     }
@@ -700,20 +801,19 @@ private:
     static int luaVec3Add(lua_State* ls) {
         glm::vec3 a{}, b{};
         if (!readVec3FromStack(ls, 1, a) || !readVec3FromStack(ls, 2, b))
-            return luaL_error(ls, "Vector3 + Vector3");
+            return blockyLuaError(ls, "Vector3 + Vector3");
         pushVec3(ls, a.x + b.x, a.y + b.y, a.z + b.z);
         return 1;
     }
     static int luaVec3Sub(lua_State* ls) {
         glm::vec3 a{}, b{};
         if (!readVec3FromStack(ls, 1, a) || !readVec3FromStack(ls, 2, b))
-            return luaL_error(ls, "Vector3 - Vector3");
+            return blockyLuaError(ls, "Vector3 - Vector3");
         pushVec3(ls, a.x - b.x, a.y - b.y, a.z - b.z);
         return 1;
     }
     static int luaVec3Mul(lua_State* ls) {
         glm::vec3 a{};
-        // v * n  oppure  n * v
         if (lua_isnumber(ls, 1) && readVec3FromStack(ls, 2, a)) {
             float s = (float)lua_tonumber(ls, 1);
             pushVec3(ls, a.x * s, a.y * s, a.z * s);
@@ -729,12 +829,12 @@ private:
             pushVec3(ls, a.x * b.x, a.y * b.y, a.z * b.z);
             return 1;
         }
-        return luaL_error(ls, "Vector3 * number");
+        return blockyLuaError(ls, "Vector3 * number");
     }
     static int luaVec3Unm(lua_State* ls) {
         glm::vec3 a{};
         if (!readVec3FromStack(ls, 1, a))
-            return luaL_error(ls, "-Vector3");
+            return blockyLuaError(ls, "-Vector3");
         pushVec3(ls, -a.x, -a.y, -a.z);
         return 1;
     }
@@ -786,6 +886,98 @@ private:
         return &rt->workspace->parts[i];
     }
 
+    // script.Parent per una Label/TextButton: Name/Text/Visible + Connect(fn)
+    // per registrare l'azione al click (stessa coda di StarterGui:ConnectButton,
+    // ma con il nome del bottone gia' precompilato).
+    static WorkspaceLabel* liveLabel(lua_State* ls, int selfIdx) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return nullptr;
+        lua_getfield(ls, selfIdx, "__labelIndex");
+        int i = (int)lua_tointeger(ls, -1);
+        lua_pop(ls, 1);
+        if (i < 0 || i >= (int)rt->workspace->labels.size()) return nullptr;
+        return &rt->workspace->labels[i];
+    }
+
+    static int luaLiveLabelConnect(lua_State* ls) {
+        WorkspaceLabel* l = liveLabel(ls, 1);
+        if (!l) return 0;
+        if (!lua_isfunction(ls, 2))
+            return blockyLuaError(ls, "script.Parent:Connect(function)");
+        lua_pushvalue(ls, 2);
+        int ref = blockyLuaRef(ls);
+        scriptControls().guiButtonActivated[l->name].push_back(ref);
+        lua_pushinteger(ls, ref);
+        return 1;
+    }
+
+    static int luaLiveLabelIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (!key) return 0;
+        lua_pushvalue(ls, 2);
+        lua_rawget(ls, 1);
+        if (!lua_isnil(ls, -1)) return 1;
+        lua_pop(ls, 1);
+
+        WorkspaceLabel* l = liveLabel(ls, 1);
+        if (!l) return 0;
+        if (std::strcmp(key, "Text") == 0) {
+            lua_pushstring(ls, l->text.c_str());
+            return 1;
+        }
+        if (std::strcmp(key, "Visible") == 0) {
+            lua_pushboolean(ls, l->visible);
+            return 1;
+        }
+        if (std::strcmp(key, "Name") == 0) {
+            lua_pushstring(ls, l->name.c_str());
+            return 1;
+        }
+        return 0;
+    }
+
+    static int luaLiveLabelNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        WorkspaceLabel* l = liveLabel(ls, 1);
+        if (!l || !key) { lua_rawset(ls, 1); return 0; }
+        if (std::strcmp(key, "Text") == 0) {
+            const char* v = lua_tostring(ls, 3);
+            l->text = v ? v : "";
+            return 0;
+        }
+        if (std::strcmp(key, "Visible") == 0) {
+            l->visible = lua_toboolean(ls, 3);
+            return 0;
+        }
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    static void pushLiveLabel(lua_State* ls, int labelIndex) {
+        lua_newtable(ls);
+        lua_pushinteger(ls, labelIndex);
+        lua_setfield(ls, -2, "__labelIndex");
+        blockyPushCFunction(ls, luaLiveLabelConnect);
+        lua_setfield(ls, -2, "Connect");
+
+        auto* rt = fromState(ls);
+        if (rt && rt->workspace && labelIndex >= 0
+            && labelIndex < (int)rt->workspace->labels.size()) {
+            const auto& l = rt->workspace->labels[labelIndex];
+            lua_pushstring(ls, l.name.c_str());
+            lua_setfield(ls, -2, "Name");
+            lua_pushstring(ls, l.isButton() ? "TextButton" : "TextLabel");
+            lua_setfield(ls, -2, "ClassName");
+        }
+
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaLiveLabelIndex);
+        lua_setfield(ls, -2, "__index");
+        blockyPushCFunction(ls, luaLiveLabelNewIndex);
+        lua_setfield(ls, -2, "__newindex");
+        lua_setmetatable(ls, -2);
+    }
+
     static bool readVec3Arg(lua_State* ls, int arg, glm::vec3& out) {
         if (lua_istable(ls, arg)) {
             lua_getfield(ls, arg, "x");
@@ -808,18 +1000,17 @@ private:
         return false;
     }
 
-    /** Part live: solo questa Part si muove (script.Parent). */
     static void pushLivePart(lua_State* ls, int partIndex) {
         lua_newtable(ls);
         lua_pushinteger(ls, partIndex);
         lua_setfield(ls, -2, "__partIndex");
-        lua_pushcfunction(ls, luaLivePartSetPosition);
+        blockyPushCFunction(ls, luaLivePartSetPosition);
         lua_setfield(ls, -2, "SetPosition");
-        lua_pushcfunction(ls, luaLivePartGetPosition);
+        blockyPushCFunction(ls, luaLivePartGetPosition);
         lua_setfield(ls, -2, "GetPosition");
-        lua_pushcfunction(ls, luaLivePartDestroy);
+        blockyPushCFunction(ls, luaLivePartDestroy);
         lua_setfield(ls, -2, "Destroy");
-        lua_pushcfunction(ls, luaLivePartExplode);
+        blockyPushCFunction(ls, luaLivePartExplode);
         lua_setfield(ls, -2, "Explode");
 
         auto* rt = fromState(ls);
@@ -832,10 +1023,10 @@ private:
             lua_setfield(ls, -2, "ClassName");
         }
 
-        lua_newtable(ls); // mt
-        lua_pushcfunction(ls, luaLivePartIndex);
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaLivePartIndex);
         lua_setfield(ls, -2, "__index");
-        lua_pushcfunction(ls, luaLivePartNewIndex);
+        blockyPushCFunction(ls, luaLivePartNewIndex);
         lua_setfield(ls, -2, "__newindex");
         lua_setmetatable(ls, -2);
     }
@@ -854,13 +1045,12 @@ private:
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 2) arg = 2;
         glm::vec3 pos = p->position;
         if (!readVec3Arg(ls, arg, pos))
-            return luaL_error(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
+            return blockyLuaError(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
         p->position = pos;
         return 0;
     }
 
     static int luaLivePartIndex(lua_State* ls) {
-        // __index(self, key) — prima metodi/campi tabella, poi Position live
         const char* key = lua_tostring(ls, 2);
         if (!key) return 0;
         lua_pushvalue(ls, 2);
@@ -924,11 +1114,10 @@ private:
             return 1;
         }
         if (std::strcmp(key, "Touched") == 0) {
-            // part.Touched:Connect(fn)
             lua_newtable(ls);
             lua_pushinteger(ls, partIndexFromSelf(ls, 1));
             lua_setfield(ls, -2, "__partIndex");
-            lua_pushcfunction(ls, luaPartTouchedConnect);
+            blockyPushCFunction(ls, luaPartTouchedConnect);
             lua_setfield(ls, -2, "Connect");
             return 1;
         }
@@ -936,7 +1125,6 @@ private:
     }
 
     static int luaLivePartNewIndex(lua_State* ls) {
-        // __newindex(self, key, value) — part.Position = Vector3
         const char* key = lua_tostring(ls, 2);
         WorkspacePart* p = livePart(ls, 1);
         if (!p || !key) return 0;
@@ -971,7 +1159,6 @@ private:
             if (lua_istable(ls, 3))
                 readColor3Arg(ls, 3, col);
             else if (lua_isnumber(ls, 3)) {
-                // Color3-like: r,g,b come 3 numeri (raro)
                 col.x = (float)lua_tonumber(ls, 3);
                 col.y = (float)luaL_optnumber(ls, 4, col.x);
                 col.z = (float)luaL_optnumber(ls, 5, col.x);
@@ -980,7 +1167,6 @@ private:
             return 0;
         }
         if (std::strcmp(key, "Material") == 0) {
-            // stringa, oppure tabella { Name = "Neon" } / Enum-like
             if (lua_isstring(ls, 3)) {
                 p->setMaterial(partMaterialFromName(lua_tostring(ls, 3)));
                 return 0;
@@ -1014,7 +1200,6 @@ private:
             return 0;
         }
         if (std::strcmp(key, "Emissive") == 0) {
-            // Accetta numero oppure true/false (true → 1)
             if (lua_isboolean(ls, 3))
                 p->emissive = lua_toboolean(ls, 3) ? 1.f : 0.f;
             else
@@ -1043,7 +1228,6 @@ private:
             p->health = (float)lua_tonumber(ls, 3);
             return 0;
         }
-        // altri campi: rawset
         lua_rawset(ls, 1);
         return 0;
     }
@@ -1059,7 +1243,6 @@ private:
         return 0;
     }
 
-    /** part:Explode([count]) — boom leggero + danno player + Destroy. */
     static int luaLivePartExplode(lua_State* ls) {
         WorkspacePart* p = livePart(ls, 1);
         auto* rt = fromState(ls);
@@ -1096,36 +1279,32 @@ private:
         lua_pushnil(L);
         lua_setglobal(L, "__ROBLOX_ENGINE");
 
-        lua_pushcfunction(L, luaPrint);
+        blockyPushCFunction(L, luaPrint);
         lua_setglobal(L, "print");
 
-        // AnimateFrame(frame, position) oppure AnimateFrame("Model", frame, position)
-        lua_pushcfunction(L, luaAnimateFrame);
+        blockyPushCFunction(L, luaAnimateFrame);
         lua_setglobal(L, "AnimateFrame");
 
-        // Vector3 = { new = fn }
         lua_newtable(L);
-        lua_pushcfunction(L, luaVector3New);
+        blockyPushCFunction(L, luaVector3New);
         lua_setfield(L, -2, "new");
         lua_setglobal(L, "Vector3");
 
-        // Color3 = { new = fn }
         lua_newtable(L);
-        lua_pushcfunction(L, luaColor3New);
+        blockyPushCFunction(L, luaColor3New);
         lua_setfield(L, -2, "new");
-        lua_pushcfunction(L, luaColor3FromRGB);
+        blockyPushCFunction(L, luaColor3FromRGB);
         lua_setfield(L, -2, "fromRGB");
         lua_setglobal(L, "Color3");
 
-        // Instance = { new = fn }
         lua_newtable(L);
-        lua_pushcfunction(L, luaInstanceNew);
+        blockyPushCFunction(L, luaInstanceNew);
         lua_setfield(L, -2, "new");
         lua_setglobal(L, "Instance");
+        CrashHandler::note("registerApi: post Instance");
 
-        // Enum.Material.Neon / Metal / Glass ... (valori stringa)
-        lua_newtable(L); // Enum
-        lua_newtable(L); // Material
+        lua_newtable(L);
+        lua_newtable(L);
         for (int mi = 0; mi < (int)PartMaterial::Count; ++mi) {
             const char* nm = partMaterialName((PartMaterial)mi);
             lua_pushstring(L, nm);
@@ -1134,145 +1313,155 @@ private:
         lua_setfield(L, -2, "Material");
         lua_setglobal(L, "Enum");
 
-        // workspace = { Add, FindFirstChild, GetChildren, SetPartPosition }
         lua_newtable(L);
-        lua_pushcfunction(L, luaWorkspaceAdd);
+        blockyPushCFunction(L, luaWorkspaceAdd);
         lua_setfield(L, -2, "Add");
-        lua_pushcfunction(L, luaWorkspaceFind);
+        blockyPushCFunction(L, luaWorkspaceFind);
         lua_setfield(L, -2, "FindFirstChild");
-        lua_pushcfunction(L, luaWorkspaceChildren);
+        blockyPushCFunction(L, luaWorkspaceChildren);
         lua_setfield(L, -2, "GetChildren");
-        lua_pushcfunction(L, luaWorkspaceSetPartPos);
+        blockyPushCFunction(L, luaWorkspaceSetPartPos);
         lua_setfield(L, -2, "SetPartPosition");
-        lua_pushcfunction(L, luaWorkspaceFindPath);
+        blockyPushCFunction(L, luaWorkspaceFindPath);
         lua_setfield(L, -2, "FindPath");
-        lua_pushcfunction(L, luaWorkspaceRebuildNav);
+        blockyPushCFunction(L, luaWorkspaceRebuildNav);
         lua_setfield(L, -2, "RebuildNav");
-        lua_pushcfunction(L, luaWorkspaceIsBlocked);
+        blockyPushCFunction(L, luaWorkspaceIsBlocked);
         lua_setfield(L, -2, "IsBlocked");
-        lua_pushcfunction(L, luaWorkspaceRaycast);
+        blockyPushCFunction(L, luaWorkspaceRaycast);
         lua_setfield(L, -2, "Raycast");
         lua_setglobal(L, "workspace");
         lua_getglobal(L, "workspace");
         lua_setglobal(L, "Workspace");
+        CrashHandler::note("registerApi: post workspace");
 
-        // Events illimitati: Create / Connect / Fire / DisconnectAll
         lua_newtable(L);
-        lua_pushcfunction(L, luaEventCreate);
+        blockyPushCFunction(L, luaEventCreate);
         lua_setfield(L, -2, "Create");
-        lua_pushcfunction(L, luaEventConnect);
+        blockyPushCFunction(L, luaEventConnect);
         lua_setfield(L, -2, "Connect");
-        lua_pushcfunction(L, luaEventFire);
+        blockyPushCFunction(L, luaEventFire);
         lua_setfield(L, -2, "Fire");
-        lua_pushcfunction(L, luaEventClear);
+        blockyPushCFunction(L, luaEventClear);
         lua_setfield(L, -2, "DisconnectAll");
         lua_setglobal(L, "Events");
 
-        // Humanoid globale (LocalPlayer)
         lua_newtable(L);
-        lua_pushcfunction(L, luaHumSetJumpEnabled);
+        blockyPushCFunction(L, luaHumSetJumpEnabled);
         lua_setfield(L, -2, "SetJumpEnabled");
-        lua_pushcfunction(L, luaHumSetWalkEnabled);
+        blockyPushCFunction(L, luaHumSetWalkEnabled);
         lua_setfield(L, -2, "SetWalkEnabled");
-        lua_pushcfunction(L, luaHumSetWalkSpeed);
+        blockyPushCFunction(L, luaHumSetWalkSpeed);
         lua_setfield(L, -2, "SetWalkSpeed");
-        lua_pushcfunction(L, luaHumSetJumpPower);
+        blockyPushCFunction(L, luaHumSetJumpPower);
         lua_setfield(L, -2, "SetJumpPower");
-        lua_pushcfunction(L, luaHumGet);
+        blockyPushCFunction(L, luaHumGet);
         lua_setfield(L, -2, "Get");
-        lua_pushcfunction(L, luaHumGetPosition);
+        blockyPushCFunction(L, luaHumGetPosition);
         lua_setfield(L, -2, "GetPosition");
-        lua_pushcfunction(L, luaHumTakeDamage);
+        blockyPushCFunction(L, luaHumTakeDamage);
         lua_setfield(L, -2, "TakeDamage");
-        lua_pushcfunction(L, luaHumGetHealth);
+        blockyPushCFunction(L, luaHumGetHealth);
         lua_setfield(L, -2, "GetHealth");
-        lua_pushcfunction(L, luaHumGetLook);
+        blockyPushCFunction(L, luaHumGetLook);
         lua_setfield(L, -2, "GetLook");
-        lua_pushcfunction(L, luaHumSetPosition);
+        blockyPushCFunction(L, luaHumSetPosition);
         lua_setfield(L, -2, "SetPosition");
-        lua_setglobal(L, "Humanoid");
-
-        // Backpack: inventario del player (Give + Equipped)
+        // Proprieta' vere (Health/MaxHealth/WalkSpeed/JumpPower) accanto ai
+        // vecchi Get*/Set* — stessa convenzione di Part (Part.Position),
+        // cosi' Humanoid non e' piu' l'unico oggetto che espone solo
+        // metodi verbosi per dati che altrove sono proprieta' dirette.
+        // I Get*/Set* restano invariati, nessuno script esistente si rompe.
         lua_newtable(L);
-        lua_pushcfunction(L, luaBackpackGive);
+        blockyPushCFunction(L, luaHumIndex);
+        lua_setfield(L, -2, "__index");
+        blockyPushCFunction(L, luaHumNewIndex);
+        lua_setfield(L, -2, "__newindex");
+        lua_setmetatable(L, -2);
+        lua_setglobal(L, "Humanoid");
+        CrashHandler::note("registerApi: post Humanoid");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaBackpackGive);
         lua_setfield(L, -2, "Give");
-        lua_pushcfunction(L, luaBackpackEquipped);
+        blockyPushCFunction(L, luaBackpackEquipped);
         lua_setfield(L, -2, "Equipped");
         lua_setglobal(L, "Backpack");
 
-        // Camera:Shake(gradi, secondi) — jumpscare, esplosioni, impatti.
         lua_newtable(L);
-        lua_pushcfunction(L, luaCameraShake);
+        blockyPushCFunction(L, luaCameraShake);
         lua_setfield(L, -2, "Shake");
         lua_setglobal(L, "Camera");
 
-        // UserInputService: jump + IsKeyDown / IsSprintHeld / IsMoving
         lua_newtable(L);
-        lua_pushcfunction(L, luaDisableJump);
+        blockyPushCFunction(L, luaDisableJump);
         lua_setfield(L, -2, "DisableJump");
-        lua_pushcfunction(L, luaEnableJump);
+        blockyPushCFunction(L, luaEnableJump);
         lua_setfield(L, -2, "EnableJump");
-        lua_pushcfunction(L, luaInputIsKeyDown);
+        blockyPushCFunction(L, luaInputIsKeyDown);
         lua_setfield(L, -2, "IsKeyDown");
-        lua_pushcfunction(L, luaInputIsSprintHeld);
+        blockyPushCFunction(L, luaInputIsSprintHeld);
         lua_setfield(L, -2, "IsSprintHeld");
-        lua_pushcfunction(L, luaInputIsMoving);
+        blockyPushCFunction(L, luaInputIsMoving);
         lua_setfield(L, -2, "IsMoving");
         lua_setglobal(L, "UserInputService");
 
-        // task.wait / spawn / delay (+ alias wait) — ordinato e facile
         lua_newtable(L);
-        lua_pushcfunction(L, luaTaskWait);
+        blockyPushCFunction(L, luaTaskWait);
         lua_setfield(L, -2, "wait");
-        lua_pushcfunction(L, luaTaskSpawn);
+        blockyPushCFunction(L, luaTaskSpawn);
         lua_setfield(L, -2, "spawn");
-        lua_pushcfunction(L, luaTaskDelay);
+        blockyPushCFunction(L, luaTaskDelay);
         lua_setfield(L, -2, "delay");
         lua_setglobal(L, "task");
-        lua_pushcfunction(L, luaTaskWait);
+        blockyPushCFunction(L, luaTaskWait);
         lua_setglobal(L, "wait");
+        CrashHandler::note("registerApi: post task");
 
-        // game.RunService.Heartbeat + SoundService + Animator + Players
-        lua_newtable(L);                          // [game]
-        lua_newtable(L);                          // [game, runService]
-        lua_newtable(L);                          // [game, runService, heartbeat]
-        lua_pushcfunction(L, luaHeartbeatConnect);
+        lua_newtable(L);
+        lua_newtable(L);
+        lua_newtable(L);
+        blockyPushCFunction(L, luaHeartbeatConnect);
         lua_setfield(L, -2, "Connect");
         lua_setfield(L, -2, "Heartbeat");
         lua_setfield(L, -2, "RunService");
 
-        lua_newtable(L); // SoundService
-        lua_pushcfunction(L, luaSoundPlay);
+        lua_newtable(L);
+        blockyPushCFunction(L, luaSoundPlay);
         lua_setfield(L, -2, "Play");
-        lua_pushcfunction(L, luaSoundStop);
+        blockyPushCFunction(L, luaSoundStop);
         lua_setfield(L, -2, "Stop");
         lua_setfield(L, -2, "SoundService");
 
-        lua_newtable(L); // Animator — Play(id), Stop, SetWalkAnim(id), SetJumpAnim(id), List
-        lua_pushcfunction(L, luaAnimatorPlay);
+        lua_newtable(L);
+        blockyPushCFunction(L, luaGetDataStore);
+        lua_setfield(L, -2, "GetDataStore");
+        lua_setfield(L, -2, "DataStoreService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaAnimatorPlay);
         lua_setfield(L, -2, "Play");
-        lua_pushcfunction(L, luaAnimatorStop);
+        blockyPushCFunction(L, luaAnimatorStop);
         lua_setfield(L, -2, "Stop");
-        lua_pushcfunction(L, luaAnimatorSetWalk);
+        blockyPushCFunction(L, luaAnimatorSetWalk);
         lua_setfield(L, -2, "SetWalkAnim");
-        lua_pushcfunction(L, luaAnimatorSetJump);
+        blockyPushCFunction(L, luaAnimatorSetJump);
         lua_setfield(L, -2, "SetJumpAnim");
-        lua_pushcfunction(L, luaAnimatorList);
+        blockyPushCFunction(L, luaAnimatorList);
         lua_setfield(L, -2, "List");
         lua_setfield(L, -2, "Animator");
 
-        lua_newtable(L); // Particles — Emit / Sparks / Smoke / Coins / Explode
-        // Helper: tabella richiamabile + :Explode/:Emit (compat Copilot)
+        lua_newtable(L);
         auto pushParticleCmd = [&](lua_CFunction fn, const char* name) {
             lua_newtable(L);
-            lua_pushcfunction(L, fn);
+            blockyPushCFunction(L, fn);
             lua_setfield(L, -2, "Explode");
-            lua_pushcfunction(L, fn);
+            blockyPushCFunction(L, fn);
             lua_setfield(L, -2, "Emit");
-            lua_pushcfunction(L, fn);
+            blockyPushCFunction(L, fn);
             lua_setfield(L, -2, "Play");
-            lua_newtable(L); // mt
-            lua_pushcfunction(L, fn);
+            lua_newtable(L);
+            blockyPushCFunction(L, fn);
             lua_setfield(L, -2, "__call");
             lua_setmetatable(L, -2);
             lua_setfield(L, -2, name);
@@ -1281,68 +1470,67 @@ private:
         pushParticleCmd(luaParticlesSparks, "Sparks");
         pushParticleCmd(luaParticlesSmoke, "Smoke");
         pushParticleCmd(luaParticlesCoins, "Coins");
-        // Explode top-level resta funzione semplice
-        lua_pushcfunction(L, luaParticlesExplode);
+        blockyPushCFunction(L, luaParticlesExplode);
         lua_setfield(L, -2, "Explode");
         lua_setfield(L, -2, "Particles");
+        CrashHandler::note("registerApi: post Particles");
 
-        // Lighting (ClockTime / Brightness / Ambient)
         lua_newtable(L);
-        lua_pushcfunction(L, luaLightingGetClockTime);
+        blockyPushCFunction(L, luaLightingGetClockTime);
         lua_setfield(L, -2, "GetClockTime");
-        lua_pushcfunction(L, luaLightingSetClockTime);
+        blockyPushCFunction(L, luaLightingSetClockTime);
         lua_setfield(L, -2, "SetClockTime");
-        lua_pushcfunction(L, luaLightingGetBrightness);
+        blockyPushCFunction(L, luaLightingGetBrightness);
         lua_setfield(L, -2, "GetBrightness");
-        lua_pushcfunction(L, luaLightingSetBrightness);
+        blockyPushCFunction(L, luaLightingSetBrightness);
         lua_setfield(L, -2, "SetBrightness");
-        lua_pushcfunction(L, luaLightingGetAmbient);
+        blockyPushCFunction(L, luaLightingGetAmbient);
         lua_setfield(L, -2, "GetAmbient");
-        lua_pushcfunction(L, luaLightingSetAmbient);
+        blockyPushCFunction(L, luaLightingSetAmbient);
         lua_setfield(L, -2, "SetAmbient");
         lua_setfield(L, -2, "Lighting");
 
-        // TweenService / Debris / Chat / StarterGui / ReplicatedStorage (API base)
         lua_newtable(L);
-        lua_pushcfunction(L, luaTweenCreate);
+        blockyPushCFunction(L, luaTweenCreate);
         lua_setfield(L, -2, "Create");
         lua_setfield(L, -2, "TweenService");
 
         lua_newtable(L);
-        lua_pushcfunction(L, luaDebrisAddItem);
+        blockyPushCFunction(L, luaDebrisAddItem);
         lua_setfield(L, -2, "AddItem");
         lua_setfield(L, -2, "Debris");
 
-        lua_newtable(L); // Chat stub
+        lua_newtable(L);
         lua_setfield(L, -2, "Chat");
 
-        lua_newtable(L); // StarterGui — UI ScreenGui + TextButton
-        lua_pushcfunction(L, luaGuiButtonConnect);
+        lua_newtable(L);
+        blockyPushCFunction(L, luaGuiButtonConnect);
         lua_setfield(L, -2, "ConnectButton");
-        lua_pushcfunction(L, luaGuiCreateLabel);
+        blockyPushCFunction(L, luaGuiCreateLabel);
         lua_setfield(L, -2, "CreateLabel");
-        lua_pushcfunction(L, luaGuiSetLabelText);
+        blockyPushCFunction(L, luaGuiSetLabelText);
         lua_setfield(L, -2, "SetLabelText");
-        lua_pushcfunction(L, luaGuiSetLabelSize);
+        blockyPushCFunction(L, luaGuiSetLabelSize);
         lua_setfield(L, -2, "SetLabelSize");
-        lua_pushcfunction(L, luaGuiSetLabelOffset);
+        blockyPushCFunction(L, luaGuiSetLabelOffset);
         lua_setfield(L, -2, "SetLabelOffset");
-        lua_pushcfunction(L, luaGuiSetLabelColor);
+        blockyPushCFunction(L, luaGuiSetLabelColor);
         lua_setfield(L, -2, "SetLabelColor");
-        lua_pushcfunction(L, luaGuiSetLabelBg);
+        blockyPushCFunction(L, luaGuiSetLabelBg);
         lua_setfield(L, -2, "SetLabelBg");
-        lua_pushcfunction(L, luaGuiSetLabelVisible);
+        blockyPushCFunction(L, luaGuiSetLabelVisible);
         lua_setfield(L, -2, "SetLabelVisible");
-        lua_pushcfunction(L, luaGuiFindLabel);
+        blockyPushCFunction(L, luaGuiFindLabel);
         lua_setfield(L, -2, "FindLabel");
         lua_setfield(L, -2, "StarterGui");
+        CrashHandler::note("registerApi: post StarterGui");
 
         lua_getglobal(L, "Events");
         lua_setfield(L, -2, "ReplicatedStorage");
 
-        lua_newtable(L); // Players.LocalPlayer.Character.Humanoid helpers
-        lua_newtable(L); // LocalPlayer
-        lua_newtable(L); // Character
+        lua_newtable(L);
+        lua_newtable(L);
+        lua_newtable(L);
         lua_getglobal(L, "Humanoid");
         lua_setfield(L, -2, "Humanoid");
         lua_setfield(L, -2, "Character");
@@ -1355,7 +1543,7 @@ private:
         lua_getglobal(L, "UserInputService");
         lua_setfield(L, -2, "UserInputService");
 
-        lua_pushcfunction(L, luaGetService);
+        blockyPushCFunction(L, luaGetService);
         lua_setfield(L, -2, "GetService");
 
         lua_setglobal(L, "game");
@@ -1371,7 +1559,7 @@ private:
             size_t len = 0;
             const char* s = luaL_tolstring(ls, i, &len);
             if (s) out.append(s, len);
-            lua_pop(ls, 1); // remove tostring result
+            lua_pop(ls, 1);
         }
         std::fprintf(stdout, "[Lua] %s\n", out.c_str());
         return 0;
@@ -1393,7 +1581,6 @@ private:
         return 1;
     }
 
-    /** Color3.fromRGB(r,g,b) con 0–255 */
     static int luaColor3FromRGB(lua_State* ls) {
         float r = (float)luaL_optnumber(ls, 1, 255) / 255.f;
         float g = (float)luaL_optnumber(ls, 2, 255) / 255.f;
@@ -1405,7 +1592,7 @@ private:
     static int luaInstanceNew(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace)
-            return luaL_error(ls, "Instance.new: engine non pronto");
+            return blockyLuaError(ls, "Instance.new: engine non pronto");
 
         const char* className = luaL_optstring(ls, 1, "Part");
         if (std::strcmp(className, "Part") == 0
@@ -1450,18 +1637,18 @@ private:
         }
         if (std::strcmp(className, "BindableEvent") == 0) {
             const char* nm = luaL_optstring(ls, 2, "Event");
-            scriptControls().events[nm]; // crea slot
+            scriptControls().events[nm];
             lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "Name");
             lua_pushstring(ls, "BindableEvent");
             lua_setfield(ls, -2, "ClassName");
-            lua_pushcfunction(ls, luaBindableFire);
+            blockyPushCFunction(ls, luaBindableFire);
             lua_setfield(ls, -2, "Fire");
-            lua_newtable(ls); // .Event
+            lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "_eventName");
-            lua_pushcfunction(ls, luaBindableConnect);
+            blockyPushCFunction(ls, luaBindableConnect);
             lua_setfield(ls, -2, "Connect");
             lua_setfield(ls, -2, "Event");
             return 1;
@@ -1475,29 +1662,28 @@ private:
             lua_setfield(ls, -2, "Name");
             lua_pushstring(ls, "RemoteEvent");
             lua_setfield(ls, -2, "ClassName");
-            lua_pushcfunction(ls, luaRemoteFireServer);
+            blockyPushCFunction(ls, luaRemoteFireServer);
             lua_setfield(ls, -2, "FireServer");
-            lua_pushcfunction(ls, luaRemoteFireAllClients);
+            blockyPushCFunction(ls, luaRemoteFireAllClients);
             lua_setfield(ls, -2, "FireAllClients");
-            lua_newtable(ls); // OnServerEvent
+            lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "_remoteName");
             lua_pushboolean(ls, 1);
             lua_setfield(ls, -2, "_isServer");
-            lua_pushcfunction(ls, luaRemoteConnect);
+            blockyPushCFunction(ls, luaRemoteConnect);
             lua_setfield(ls, -2, "Connect");
             lua_setfield(ls, -2, "OnServerEvent");
-            lua_newtable(ls); // OnClientEvent
+            lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "_remoteName");
             lua_pushboolean(ls, 0);
             lua_setfield(ls, -2, "_isServer");
-            lua_pushcfunction(ls, luaRemoteConnect);
+            blockyPushCFunction(ls, luaRemoteConnect);
             lua_setfield(ls, -2, "Connect");
             lua_setfield(ls, -2, "OnClientEvent");
             return 1;
         }
-        // Qualsiasi altra classe → tabella generica (nessun limite di tipo)
         lua_newtable(ls);
         lua_pushstring(ls, className);
         lua_setfield(ls, -2, "ClassName");
@@ -1520,7 +1706,6 @@ private:
         return true;
     }
 
-    /** Salta tabelle self (Particles / Coins / …) finché non trova un Vector3. */
     static int skipParticleSelfArgs(lua_State* ls, int arg) {
         int top = lua_gettop(ls);
         while (arg <= top && lua_istable(ls, arg)) {
@@ -1538,15 +1723,14 @@ private:
         return arg;
     }
 
-    /** Particles:Emit(pos, count?, color?) | Sparks/Smoke/Coins(pos, count?, color?) */
     static int luaParticlesPreset(lua_State* ls, ParticlePreset preset) {
         auto* rt = fromState(ls);
         if (!rt || !rt->particles)
-            return luaL_error(ls, "Particles non pronto");
+            return blockyLuaError(ls, "Particles non pronto");
         int arg = skipParticleSelfArgs(ls, 1);
         glm::vec3 pos{0, 3, 0};
         if (!readVec3Arg(ls, arg, pos))
-            return luaL_error(ls, "Particles richiede Vector3 posizione");
+            return blockyLuaError(ls, "Particles richiede Vector3 posizione");
         int count = -1;
         glm::vec3 col{-1, -1, -1};
         if (lua_isnumber(ls, arg + 1))
@@ -1567,15 +1751,14 @@ private:
     static int luaParticlesSmoke(lua_State* ls) { return luaParticlesPreset(ls, ParticlePreset::Smoke); }
     static int luaParticlesCoins(lua_State* ls) { return luaParticlesPreset(ls, ParticlePreset::Coins); }
 
-    /** game.Particles:Explode(pos [, count]) — boom FX + danno player (senza Destroy Part). */
     static int luaParticlesExplode(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->particles)
-            return luaL_error(ls, "Particles non pronto");
+            return blockyLuaError(ls, "Particles non pronto");
         int arg = skipParticleSelfArgs(ls, 1);
         glm::vec3 pos{0, 3, 0};
         if (!readVec3Arg(ls, arg, pos))
-            return luaL_error(ls, "Particles:Explode(Vector3 [, count])");
+            return blockyLuaError(ls, "Particles:Explode(Vector3 [, count])");
         int count = (int)luaL_optinteger(ls, arg + 1, 16);
         if (count < 4) count = 4;
         if (count > 24) count = 24;
@@ -1589,8 +1772,7 @@ private:
     static int luaSoundPlay(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->soundService)
-            return luaL_error(ls, "SoundService non pronto");
-        // Play(path) oppure Play(self, path) oppure Play(self, soundTable)
+            return blockyLuaError(ls, "SoundService non pronto");
         int arg = 1;
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 2) arg = 2;
         if (lua_istable(ls, arg)) {
@@ -1599,15 +1781,15 @@ private:
             lua_getfield(ls, arg, "Looped");
             if (lua_isboolean(ls, -1)) looped = lua_toboolean(ls, -1) != 0;
             lua_pop(ls, 1);
-            if (id.empty()) return luaL_error(ls, "Sound.SoundId vuoto");
+            if (id.empty()) return blockyLuaError(ls, "Sound.SoundId vuoto");
             if (!rt->soundService->playPath(id, looped))
-                return luaL_error(ls, "%s", rt->soundService->lastError.c_str());
+                return blockyLuaError(ls, "%s", rt->soundService->lastError.c_str());
             return 0;
         }
         const char* path = luaL_checkstring(ls, arg);
         bool looped = lua_toboolean(ls, arg + 1) != 0;
         if (!rt->soundService->playPath(path, looped))
-            return luaL_error(ls, "%s", rt->soundService->lastError.c_str());
+            return blockyLuaError(ls, "%s", rt->soundService->lastError.c_str());
         return 0;
     }
 
@@ -1617,11 +1799,10 @@ private:
         return 0;
     }
 
-    /** AnimateFrame(frame, Vector3) | AnimateFrame(frame, x,y,z) | AnimateFrame(modelName, frame, pos) */
     static int luaAnimateFrame(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace)
-            return luaL_error(ls, "AnimateFrame: workspace non pronto");
+            return blockyLuaError(ls, "AnimateFrame: workspace non pronto");
 
         int arg = 1;
         const char* modelName = nullptr;
@@ -1642,7 +1823,6 @@ private:
             lua_getfield(ls, arg + 1, "Z");
             pos.z = (float)luaL_optnumber(ls, -1, 0);
             lua_pop(ls, 1);
-            // anche x,y,z minuscoli
             if (pos.x == 0 && pos.y == 0 && pos.z == 0) {
                 readVec3Field(ls, arg + 1, "x", pos);
             }
@@ -1661,7 +1841,7 @@ private:
         if (!target && !rt->workspace->models.empty())
             target = &rt->workspace->models[0];
         if (!target)
-            return luaL_error(ls, "AnimateFrame: nessun modello nel Workspace");
+            return blockyLuaError(ls, "AnimateFrame: nessun modello nel Workspace");
 
         if (!target->rig.hasAnimRig())
             target->rig.simpleRig = true;
@@ -1675,11 +1855,11 @@ private:
     static int luaAnimatorPlay(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->animator)
-            return luaL_error(ls, "Animator non pronto");
+            return blockyLuaError(ls, "Animator non pronto");
         int arg = 1;
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 2) arg = 2;
         const char* name = luaL_optstring(ls, arg, "Wave");
-        rt->animator->play(name); // built-in o AnimationId (FancyWalk, Shoot, ...)
+        rt->animator->play(name);
         return 0;
     }
 
@@ -1692,7 +1872,7 @@ private:
     static int luaAnimatorSetWalk(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->animator)
-            return luaL_error(ls, "Animator non pronto");
+            return blockyLuaError(ls, "Animator non pronto");
         int arg = 1;
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 2) arg = 2;
         const char* id = luaL_checkstring(ls, arg);
@@ -1703,7 +1883,7 @@ private:
     static int luaAnimatorSetJump(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->animator)
-            return luaL_error(ls, "Animator non pronto");
+            return blockyLuaError(ls, "Animator non pronto");
         int arg = 1;
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 2) arg = 2;
         const char* id = luaL_checkstring(ls, arg);
@@ -1755,7 +1935,6 @@ private:
     }
 
     static int luaInputIsKeyDown(lua_State* ls) {
-        // IsKeyDown(key) oppure :IsKeyDown(key)
         int arg = (lua_gettop(ls) >= 2 && (lua_isstring(ls, 2) || lua_isnumber(ls, 2))) ? 2 : 1;
         const char* key = luaL_checkstring(ls, arg);
         GLFWwindow* win = glfwGetCurrentContext();
@@ -1787,15 +1966,13 @@ private:
     static int luaGuiCreateLabel(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace)
-            return luaL_error(ls, "StarterGui:CreateLabel: engine non pronto");
-        // CreateLabel(name, text, ax, ay) oppure CreateLabel({Name=, Text=, ...})
-        // Con colon: StarterGui:CreateLabel({...}) → [1]=self, [2]=props
+            return blockyLuaError(ls, "StarterGui:CreateLabel: engine non pronto");
         WorkspaceLabel lab;
         int base = 1;
         if (lua_istable(ls, 1) && lua_istable(ls, 2))
-            base = 2; // Gui:CreateLabel({...})
+            base = 2;
         else if (lua_istable(ls, 1) && !lua_isstring(ls, 1))
-            base = 1; // CreateLabel({...}) / Gui.CreateLabel({...})
+            base = 1;
         else if (lua_isstring(ls, 1) || (lua_gettop(ls) >= 2 && lua_isstring(ls, 2))) {
             int ni = lua_isstring(ls, 1) ? 1 : 2;
             lab.name = lua_tostring(ls, ni);
@@ -1811,7 +1988,7 @@ private:
             return 1;
         }
         if (!lua_istable(ls, base))
-            return luaL_error(ls, "CreateLabel(name,text,ax,ay) o CreateLabel({...})");
+            return blockyLuaError(ls, "CreateLabel(name,text,ax,ay) o CreateLabel({...})");
         auto getStr = [&](const char* k, const char* def) -> std::string {
             lua_getfield(ls, base, k);
             std::string v = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : def;
@@ -1858,7 +2035,6 @@ private:
         lab.color = getCol("TextColor", {1.f, 1.f, 1.f});
         lab.bgColor = getCol("BackgroundColor", {0.f, 0.f, 0.f});
         lab.visible = getBool("Visible", true);
-        // aggiorna se esiste già
         if (auto* existing = findLabelByName(rt, lab.name.c_str())) {
             *existing = lab;
         } else {
@@ -1947,6 +2123,60 @@ private:
         return 1;
     }
 
+    static int luaHumIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        lua_pushvalue(ls, 2);
+        lua_rawget(ls, 1);
+        if (!lua_isnil(ls, -1))
+            return 1;
+        lua_pop(ls, 1);
+        if (!key) return 0;
+
+        LuaRuntime* rt = fromState(ls);
+        if (std::strcmp(key, "Health") == 0) {
+            lua_pushnumber(ls, (rt && rt->playerHumanoid) ? rt->playerHumanoid->health : 0.f);
+            return 1;
+        }
+        if (std::strcmp(key, "MaxHealth") == 0) {
+            lua_pushnumber(ls, (rt && rt->playerHumanoid) ? rt->playerHumanoid->maxHealth : 100.f);
+            return 1;
+        }
+        if (std::strcmp(key, "WalkSpeed") == 0) {
+            lua_pushnumber(ls, scriptControls().walkSpeedOverride);
+            return 1;
+        }
+        if (std::strcmp(key, "JumpPower") == 0) {
+            lua_pushnumber(ls, scriptControls().jumpPowerOverride);
+            return 1;
+        }
+        return 0;
+    }
+
+    static int luaHumNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (!key) return 0;
+        if (std::strcmp(key, "Health") == 0) {
+            LuaRuntime* rt = fromState(ls);
+            if (rt && rt->playerHumanoid) {
+                float v = (float)luaL_optnumber(ls, 3, rt->playerHumanoid->health);
+                rt->playerHumanoid->health = std::clamp(v, 0.f, rt->playerHumanoid->maxHealth);
+            }
+            return 0;
+        }
+        if (std::strcmp(key, "WalkSpeed") == 0) {
+            float v = (float)luaL_optnumber(ls, 3, 16.0);
+            scriptControls().walkSpeedOverride = std::clamp(v, 1.f, LuaScriptSecurity::kMaxWalkSpeed);
+            return 0;
+        }
+        if (std::strcmp(key, "JumpPower") == 0) {
+            float v = (float)luaL_optnumber(ls, 3, 50.0);
+            scriptControls().jumpPowerOverride = std::clamp(v, 0.f, LuaScriptSecurity::kMaxJumpPower);
+            return 0;
+        }
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
     static int luaHumSetJumpEnabled(lua_State* ls) {
         bool v = true;
         if (lua_gettop(ls) >= 2) v = lua_toboolean(ls, 2) != 0;
@@ -1988,11 +2218,7 @@ private:
         return 1;
     }
 
-    // --- Player position e danno: le due primitive che mancavano per gli NPC
-    // (zombie che inseguono e feriscono). Il C++ sotto esisteva gia'
-    // (playerPos, playerHumanoid->takeDamage), qui lo si espone a Lua. ---
 
-    /** Humanoid.GetPosition() -> Vector3 {X,Y,Z} del player. */
     static int luaHumGetPosition(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         glm::vec3 p = (rt && rt->playerPos) ? *rt->playerPos : glm::vec3(0.f);
@@ -2003,21 +2229,17 @@ private:
         return 1;
     }
 
-    /** Humanoid.TakeDamage(n) -> ferisce il player. Clamp anti-abuso. */
     static int luaHumTakeDamage(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
-        int arg = (lua_gettop(ls) >= 2) ? 2 : 1;   // tollera Humanoid:TakeDamage
+        int arg = (lua_gettop(ls) >= 2) ? 2 : 1;
         float dmg = (float)luaL_optnumber(ls, arg, 0.0);
         if (rt && rt->playerHumanoid && dmg > 0.f) {
-            // Tetto per frame: uno script non deve poter uccidere in un colpo
-            // con un numero assurdo. 100 = una barra piena.
             dmg = std::clamp(dmg, 0.f, 100.f);
             rt->playerHumanoid->takeDamage(dmg);
         }
         return 0;
     }
 
-    /** Humanoid.GetHealth() -> vita attuale (per la UI dello script). */
     static int luaHumGetHealth(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         float hp = (rt && rt->playerHumanoid) ? rt->playerHumanoid->health : 0.f;
@@ -2025,8 +2247,6 @@ private:
         return 1;
     }
 
-    /** Humanoid.SetPosition(v) -> sposta il player (per tenerlo dentro la mappa).
-        Accetta {X,Y,Z} o (x,y,z). */
     static int luaHumSetPosition(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         if (!rt || !rt->playerPos) return 0;
@@ -2046,16 +2266,24 @@ private:
         return 0;
     }
 
-    /** Backpack.Give(name) -> aggiunge un item all'inventario (tool dal nome). */
     static int luaBackpackGive(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         int arg = (lua_type(ls, 1) == LUA_TTABLE) ? 2 : 1;
         const char* name = luaL_optstring(ls, arg, "Item");
-        if (rt && rt->workspace) rt->workspace->addBackpackItem(name, 4);
+        const char* meshPath = luaL_optstring(ls, arg + 1, "");
+        if (rt && rt->workspace) {
+            auto& it = rt->workspace->addBackpackItem(name, 4);
+            // Stessa pipeline gia' usata dall'import di un'arma in Avatar
+            // Editor (SelectionAndInput.h) — render in mano (PlayingHudPanel.h),
+            // salvataggio (PlaceExporter/GameHub) e controllo file
+            // (SceneIntegrity) leggono gia' questo campo, mancava solo il
+            // modo di impostarlo da script.
+            if (meshPath && meshPath[0])
+                it.meshPath = resolveScriptPath(meshPath);
+        }
         return 0;
     }
 
-    /** Backpack.Equipped() -> nome dell'item equipaggiato, "" se nessuno. */
     static int luaBackpackEquipped(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         std::string name;
@@ -2068,8 +2296,6 @@ private:
         return 1;
     }
 
-    /** Camera.Shake(gradi, secondi). Valori tipici: 2-4° per un impatto,
-     *  6-10° per un jumpscare vero. Oltre ~15° la vista diventa illeggibile. */
     static int luaCameraShake(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         if (!rt || !rt->cameraShake) return 0;
@@ -2079,13 +2305,10 @@ private:
         return 0;
     }
 
-    /** Humanoid.GetLook() -> {X,Y,Z} versore orizzontale dove guarda il player.
-        Serve per mirare (pistola) e per tenere un item davanti al player. */
     static int luaHumGetLook(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         float yawDeg = (rt && rt->playerYaw) ? *rt->playerYaw : 0.f;
         float r = yawDeg * 3.14159265f / 180.f;
-        // 0 gradi = +Z (coerente col commento su g_playerYaw)
         float fx = std::sin(r), fz = std::cos(r);
         lua_newtable(ls);
         lua_pushnumber(ls, fx); lua_setfield(ls, -2, "X");
@@ -2106,17 +2329,15 @@ private:
         const char* name = luaL_checkstring(ls, 1);
         int fidx = 2;
         if (!lua_isfunction(ls, fidx))
-            return luaL_error(ls, "Events.Connect(name, function)");
+            return blockyLuaError(ls, "Events.Connect(name, function)");
         lua_pushvalue(ls, fidx);
-        int ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(ls);
         scriptControls().events[name].push_back(ref);
         lua_pushinteger(ls, ref);
         return 1;
     }
 
-    /** game.StarterGui:ConnectButton("NomeBottone", function() ... end) */
     static int luaGuiButtonConnect(lua_State* ls) {
-        // Supporta sia . sia : (self opzionale)
         int nameIdx = 1;
         int fnIdx = 2;
         if (lua_gettop(ls) >= 3 && lua_isfunction(ls, 3)) {
@@ -2125,9 +2346,9 @@ private:
         }
         const char* name = luaL_checkstring(ls, nameIdx);
         if (!lua_isfunction(ls, fnIdx))
-            return luaL_error(ls, "StarterGui:ConnectButton(name, function)");
+            return blockyLuaError(ls, "StarterGui:ConnectButton(name, function)");
         lua_pushvalue(ls, fnIdx);
-        int ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(ls);
         scriptControls().guiButtonActivated[name].push_back(ref);
         lua_pushinteger(ls, ref);
         return 1;
@@ -2143,6 +2364,7 @@ private:
             lua_rawgeti(ls, LUA_REGISTRYINDEX, ref);
             for (int i = 0; i < nargs; ++i)
                 lua_pushvalue(ls, 2 + i);
+            rt->callStart_ = std::chrono::steady_clock::now();
             if (lua_pcall(ls, nargs, 0, 0) != LUA_OK) {
                 std::fprintf(stderr, "[Events] %s: %s\n", name, lua_tostring(ls, -1));
                 lua_pop(ls, 1);
@@ -2157,7 +2379,7 @@ private:
             if (rt) {
                 for (auto& kv : scriptControls().events)
                     for (int r : kv.second)
-                        luaL_unref(ls, LUA_REGISTRYINDEX, r);
+                        lua_unref(ls,r);
             }
             scriptControls().events.clear();
             return 0;
@@ -2165,48 +2387,147 @@ private:
         auto it = scriptControls().events.find(name);
         if (it != scriptControls().events.end()) {
             for (int r : it->second)
-                luaL_unref(ls, LUA_REGISTRYINDEX, r);
+                lua_unref(ls,r);
             scriptControls().events.erase(it);
         }
         return 0;
     }
 
     static int luaBindableFire(lua_State* ls) {
-        // self.Fire(...) — nome in self.Name
         std::string name = "Event";
         if (lua_istable(ls, 1))
             name = readStringField(ls, 1, "Name", "Event");
-        // riordina stack: name, ...args
         lua_pushstring(ls, name.c_str());
         lua_insert(ls, 1);
-        // remove self if table at 2
         if (lua_istable(ls, 2)) {
             lua_remove(ls, 2);
         }
         return luaEventFire(ls);
     }
     static int luaBindableConnect(lua_State* ls) {
-        // self.Event:Connect(fn) — _eventName sul table Event
         std::string name = "Event";
         if (lua_istable(ls, 1))
             name = readStringField(ls, 1, "_eventName", "Event");
         int fidx = fnArgIndex(ls);
-        if (!fidx) return luaL_error(ls, "Connect richiede function");
+        if (!fidx) return blockyLuaError(ls, "Connect richiede function");
         lua_pushstring(ls, name.c_str());
         lua_pushvalue(ls, fidx);
-        // Events.Connect(name, fn)
-        lua_remove(ls, 1); // messy — simpler:
+        lua_remove(ls, 1);
         auto* rt = fromState(ls);
         if (!rt) return 0;
         lua_pushvalue(ls, fidx);
-        int ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(ls);
         scriptControls().events[name].push_back(ref);
         lua_pushinteger(ls, ref);
         return 1;
     }
 
+    // ---- DataStoreService: dati che restano tra una sessione e l'altra ----
+    // Prima di questo blocco GetService("DataStoreService") tornava una
+    // tabella vuota (stub silenzioso): nessuno script poteva salvare niente.
+    // Vedi engine/DataStore.h per il file su disco e i limiti di sicurezza.
+
+    /** Nome dello store dalla tabella self (chiamata con ':'). */
+    static std::string dsStoreOf(lua_State* ls) {
+        if (!lua_istable(ls, 1)) return {};
+        lua_getfield(ls, 1, "__store");
+        std::string n = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+        lua_pop(ls, 1);
+        return n;
+    }
+
+    static int luaDataStoreSetAsync(lua_State* ls) {
+        const std::string store = dsStoreOf(ls);
+        if (store.empty()) return blockyLuaError(ls, "usa store:SetAsync(chiave, valore)");
+        const std::string key = blk::datastore::sanitizeKeyName(luaL_checkstring(ls, 2));
+        if (key.empty()) return blockyLuaError(ls, "SetAsync: chiave non valida");
+
+        blk::datastore::Value v;
+        if (lua_isboolean(ls, 3)) {
+            v.isNumber = true;
+            v.number = lua_toboolean(ls, 3) ? 1.0 : 0.0;
+        } else if (lua_isnumber(ls, 3)) {
+            v.isNumber = true;
+            v.number = (double)lua_tonumber(ls, 3);
+        } else if (lua_isstring(ls, 3)) {
+            v.isNumber = false;
+            v.text = lua_tostring(ls, 3);
+            if (v.text.size() > blk::datastore::kMaxStringLen)
+                v.text.resize(blk::datastore::kMaxStringLen);
+        } else {
+            return blockyLuaError(ls, "SetAsync: il valore deve essere numero, testo o bool");
+        }
+
+        auto& s = blk::datastore::db().store(store);
+        if (s.find(key) == s.end() && s.size() >= blk::datastore::kMaxKeysPerStore)
+            return blockyLuaError(ls, "SetAsync: troppe chiavi nello store '%s'", store.c_str());
+        s[key] = v;
+        blk::datastore::db().save(store);
+        return 0;
+    }
+
+    static int luaDataStoreGetAsync(lua_State* ls) {
+        const std::string store = dsStoreOf(ls);
+        if (store.empty()) return blockyLuaError(ls, "usa store:GetAsync(chiave)");
+        const std::string key = blk::datastore::sanitizeKeyName(luaL_checkstring(ls, 2));
+        auto& s = blk::datastore::db().store(store);
+        auto it = s.find(key);
+        if (it == s.end()) { lua_pushnil(ls); return 1; }
+        if (it->second.isNumber) lua_pushnumber(ls, it->second.number);
+        else lua_pushstring(ls, it->second.text.c_str());
+        return 1;
+    }
+
+    static int luaDataStoreIncrementAsync(lua_State* ls) {
+        const std::string store = dsStoreOf(ls);
+        if (store.empty()) return blockyLuaError(ls, "usa store:IncrementAsync(chiave, quanto)");
+        const std::string key = blk::datastore::sanitizeKeyName(luaL_checkstring(ls, 2));
+        if (key.empty()) return blockyLuaError(ls, "IncrementAsync: chiave non valida");
+        const double delta = lua_isnumber(ls, 3) ? (double)lua_tonumber(ls, 3) : 1.0;
+
+        auto& s = blk::datastore::db().store(store);
+        auto it = s.find(key);
+        if (it == s.end() && s.size() >= blk::datastore::kMaxKeysPerStore)
+            return blockyLuaError(ls, "IncrementAsync: troppe chiavi nello store '%s'", store.c_str());
+        blk::datastore::Value& v = s[key];
+        if (!v.isNumber) { v.isNumber = true; v.number = 0.0; v.text.clear(); }
+        v.number += delta;
+        blk::datastore::db().save(store);
+        lua_pushnumber(ls, v.number);
+        return 1;
+    }
+
+    static int luaDataStoreRemoveAsync(lua_State* ls) {
+        const std::string store = dsStoreOf(ls);
+        if (store.empty()) return blockyLuaError(ls, "usa store:RemoveAsync(chiave)");
+        const std::string key = blk::datastore::sanitizeKeyName(luaL_checkstring(ls, 2));
+        auto& s = blk::datastore::db().store(store);
+        s.erase(key);
+        blk::datastore::db().save(store);
+        return 0;
+    }
+
+    static int luaGetDataStore(lua_State* ls) {
+        const int arg = lua_istable(ls, 1) ? 2 : 1;
+        const std::string name = blk::datastore::sanitizeKeyName(luaL_checkstring(ls, arg));
+        if (name.empty()) return blockyLuaError(ls, "GetDataStore: nome non valido");
+
+        lua_newtable(ls);
+        lua_pushstring(ls, name.c_str());
+        lua_setfield(ls, -2, "__store");
+        blockyPushCFunction(ls, luaDataStoreSetAsync);
+        lua_setfield(ls, -2, "SetAsync");
+        blockyPushCFunction(ls, luaDataStoreGetAsync);
+        lua_setfield(ls, -2, "GetAsync");
+        blockyPushCFunction(ls, luaDataStoreIncrementAsync);
+        lua_setfield(ls, -2, "IncrementAsync");
+        blockyPushCFunction(ls, luaDataStoreRemoveAsync);
+        lua_setfield(ls, -2, "RemoveAsync");
+        return 1;
+    }
+
     static int luaGetService(lua_State* ls) {
-        const char* name = luaL_checkstring(ls, 2); // game:GetService(name) or GetService(self,name)
+        const char* name = luaL_checkstring(ls, 2);
         if (lua_isstring(ls, 1) && !lua_istable(ls, 1))
             name = lua_tostring(ls, 1);
         std::string n = name ? name : "";
@@ -2230,16 +2551,16 @@ private:
         if (n == "chat" || n == "textchatservice") return fromGame("Chat");
         if (n == "startergui") return fromGame("StarterGui");
         if (n == "userinputservice") return fromGame("UserInputService");
-        // Stub silenziosi (non crashano script Roblox-like)
+        if (n == "datastoreservice") return fromGame("DataStoreService");
         if (n == "marketplaceservice" || n == "teleportservice" || n == "httpservice"
             || n == "contextactionservice" || n == "collectionservice"
             || n == "pathfindingservice" || n == "physicsservice"
             || n == "guiservice" || n == "proximitypromptservice"
-            || n == "datastoreservice" || n == "messagingservice") {
+            || n == "messagingservice") {
             lua_newtable(ls);
             return 1;
         }
-        return luaL_error(ls, "GetService: servizio sconosciuto '%s'", name ? name : "?");
+        return blockyLuaError(ls, "GetService: servizio sconosciuto '%s'", name ? name : "?");
     }
 
     static int luaLightingGetClockTime(lua_State* ls) {
@@ -2284,20 +2605,17 @@ private:
     static int luaTweenPlayStub(lua_State*) { return 0; }
     static int luaTweenCancelStub(lua_State*) { return 0; }
     static int luaTweenCreate(lua_State* ls) {
-        // Stub: ritorna un tween finto con :Play() / :Cancel()
         lua_newtable(ls);
-        lua_pushcfunction(ls, luaTweenPlayStub);
+        blockyPushCFunction(ls, luaTweenPlayStub);
         lua_setfield(ls, -2, "Play");
-        lua_pushcfunction(ls, luaTweenCancelStub);
+        blockyPushCFunction(ls, luaTweenCancelStub);
         lua_setfield(ls, -2, "Cancel");
         return 1;
     }
     static int luaDebrisAddItem(lua_State* ls) {
-        // Stub: rimuove Part dal workspace dopo delay (best-effort)
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace) return 0;
         int selfOff = lua_istable(ls, 1) ? 1 : 0;
-        // arg: instance (table with _partIdx) , lifetime
         float life = (float)luaL_optnumber(ls, selfOff + 2, 1.0);
         (void)life;
         if (lua_istable(ls, selfOff + 1)) {
@@ -2305,7 +2623,6 @@ private:
             if (lua_isnumber(ls, -1)) {
                 int idx = (int)lua_tointeger(ls, -1);
                 if (idx >= 0 && idx < (int)rt->workspace->parts.size()) {
-                    // rimozione immediata semplificata (delay pieno = futuro)
                     rt->workspace->parts.erase(rt->workspace->parts.begin() + idx);
                 }
             }
@@ -2314,7 +2631,6 @@ private:
         return 0;
     }
 
-    // ---------------------------------------------------------- Model / Animator
 
     static int intField(lua_State* ls, int selfIdx, const char* key) {
         lua_getfield(ls, selfIdx, key);
@@ -2331,14 +2647,11 @@ private:
         return &rt->workspace->models[(size_t)i];
     }
 
-    /** Traccia: la si tiene in una variabile e la si comanda quando serve. */
     static int luaTrackPlay(lua_State* ls) {
         WorkspaceModel* m = liveModel(ls, 1);
         if (!m) return 0;
         const int id = intField(ls, 1, "__trackId");
         if (AnimTrack* t = m->animator.get(id)) {
-            // Le altre tracce si fermano: due animazioni del corpo insieme
-            // darebbero una posa mescolata, non una transizione.
             for (AnimTrack& other : m->animator.tracks) other.playing = false;
             t->playing = true;
         }
@@ -2379,11 +2692,11 @@ private:
         lua_newtable(ls);
         lua_pushinteger(ls, modelIndex); lua_setfield(ls, -2, "__modelIndex");
         lua_pushinteger(ls, trackId);    lua_setfield(ls, -2, "__trackId");
-        lua_pushcfunction(ls, luaTrackPlay);        lua_setfield(ls, -2, "Play");
-        lua_pushcfunction(ls, luaTrackStop);        lua_setfield(ls, -2, "Stop");
-        lua_pushcfunction(ls, luaTrackIsPlaying);   lua_setfield(ls, -2, "IsPlaying");
-        lua_pushcfunction(ls, luaTrackAdjustSpeed); lua_setfield(ls, -2, "AdjustSpeed");
-        lua_pushcfunction(ls, luaTrackSetLooped);   lua_setfield(ls, -2, "SetLooped");
+        blockyPushCFunction(ls, luaTrackPlay);        lua_setfield(ls, -2, "Play");
+        blockyPushCFunction(ls, luaTrackStop);        lua_setfield(ls, -2, "Stop");
+        blockyPushCFunction(ls, luaTrackIsPlaying);   lua_setfield(ls, -2, "IsPlaying");
+        blockyPushCFunction(ls, luaTrackAdjustSpeed); lua_setfield(ls, -2, "AdjustSpeed");
+        blockyPushCFunction(ls, luaTrackSetLooped);   lua_setfield(ls, -2, "SetLooped");
     }
 
     static int luaAnimatorLoad(lua_State* ls) {
@@ -2391,8 +2704,6 @@ private:
         if (!m) return 0;
         const std::string wanted = luaL_checkstring(ls, 2);
 
-        // L'alias vince sul nome grezzo: uno script scritto su "chase"
-        // sopravvive a un riesporto che rinomina l'azione.
         std::string clip = wanted;
         auto it = m->clipAlias.find(wanted);
         if (it != m->clipAlias.end() && !it->second.empty()) clip = it->second;
@@ -2402,7 +2713,6 @@ private:
         return 1;
     }
 
-    /** model:SetClipAlias("chase", "Armature|ChasingAction") */
     static int luaModelSetClipAlias(lua_State* ls) {
         WorkspaceModel* m = liveModel(ls, 1);
         if (!m) return 0;
@@ -2418,8 +2728,8 @@ private:
     static void pushAnimator(lua_State* ls, int modelIndex) {
         lua_newtable(ls);
         lua_pushinteger(ls, modelIndex); lua_setfield(ls, -2, "__modelIndex");
-        lua_pushcfunction(ls, luaAnimatorLoad);    lua_setfield(ls, -2, "LoadAnimation");
-        lua_pushcfunction(ls, luaAnimatorStopAll); lua_setfield(ls, -2, "StopAll");
+        blockyPushCFunction(ls, luaAnimatorLoad);    lua_setfield(ls, -2, "LoadAnimation");
+        blockyPushCFunction(ls, luaAnimatorStopAll); lua_setfield(ls, -2, "StopAll");
     }
 
     static int luaModelGetPosition(lua_State* ls) {
@@ -2434,7 +2744,7 @@ private:
         if (!m) return 0;
         glm::vec3 p = m->position;
         if (!readVec3Arg(ls, 2, p))
-            return luaL_error(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
+            return blockyLuaError(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
         m->position = p;
         return 0;
     }
@@ -2444,12 +2754,11 @@ private:
         if (!m) return 0;
         glm::vec3 r = m->rotation;
         if (!readVec3Arg(ls, 2, r))
-            return luaL_error(ls, "SetRotation(Vector3) oppure SetRotation(x,y,z)");
+            return blockyLuaError(ls, "SetRotation(Vector3) oppure SetRotation(x,y,z)");
         m->rotation = r;
         return 0;
     }
 
-    /** Yaw comodo per un NPC che deve guardare dove cammina. */
     static int luaModelSetYaw(lua_State* ls) {
         WorkspaceModel* m = liveModel(ls, 1);
         if (!m) return 0;
@@ -2476,13 +2785,13 @@ private:
         lua_pushinteger(ls, modelIndex);
         lua_setfield(ls, -2, "__modelIndex");
 
-        lua_pushcfunction(ls, luaModelGetPosition);   lua_setfield(ls, -2, "GetPosition");
-        lua_pushcfunction(ls, luaModelSetPosition);   lua_setfield(ls, -2, "SetPosition");
-        lua_pushcfunction(ls, luaModelSetRotation);   lua_setfield(ls, -2, "SetRotation");
-        lua_pushcfunction(ls, luaModelSetYaw);        lua_setfield(ls, -2, "SetYaw");
-        lua_pushcfunction(ls, luaModelSetCanCollide); lua_setfield(ls, -2, "SetCanCollide");
-        lua_pushcfunction(ls, luaModelGetCanCollide); lua_setfield(ls, -2, "GetCanCollide");
-        lua_pushcfunction(ls, luaModelSetClipAlias);  lua_setfield(ls, -2, "SetClipAlias");
+        blockyPushCFunction(ls, luaModelGetPosition);   lua_setfield(ls, -2, "GetPosition");
+        blockyPushCFunction(ls, luaModelSetPosition);   lua_setfield(ls, -2, "SetPosition");
+        blockyPushCFunction(ls, luaModelSetRotation);   lua_setfield(ls, -2, "SetRotation");
+        blockyPushCFunction(ls, luaModelSetYaw);        lua_setfield(ls, -2, "SetYaw");
+        blockyPushCFunction(ls, luaModelSetCanCollide); lua_setfield(ls, -2, "SetCanCollide");
+        blockyPushCFunction(ls, luaModelGetCanCollide); lua_setfield(ls, -2, "GetCanCollide");
+        blockyPushCFunction(ls, luaModelSetClipAlias);  lua_setfield(ls, -2, "SetClipAlias");
 
         pushAnimator(ls, modelIndex);
         lua_setfield(ls, -2, "Animator");
@@ -2496,11 +2805,6 @@ private:
         lua_setfield(ls, -2, "ClassName");
     }
 
-    /**
-     * Workspace:FindPath(da, a) -> lista di Vector3, oppure nil.
-     * La griglia si ricostruisce da sola alla prima chiamata: chi scrive lo
-     * script non deve ricordarsi di inizializzare niente.
-     */
     static int luaWorkspaceFindPath(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->nav) { lua_pushnil(ls); return 1; }
@@ -2508,7 +2812,7 @@ private:
         const int base = lua_istable(ls, 1) ? 2 : 1;
         glm::vec3 from(0.f), to(0.f);
         if (!readVec3Arg(ls, base, from) || !readVec3Arg(ls, base + 1, to))
-            return luaL_error(ls, "FindPath(Vector3 da, Vector3 a)");
+            return blockyLuaError(ls, "FindPath(Vector3 da, Vector3 a)");
 
         if (!rt->nav->ready() && rt->navRebuild) rt->navRebuild();
 
@@ -2523,14 +2827,12 @@ private:
         return 1;
     }
 
-    /** Da chiamare dopo aver costruito o spostato ostacoli. */
     static int luaWorkspaceRebuildNav(lua_State* ls) {
         auto* rt = fromState(ls);
         if (rt && rt->navRebuild) rt->navRebuild();
         return 0;
     }
 
-    /** True se quel punto è dentro un ostacolo: utile per scegliere uno spawn. */
     static int luaWorkspaceIsBlocked(lua_State* ls) {
         auto* rt = fromState(ls);
         glm::vec3 p(0.f);
@@ -2554,8 +2856,6 @@ private:
                 return 1;
             }
         }
-        // Poi fra i modelli importati: per uno script "Mostro" è un oggetto
-        // della scena, non gli importa di che tipo sia.
         for (int i = 0; i < (int)rt->workspace->models.size(); ++i) {
             if (rt->workspace->models[i].name == name) {
                 pushLiveModel(ls, i);
@@ -2631,12 +2931,10 @@ private:
             part.maxHealth = std::max(part.maxHealth, part.health);
         }
         lua_pop(ls, 1);
-        // Restituisci Part live (Touched / Position / Destroy)
         pushLivePart(ls, (int)rt->workspace->parts.size() - 1);
         return 1;
     }
 
-    /** workspace:SetPartPosition(name, Vector3) oppure (name, x, y, z) */
     static int luaWorkspaceSetPartPos(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace) return 0;
@@ -2670,7 +2968,6 @@ private:
     }
 
     static int luaPartTouchedConnect(lua_State* ls) {
-        // Touched:Connect(fn) — self has __partIndex
         int partIdx = -1;
         if (lua_istable(ls, 1)) {
             lua_getfield(ls, 1, "__partIndex");
@@ -2678,28 +2975,25 @@ private:
             lua_pop(ls, 1);
         }
         int fidx = fnArgIndex(ls);
-        if (!fidx || partIdx < 0) return luaL_error(ls, "Touched:Connect(fn) su Part");
+        if (!fidx || partIdx < 0) return blockyLuaError(ls, "Touched:Connect(fn) su Part");
         auto& list = scriptControls().partTouched[partIdx];
         if ((int)list.size() >= LuaScriptSecurity::kMaxTouchedPerPart)
-            return luaL_error(ls, "Touched: troppi listener (max %d)", LuaScriptSecurity::kMaxTouchedPerPart);
+            return blockyLuaError(ls, "Touched: troppi listener (max %d)", LuaScriptSecurity::kMaxTouchedPerPart);
         lua_pushvalue(ls, fidx);
-        int ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(ls);
         list.push_back(ref);
         lua_pushinteger(ls, ref);
         return 1;
     }
 
-    /** workspace:Raycast(origin, direction, maxDist?) → hit table o nil */
     static int luaWorkspaceRaycast(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace) return 0;
         int base = 1;
         if (lua_istable(ls, 1) && lua_istable(ls, 2)) {
-            // colon: self, origin, dir
             lua_getfield(ls, 1, "Raycast");
             bool isSelf = lua_isfunction(ls, -1) || lua_isnil(ls, -1);
             lua_pop(ls, 1);
-            // Heuristic: if arg1 has no x, it's workspace self
             lua_getfield(ls, 1, "x");
             bool hasX = lua_isnumber(ls, -1);
             lua_pop(ls, 1);
@@ -2708,9 +3002,9 @@ private:
         }
         glm::vec3 origin{0}, dir{0, -1, 0};
         if (!readVec3Arg(ls, base, origin))
-            return luaL_error(ls, "Raycast(origin, direction)");
+            return blockyLuaError(ls, "Raycast(origin, direction)");
         if (!readVec3Arg(ls, base + 1, dir))
-            return luaL_error(ls, "Raycast(origin, direction)");
+            return blockyLuaError(ls, "Raycast(origin, direction)");
         float maxDist = (float)luaL_optnumber(ls, base + 2, 500.0);
         float len = glm::length(dir);
         if (len < 1e-6f) { lua_pushnil(ls); return 1; }
@@ -2724,7 +3018,6 @@ private:
             glm::mat4 inv = glm::inverse(partModelMatrix(p));
             glm::vec3 o = glm::vec3(inv * glm::vec4(origin, 1.f));
             glm::vec3 d = glm::vec3(inv * glm::vec4(dir, 0.f));
-            // Ray vs local AABB [-0.5,0.5]^3
             float tmin = 0.f, tmax = maxDist;
             bool hit = true;
             for (int a = 0; a < 3; ++a) {
@@ -2766,9 +3059,9 @@ private:
             lua_pop(ls, 1);
         }
         int fidx = fnArgIndex(ls);
-        if (!fidx) return luaL_error(ls, "Connect richiede function");
+        if (!fidx) return blockyLuaError(ls, "Connect richiede function");
         lua_pushvalue(ls, fidx);
-        int ref = luaL_ref(ls, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(ls);
         if (isServer)
             scriptControls().remoteServer[name].push_back(ref);
         else
@@ -2779,7 +3072,7 @@ private:
 
     static int luaRemoteFireServer(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt || !rt->net) return luaL_error(ls, "RemoteEvent: rete offline");
+        if (!rt || !rt->net) return blockyLuaError(ls, "RemoteEvent: rete offline");
         std::string name = "Remote";
         int arg = 1;
         if (lua_istable(ls, 1)) {
@@ -2793,7 +3086,7 @@ private:
 
     static int luaRemoteFireAllClients(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt || !rt->net) return luaL_error(ls, "RemoteEvent: rete offline");
+        if (!rt || !rt->net) return blockyLuaError(ls, "RemoteEvent: rete offline");
         std::string name = "Remote";
         int arg = 1;
         if (lua_istable(ls, 1)) {
@@ -2802,27 +3095,26 @@ private:
         }
         const char* payload = luaL_optstring(ls, arg, "");
         if (rt->net->role != NetRole::Host)
-            return luaL_error(ls, "FireAllClients solo su Host");
+            return blockyLuaError(ls, "FireAllClients solo su Host");
         rt->net->fireRemoteEventAllClients(name.c_str(), payload);
         return 0;
     }
 
     static int luaHeartbeatConnect(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt) return luaL_error(ls, "Heartbeat:Connect: engine non pronto");
+        if (!rt) return blockyLuaError(ls, "Heartbeat:Connect: engine non pronto");
 
         int idx = fnArgIndex(ls);
-        if (!idx) return luaL_error(ls, "Heartbeat:Connect richiede una funzione");
+        if (!idx) return blockyLuaError(ls, "Heartbeat:Connect richiede una funzione");
         if ((int)rt->heartbeatRefs_.size() >= LuaScriptSecurity::kMaxHeartbeat)
-            return luaL_error(ls, "Heartbeat: troppi listener (max %d, anti-executor)",
+            return blockyLuaError(ls, "Heartbeat: troppi listener (max %d, anti-executor)",
                               LuaScriptSecurity::kMaxHeartbeat);
 
         lua_pushvalue(ls, idx);
-        rt->heartbeatRefs_.push_back(luaL_ref(ls, LUA_REGISTRYINDEX));
+        rt->heartbeatRefs_.push_back(blockyLuaRef(ls));
         return 0;
     }
 
-    /** task.wait(sec) — solo dentro task.spawn / task.delay (coroutine). */
     static int luaTaskWait(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt) return 0;
@@ -2831,13 +3123,13 @@ private:
         if (sec > 60.f) sec = 60.f;
         if (lua_pushthread(ls)) {
             lua_pop(ls, 1);
-            return luaL_error(ls, "task.wait() va usato dentro task.spawn(function() ... end)");
+            return blockyLuaError(ls, "task.wait() va usato dentro task.spawn(function() ... end)");
         }
         if ((int)rt->taskWaits_.size() >= LuaScriptSecurity::kMaxTaskWaits)
-            return luaL_error(ls, "task.wait: troppi wait attivi");
+            return blockyLuaError(ls, "task.wait: troppi wait attivi");
         lua_pushthread(ls);
         lua_xmove(ls, rt->L, 1);
-        int ref = luaL_ref(rt->L, LUA_REGISTRYINDEX);
+        int ref = blockyLuaRef(rt->L);
         rt->taskWaits_.push_back({ref, sec});
         return lua_yield(ls, 0);
     }
@@ -2846,27 +3138,27 @@ private:
         auto* rt = fromState(ls);
         if (!rt || !rt->L) return 0;
         int fidx = fnArgIndex(ls);
-        if (!fidx) return luaL_error(ls, "task.spawn(function)");
+        if (!fidx) return blockyLuaError(ls, "task.spawn(function)");
         lua_State* co = lua_newthread(rt->L);
         lua_pushvalue(ls, fidx);
         lua_xmove(ls, co, 1);
-        int nres = 0;
-        int st = lua_resume(co, rt->L, 0, &nres);
+        rt->callStart_ = std::chrono::steady_clock::now();
+        int st = lua_resume(co, rt->L, 0);
+        int nres = lua_gettop(co);
         if (st != LUA_OK && st != LUA_YIELD) {
             const char* err = lua_tostring(co, -1);
             std::string msg = err ? err : "error";
-            lua_pop(rt->L, 1); // thread
-            return luaL_error(ls, "task.spawn: %s", msg.c_str());
+            lua_pop(rt->L, 1);
+            return blockyLuaError(ls, "task.spawn: %s", msg.c_str());
         }
         if (nres > 0) lua_pop(co, nres);
-        // Thread: se YIELD è tenuto vivo da taskWaits_; se OK è finito
         lua_pop(rt->L, 1);
         return 0;
     }
 
     static int luaTaskDelayWorker(lua_State* ls) {
         float s = (float)lua_tonumber(ls, lua_upvalueindex(1));
-        lua_pushcfunction(ls, luaTaskWait);
+        blockyPushCFunction(ls, luaTaskWait);
         lua_pushnumber(ls, s);
         lua_call(ls, 1, 0);
         lua_pushvalue(ls, lua_upvalueindex(2));
@@ -2879,11 +3171,11 @@ private:
         if (lua_istable(ls, 1) && lua_gettop(ls) >= 3) base = 2;
         float sec = (float)luaL_optnumber(ls, base, 0);
         if (!lua_isfunction(ls, base + 1))
-            return luaL_error(ls, "task.delay(sec, function)");
+            return blockyLuaError(ls, "task.delay(sec, function)");
         lua_pushnumber(ls, sec);
         lua_pushvalue(ls, base + 1);
-        lua_pushcclosure(ls, luaTaskDelayWorker, 2);
-        lua_pushcfunction(ls, luaTaskSpawn);
+        lua_pushcclosure(ls, luaTaskDelayWorker, "luaTaskDelayWorker", 2);
+        blockyPushCFunction(ls, luaTaskSpawn);
         lua_insert(ls, -2);
         lua_call(ls, 1, 0);
         return 0;
