@@ -243,6 +243,15 @@ static void onScroll(GLFWwindow* win, double , double yoff) {
 // lavora su gizmoPart(), che ha una posizione nel mondo dove piantare le
 // frecce. L'oggetto in mano una posizione nel mondo non ce l'ha — segue la
 // mano del personaggio — quindi le frecce non avrebbero dove stare.
+// Target del drag: 0 = item; 1.. = parti R6 (stesso ordine della combo UI).
+inline const char* gripBodyTargetName(int target) {
+    static const char* kNames[] = {
+        "Item", "Right Arm", "Left Arm", "Torso", "Head", "Right Leg", "Left Leg"
+    };
+    if (target < 0 || target >= 7) return "Item";
+    return kNames[target];
+}
+
 static bool gripDragActive() {
     return g_gripEditMode != 0
         && g_selectedBackpack >= 0
@@ -275,6 +284,29 @@ static bool handleGripDrag(double x, double y) {
     g_gripDragLastY = (float)y;
 
     auto& b = g_world.backpack[g_selectedBackpack];
+
+    // Target corpo: stessa logica mouse, ma su holdPose della parte.
+    if (g_gripEditTarget >= 1) {
+        HoldPartPose& hp = ensureHoldPose(b.holdPose, gripBodyTargetName(g_gripEditTarget),
+                                          kEquippedArmHoldDeg);
+        if (g_gripEditMode == 1) {
+            const float k = 0.01f;
+            if (io.KeyShift) hp.pos.z += dy * k;
+            else {
+                hp.pos.x += dx * k;
+                hp.pos.y -= dy * k;
+            }
+        } else {
+            const float k = 0.5f;
+            if (io.KeyShift) hp.rot.z += dx * k;
+            else {
+                hp.rot.y += dx * k;
+                hp.rot.x += dy * k;
+            }
+        }
+        return true;
+    }
+
     if (g_gripEditMode == 1) {
         const float k = 0.01f;                    // pixel -> unita' di mondo
         if (io.KeyShift) b.gripOffset.z += dy * k;  // Shift: avanti / indietro
@@ -302,17 +334,12 @@ static void onMouse(GLFWwindow*, double x, double y) {
 #ifdef __ANDROID__
     // Su un tablet il tasto destro non esiste: guardarsi intorno e semplicemente
     // trascinare il dito sul mondo. Vale solo se ImGui non ha gia preso quel
-    // tocco, cosi il pollice sul joystick non fa girare anche la telecamera.
-
+    // tocco, cosi il pollice sul joystick / inventario non fa girare la cam.
+    const bool onHud = blkShimPointInUi((float)x, (float)y);
     const bool touchLook = playCameraActive()
         && glfwGetMouseButton(nullptr, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS
-        && !ImGui::GetIO().WantCaptureMouse;
-    // Il punto di partenza dello sguardo lo azzera onMouseBtn quando il dito si
-    // appoggia: quello e il momento giusto, perche questo gestore non viene
-    // chiamato affatto quando il dito si stacca.
-
-
-
+        && !ImGui::GetIO().WantCaptureMouse
+        && !onHud;
 #else
     const bool touchLook = false;
 #endif
@@ -332,7 +359,7 @@ static void syncPlayCursor(GLFWwindow* win) {
     const bool inPlay = (g_screen == AppScreen::Playing)
         || (g_screen == AppScreen::Studio && g_studioTesting);
     bool lock = false;
-    if (inPlay && !g_playMenuOpen && !g_showChat) {
+    if (inPlay && !g_playMenuOpen && !g_showChat && !g_weakDevicePopupPending) {
         if (g_firstPerson) lock = true;
         else if (g_rmbLook) lock = true;
     }

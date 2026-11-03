@@ -115,6 +115,31 @@ R"LUA(Camera.Shake(5.0, 0.25)
 R"LUA(game.Particles:Smoke(part:GetPosition(), 3)
 )LUA"},
 
+{"Veicoli", "Carrello VIA! (lontanissimo)",
+ "Crea un carrello + bottone: al click parte a 12000 stud",
+R"LUA(local FAR = 12000
+local p = Instance.new("Part")
+p.Name = "CartLontano"
+p.Size = Vector3.new(6, 2, 10)
+p.Position = Vector3.new(0, 3, 8)
+p.Anchored = false
+p.VehicleSeat = true
+local cart = workspace:Add(p)
+
+local Gui = game:GetService("StarterGui")
+Gui:CreateLabel({
+    Name = "CartViaBtn", Text = "VIA!", ClassName = "TextButton",
+    AnchorX = 0.5, AnchorY = 0.88, SizeW = 160, SizeH = 48,
+    BackgroundColor = {0.95, 0.35, 0.12}, Visible = true,
+})
+Gui:ConnectButton("CartViaBtn", function()
+    cart.Position = Vector3.new(FAR, 40, -FAR)
+    if Veicoli and Veicoli.IsDriving() then
+        Humanoid.SetPosition(FAR, 44, -FAR)
+    end
+end)
+)LUA"},
+
 {"Giocatore", "Cambia velocita' di corsa",
  "Humanoid.SetWalkSpeed — limite 28",
 R"LUA(Humanoid.SetWalkSpeed(20)
@@ -149,6 +174,77 @@ local direzione = Humanoid.GetLook()
 local hit = workspace:Raycast(origine, direzione, 50)
 if hit and hit.Instance then
     print("Colpito: " .. hit.Instance.Name)
+end
+)LUA"},
+
+{"Aspetto", "BrickColor palette",
+ "part.BrickColor = BrickColor.new(\"Bright red\")",
+R"LUA(part.BrickColor = BrickColor.new("Bright red")
+-- oppure: BrickColor.new(21) · BrickColor.random()
+print(part.BrickColor.Name)
+)LUA"},
+
+{"Combat", "Sparo hitscan",
+ "CombatService + Raycast — template FPS",
+R"LUA(local Combat = game:GetService("CombatService")
+local origin = Humanoid.GetPosition() + Vector3.new(0, 1.6, 0)
+local look = Humanoid.GetLook()
+local hit = workspace:Raycast(origin, look, 100)
+if hit and hit.Instance then
+    Combat.Damage(hit.Instance.Name, 20)
+    print("Hit:", hit.Instance.Name)
+end
+)LUA"},
+
+{"Combat", "Proiettile",
+ "CombatService.Shoot — proiettile fisico",
+R"LUA(local Combat = game:GetService("CombatService")
+local p = Humanoid.GetPosition() + Vector3.new(0, 1.5, 0)
+local d = Humanoid.GetLook()
+Combat.Shoot("b1", p.x, p.y, p.z, d.x * 60, d.y * 60, d.z * 60, 2, 0.25)
+)LUA"},
+
+{"Economia", "Monete CurrencyService",
+ "Add / Spend Coins — tycoon / shop",
+R"LUA(local Currency = game:GetService("CurrencyService")
+Currency.Add("Coins", 10)
+print("Coins:", Currency.Get("Coins"))
+if Currency.Spend("Coins", 5) then
+    print("Spesi 5")
+end
+)LUA"},
+
+{"Inventario", "Dai oggetti",
+ "InventoryService.Add / Has",
+R"LUA(local Inv = game:GetService("InventoryService")
+Inv.Add("wood", "Wood", 5)
+print("Wood:", Inv.Count("wood"))
+)LUA"},
+
+{"NPC", "Spawn zombie",
+ "NpcService.Spawn — AI ostile",
+R"LUA(local Npc = game:GetService("NpcService")
+local p = Humanoid.GetPosition()
+Npc.Spawn("zombie", p.x + 6, p.y, p.z)
+print("NPC:", Npc.Count())
+)LUA"},
+
+{"Quest", "Missione semplice",
+ "QuestService Start / Advance / Complete",
+R"LUA(local Q = game:GetService("QuestService")
+Q.Start("q1", "Prima missione", 10)
+Q.AddStep("q1", "step1", "Fai qualcosa")
+Q.Advance("q1", "step1")
+)LUA"},
+
+{"Pathfinding", "Trova percorso",
+ "PathfindingService.ComputeAsync",
+R"LUA(local Path = game:GetService("PathfindingService")
+local from = Humanoid.GetPosition()
+local to = from + Vector3.new(20, 0, 0)
+local waypoints = Path.ComputeAsync(from, to)
+if waypoints then
+    print("Waypoints:", #waypoints)
 end
 )LUA"},
 

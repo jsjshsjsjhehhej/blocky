@@ -14,6 +14,7 @@
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 
+// IM_ASSERT → last_assert.txt via imgui_blocky_config.h (IMGUI_USER_CONFIG).
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>

@@ -33,6 +33,10 @@
 #include "engine/Animator.h"
 #include "engine/AntiCheat.h"
 #include "engine/LanNet.h"
+#include "engine/GamesLan.h"
+#ifdef _WIN32
+#include "engine/GamesHost.h"
+#endif
 #include "engine/PoolConfig.h"
 #include "engine/NetGate.h"
 #include "platform/Log.h"
@@ -43,11 +47,16 @@
 #include "platform/PlatformServices.h"
 #include "engine/Ragdoll.h"
 #include "engine/BlockyPhysics.h"
+#include "engine/PartGroupsLua.h"
+#include "engine/PartConstraints.h"
+#include "engine/PartConstraintsLua.h"
+#include "engine/PartPropsUi.h"
 #include "engine/R6PlayerExport.h"
 #include "engine/UndoStack.h"
 #include "platform/BlockyFileAssoc.h"
 #include "platform/CrashHandler.h"
 #include "platform/TestSessionGuard.h"
+#include "platform/Resilience.h"
 #include "platform/ConfigFlags.h"
 #include "platform/EngineConfig.h"
 #include "platform/GamepadInput.h"
@@ -64,6 +73,8 @@
 #include "render/ShadowMap.h"
 #include "render/SunSky.h"
 #include "render/Bloom.h"
+#include "render/LookPack.h"
+#include "render/RenderPipeline.h"
 #include "render/Particles.h"
 #include "engine/Purchase.h"
 
@@ -76,6 +87,7 @@ static bool kIsGameEngine = false;
 #include "ui/ClassicMenu.h"
 #include "ui/StudioChrome.h"
 #include "studio/StudioIcons.h"
+#include "studio/StudioRibbon.h"
 #include "ui/MenuPadCursor.h"
 #include "ui/Loc.h"
 #include "ui/TouchControls.h"
@@ -129,8 +141,6 @@ static int g_renderW = 1280, g_renderH = 720;
 static float g_upscaleSharpen = 0.6f;
 
 static float g_fps = 0.f;
-// Tabella delle prestazioni per fase (F4). Vedi platform/FrameProfiler.h.
-static bool g_showProfiler = false;
 
 enum class AppScreen { MainMenu, Loading, Playing, Studio, AvatarPublisher };
 enum class CamMode { Studio, Play };
@@ -172,6 +182,296 @@ static std::vector<FriendPlayer> g_friendsTestBackup;
 static int g_friendSeq = 1;
 static DataModel g_world;
 static LuaRuntime g_lua;
+
+// ---- Sistemi generati da tools/genera.py ----------------------------------
+// Il generatore scrive SOTTO ogni segnaposto "@genera:"; non spostarli e non
+// cancellarli. Le righe gia' generate si possono modificare a mano.
+// @genera:include
+#include "systems/Classifica.h"
+#include "systems/ClassificaLua.h"
+#include "systems/ClassificaHud.h"
+#include "systems/AudioMixer.h"
+#include "systems/AudioMixerLua.h"
+#include "systems/AudioMixerHud.h"
+#include "systems/Veicoli.h"
+#include "systems/VeicoliLua.h"
+#include "systems/VeicoliHud.h"
+#include "systems/Tween.h"
+#include "systems/TweenLua.h"
+#include "systems/TweenHud.h"
+#include "systems/Missioni.h"
+#include "systems/MissioniLua.h"
+#include "systems/MissioniHud.h"
+#include "systems/Teams.h"
+#include "systems/TeamsLua.h"
+#include "systems/TeamsHud.h"
+#include "systems/Tag.h"
+#include "systems/TagLua.h"
+#include "systems/TagHud.h"
+#include "systems/Meteo.h"
+#include "systems/MeteoLua.h"
+#include "systems/MeteoHud.h"
+#include "systems/Notifiche.h"
+#include "systems/NotificheLua.h"
+#include "systems/NotificheHud.h"
+#include "systems/Dialoghi.h"
+#include "systems/DialoghiLua.h"
+#include "systems/DialoghiHud.h"
+#include "systems/Zone.h"
+#include "systems/ZoneLua.h"
+#include "systems/ZoneHud.h"
+#include "systems/Cooldown.h"
+#include "systems/CooldownLua.h"
+#include "systems/CooldownHud.h"
+#include "systems/Debris.h"
+#include "systems/DebrisLua.h"
+#include "systems/DebrisHud.h"
+#include "systems/Prossimita.h"
+#include "systems/ProssimitaLua.h"
+#include "systems/ProssimitaHud.h"
+#include "systems/Hitbox.h"
+#include "systems/HitboxLua.h"
+#include "systems/HitboxHud.h"
+#include "systems/Badge.h"
+#include "systems/BadgeLua.h"
+#include "systems/BadgeHud.h"
+#include "systems/Timer.h"
+#include "systems/TimerLua.h"
+#include "systems/TimerHud.h"
+#include "systems/Salute.h"
+#include "systems/SaluteLua.h"
+#include "systems/SaluteHud.h"
+#include "systems/Knockback.h"
+#include "systems/KnockbackLua.h"
+#include "systems/KnockbackHud.h"
+#include "systems/CameraShake.h"
+#include "systems/CameraShakeLua.h"
+#include "systems/CameraShakeHud.h"
+#include "systems/Proiettili.h"
+#include "systems/ProiettiliLua.h"
+#include "systems/ProiettiliHud.h"
+#include "systems/Combo.h"
+#include "systems/ComboLua.h"
+#include "systems/ComboHud.h"
+#include "systems/Stamina.h"
+#include "systems/StaminaLua.h"
+#include "systems/StaminaHud.h"
+#include "systems/Terrain.h"
+#include "systems/TerrainLua.h"
+#include "systems/Inventario.h"
+#include "systems/InventarioLua.h"
+#include "systems/InventarioHud.h"
+#include "systems/Mobs.h"
+#include "systems/MobsLua.h"
+#include "systems/MobsHud.h"
+#include "systems/Crafting.h"
+#include "systems/CraftingLua.h"
+#include "systems/CraftingHud.h"
+#include "systems/Fame.h"
+#include "systems/FameLua.h"
+#include "systems/FameHud.h"
+#include "systems/Mondo.h"
+#include "systems/MondoLua.h"
+#include "systems/MondoHud.h"
+#include "systems/Forno.h"
+#include "systems/FornoLua.h"
+#include "systems/FornoHud.h"
+#include "systems/Cassa.h"
+#include "systems/CassaLua.h"
+#include "systems/CassaHud.h"
+#include "systems/GameplayServicesLua.h"
+#include "systems/GameKit.h"
+#include "systems/GameKitLua.h"
+// @genera:globals
+static gamekit::GameKit g_gameKit;
+static Terrain g_terrain;
+static Inventario g_inventario;
+static Mobs g_mobs;
+static Crafting g_crafting;
+static Fame g_fame;
+static Mondo g_mondo;
+static Forno g_forno;
+static Cassa g_cassa;
+static Currency g_currency;
+static gameplayservices::CombatBundle g_combatBundle;
+static Classifica g_classifica;
+static AudioMixer g_audioMixer;
+static Veicoli g_veicoli;
+static Tween g_tween;
+static Missioni g_missioni;
+static Teams g_teams;
+static Tag g_tag;
+static Meteo g_meteo;
+static Notifiche g_notifiche;
+static Dialoghi g_dialoghi;
+static Zone g_zone;
+static Cooldown g_cooldown;
+static Debris g_debris;
+static Prossimita g_prossimita;
+static Hitbox g_hitbox;
+static Badge g_badge;
+static Timer g_timer;
+static Salute g_salute;
+static Knockback g_knockback;
+static CameraShake g_cameraShake;
+static Proiettili g_proiettili;
+static Combo g_combo;
+static Stamina g_stamina;
+static void registerGeneratedLua() {
+    // @genera:lua
+    g_lua.extensions.push_back({"Classifica", &classificalua::registerLua, &g_classifica});
+    g_lua.extensions.push_back({"AudioMixer", &audiomixerlua::registerLua, &g_audioMixer});
+    g_lua.extensions.push_back({"Veicoli", &veicolilua::registerLua, &g_veicoli});
+    g_lua.extensions.push_back({"Tween", &tweenlua::registerLua, &g_tween});
+    g_lua.extensions.push_back({"Missioni", &missionilua::registerLua, &g_missioni});
+    g_lua.extensions.push_back({"Teams", &teamslua::registerLua, &g_teams});
+    g_lua.extensions.push_back({"Tag", &taglua::registerLua, &g_tag});
+    g_lua.extensions.push_back({"Meteo", &meteolua::registerLua, &g_meteo});
+    g_lua.extensions.push_back({"Notifiche", &notifichelua::registerLua, &g_notifiche});
+    g_lua.extensions.push_back({"Dialoghi", &dialoghilua::registerLua, &g_dialoghi});
+    g_lua.extensions.push_back({"Zone", &zonelua::registerLua, &g_zone});
+    g_lua.extensions.push_back({"GameKit", &gamekitlua::registerLua, &g_gameKit});
+    g_lua.extensions.push_back({"Cooldown", &cooldownlua::registerLua, &g_cooldown});
+    g_lua.extensions.push_back({"Debris", &debrislua::registerLua, &g_debris});
+    g_lua.extensions.push_back({"Prossimita", &prossimitalua::registerLua, &g_prossimita});
+    g_lua.extensions.push_back({"Hitbox", &hitboxlua::registerLua, &g_hitbox});
+    g_lua.extensions.push_back({"Badge", &badgelua::registerLua, &g_badge});
+    g_lua.extensions.push_back({"Timer", &timerlua::registerLua, &g_timer});
+    g_lua.extensions.push_back({"Salute", &salutelua::registerLua, &g_salute});
+    g_lua.extensions.push_back({"Knockback", &knockbacklua::registerLua, &g_knockback});
+    g_lua.extensions.push_back({"CameraShake", &camerashakelua::registerLua, &g_cameraShake});
+    g_lua.extensions.push_back({"Proiettili", &proiettililua::registerLua, &g_proiettili});
+    g_lua.extensions.push_back({"Combo", &combolua::registerLua, &g_combo});
+    g_lua.extensions.push_back({"Stamina", &staminalua::registerLua, &g_stamina});
+    g_lua.extensions.push_back({"TerrainLuaInternal", &terrainlua::registerLua, &g_terrain});
+    g_lua.extensions.push_back({"Inventario", &inventariolua::registerLua, &g_inventario});
+    g_lua.extensions.push_back({"Mobs", &mobslua::registerLua, &g_mobs});
+    g_lua.extensions.push_back({"Crafting", &craftinglua::registerLua, &g_crafting});
+    g_lua.extensions.push_back({"Fame", &famelua::registerLua, &g_fame});
+    g_lua.extensions.push_back({"Mondo", &mondolua::registerLua, &g_mondo});
+    g_lua.extensions.push_back({"Forno", &fornolua::registerLua, &g_forno});
+    g_lua.extensions.push_back({"Cassa", &cassalua::registerLua, &g_cassa});
+    g_combatBundle.hitbox = &g_hitbox;
+    g_combatBundle.shots = &g_proiettili;
+    g_combatBundle.salute = &g_salute;
+    g_combatBundle.mobs = &g_mobs;
+    g_lua.extensions.push_back({"CombatService", [](lua_State* L, void* ctx) {
+        gameplayservices::registerCombat(L, static_cast<gameplayservices::CombatBundle*>(ctx));
+        gameplayservices::registerCurrency(L, &g_currency);
+        gameplayservices::registerAliases(L);
+    }, &g_combatBundle});
+}
+static void resetGeneratedSystems() {
+    // @genera:reset
+    g_classifica.reset();
+    g_audioMixer.reset();
+    g_veicoli.reset();
+    g_tween.reset();
+    g_missioni.reset();
+    g_teams.reset();
+    g_tag.reset();
+    g_meteo.reset();
+    g_notifiche.reset();
+    g_dialoghi.reset();
+    g_zone.reset();
+    g_gameKit.reset();
+    g_cooldown.reset();
+    g_debris.reset();
+    g_prossimita.reset();
+    g_hitbox.reset();
+    g_badge.reset();
+    g_timer.reset();
+    g_salute.reset();
+    g_knockback.reset();
+    g_cameraShake.reset();
+    g_proiettili.reset();
+    g_combo.reset();
+    g_stamina.reset();
+    g_terrain.reset();
+    g_inventario.reset();
+    g_mobs.reset();
+    g_mobs.attach(&g_terrain);
+    g_crafting.reset();
+    g_crafting.attach(&g_inventario);
+    g_fame.reset();
+    g_mondo.reset();
+    g_mondo.attach(&g_terrain);
+    g_forno.reset();
+    g_cassa.reset();
+    g_currency.reset();
+}
+static void updateGeneratedSystems(float dt) {
+    (void)dt;
+    // @genera:update
+    g_classifica.update(dt);
+    g_audioMixer.update(dt);
+    g_veicoli.update(dt);
+    g_tween.update(dt);
+    g_missioni.update(dt);
+    g_teams.update(dt);
+    g_tag.update(dt);
+    g_meteo.update(dt);
+    g_notifiche.update(dt);
+    g_dialoghi.update(dt);
+    g_zone.update(dt);
+    // GameKit tick is driven from tickGameKitFrame (Studio UI) with player pose
+    g_cooldown.update(dt);
+    g_debris.update(dt);
+    g_prossimita.update(dt);
+    g_hitbox.update(dt);
+    g_badge.update(dt);
+    g_timer.update(dt);
+    g_salute.update(dt);
+    g_knockback.update(dt);
+    g_cameraShake.update(dt);
+    g_proiettili.update(dt);
+    g_combo.update(dt);
+    g_stamina.update(dt);
+    g_terrain.update(dt);
+    g_inventario.update(dt);
+    g_mobs.update(dt);
+    g_crafting.update(dt);
+    g_fame.update(dt);
+    g_mondo.update(dt);
+    g_forno.update(dt);
+    g_cassa.update(dt);
+    g_currency.update(dt);
+}
+static void drawGeneratedHud() {
+    // @genera:hud
+    drawClassificaHud(g_classifica);
+    drawAudioMixerHud(g_audioMixer);
+    drawVeicoliHud(g_veicoli);
+    drawTweenHud(g_tween);
+    drawMissioniHud(g_missioni);
+    drawTeamsHud(g_teams);
+    drawTagHud(g_tag);
+    drawMeteoHud(g_meteo);
+    drawNotificheHud(g_notifiche);
+    drawDialoghiHud(g_dialoghi);
+    drawZoneHud(g_zone);
+    drawCooldownHud(g_cooldown);
+    drawDebrisHud(g_debris);
+    drawProssimitaHud(g_prossimita);
+    drawHitboxHud(g_hitbox);
+    drawBadgeHud(g_badge);
+    drawTimerHud(g_timer);
+    drawSaluteHud(g_salute);
+    drawKnockbackHud(g_knockback);
+    drawCameraShakeHud(g_cameraShake);
+    drawProiettiliHud(g_proiettili);
+    drawComboHud(g_combo);
+    drawStaminaHud(g_stamina);
+    drawInventarioHud(g_inventario);
+    drawMobsHud(g_mobs);
+    drawCraftingHud(g_crafting);
+    drawFameHud(g_fame);
+    drawMondoHud(g_mondo);
+    drawFornoHud(g_forno);
+    drawCassaHud(g_cassa);
+}
+// ---------------------------------------------------------------------------
+
 static SoundService g_sounds;
 static LightingService g_lighting;
 static int g_selectedService = -1;
@@ -221,6 +521,9 @@ static int g_gripPreviewSlot = -1;
 // nel mondo su cui piantare le frecce — vive attaccato alla mano. Si trascina
 // quindi direttamente, con l'oggetto gia' disegnato in mano che segue il mouse.
 static int g_gripEditMode = 0;
+// Cosa si sta regolando: 0 = item in mano, 1.. = parte del corpo (vedi
+// kGripBodyTargets in StudioUiPanel / CameraAndInput).
+static int g_gripEditTarget = 0;
 static bool g_labelDragging = false;
 static int g_labelDragCorner = -1;
 static float g_labelGrabDX = 0.f, g_labelGrabDY = 0.f;
@@ -283,6 +586,9 @@ static bool g_showExplorer = true;
 static bool g_showProps = true;
 static bool g_showScript = false;
 static bool g_showLuaGuide = true;
+static bool g_showApiReference = false;
+static bool g_showLuaOutput = true;   // dock Output stile Studio (default ON)
+static int  g_studioRibbonTab = 0;    // 0 Home · 1 Avatar · 2 UI · 3 Script · 4 Model · 5 Test
 static bool g_showScriptCreatedGuide = false;
 static bool g_showAnimDock = false;
 static bool g_showPlayerAnimPublisher = false;
@@ -366,6 +672,8 @@ static int g_scaleAxis = -1;
 static int g_scaleSign = 0;
 static float g_scaleStartFace = 0.f;
 static glm::vec3 g_scaleStartPos{0}, g_scaleStartSize{1};
+static glm::mat4 g_scaleStartRotMat{1.f};
+static float g_scaleStartMx = 0.f, g_scaleStartMy = 0.f;
 static constexpr float kHandleSize = 0.48f;
 
 static bool g_moveDragging = false;
@@ -392,6 +700,9 @@ static char g_luaEditBuf[16384] =
     "workspace:Add(p)\n";
 static bool g_loadApiCompleta = false;
 static bool g_loadStamina = false;
+static bool g_loadCartLontano = false;
+static bool g_loadFucile = false;
+static float g_gamesLanAcc = 0.f;
 static std::string g_luaRunMsg;
 static glm::mat4 g_lastView{1.f}, g_lastProj{1.f};
 static EngineConfig g_engine = EngineConfig::createDefault();
@@ -405,6 +716,8 @@ static void updateRenderResolution() {
 static bool g_showPlatformPanel = false;
 static bool g_showChat = false;
 static bool g_playMenuOpen = false;
+// Statistiche prestazioni (menu Visualizza / F4 / menu Esc in gioco).
+static bool g_showProfiler = false;
 
 #include "main_ui/LuaSyntaxEditor.h"
 
@@ -434,6 +747,8 @@ static glm::vec3 g_skyHorizon{0.69f, 0.84f, 0.95f};
 static ShadowMap g_shadowMap;
 static bool g_sunShadowOn = false;
 static Bloom g_bloom;
+static LookPack g_look;
+static int g_lookPresetUi = 0;
 
 #include "main_ui/RenderPrimitives.h"
 
@@ -475,6 +790,101 @@ static AnimatedModel fbx;
 static bool fbxOk = false;
 static AnimatedModel noobGlb;
 
+// Classifica <-> rete: la mia riga parte quando cambia, quelle degli altri
+// arrivano firmate dall'host. Offline resta tutto locale.
+static void syncClassificaNet() {
+    const bool online = g_net.role != NetRole::Offline;
+    g_classifica.setLocalPlayer(online ? g_net.localName
+                                       : (g_menu.username[0] ? g_menu.username : "Player"));
+    if (!online) return;
+
+    std::string payload;
+    if (g_classifica.takeLocalRowToSend(payload))
+        g_net.sendStats(payload.c_str());
+    for (const auto& in : g_net.incomingStats)
+        g_classifica.applyRow(in.player, in.payload);
+    g_net.incomingStats.clear();
+
+    std::vector<std::string> present;
+    for (const auto& r : g_net.remotes) present.push_back(r.name);
+    g_classifica.setPresentPlayers(present);
+}
+
+// Le orecchie del suono 3D stanno dove sta la camera, guardando dove guarda.
+static void syncAudioListener() {
+    const glm::mat4 inv = glm::inverse(g_firstPerson ? firstPersonView() : thirdPersonView());
+    g_audioMixer.setListener(glm::vec3(inv[3]), -glm::vec3(inv[2]));
+}
+
+// Da "sounds/jump.wav" (script, Studio) al file vero; percorsi gia' validi restano.
+static std::string resolveSoundPath(const std::string& p) {
+    return fileExistsPath(p) ? p : resolveScriptPath(p);
+}
+
+// Tutti i suoni del motore passano dal mixer (si sommano invece di fermarsi a
+// vicenda). Se l'audio non parte, SoundService resta sul vecchio backend.
+static void startAudioMixer() {
+    AudioMixer::Config cfg;
+    cfg.maxVoices = g_engine.quality.mobile ? 16 : 32;
+    if (!g_audioMixer.init(cfg)) {
+        LOG_WARN("audio", "mixer non avviato (%s): resta il backend a voce singola",
+                 g_audioMixer.lastError().c_str());
+        return;
+    }
+    g_audioMixer.resolveScriptPath = resolveSoundPath;
+    g_sounds.mixPlay = [](const std::string& p, float vol, bool loop) {
+        return g_audioMixer.play(resolveSoundPath(p), vol, loop);
+    };
+    g_sounds.mixStop = [](int voice) { g_audioMixer.stop(voice); };
+    g_sounds.mixStopAll = [] { g_audioMixer.stopAll(); };
+    g_sounds.mixError = [] { return g_audioMixer.lastError(); };
+    LOG_INFO("audio", "mixer pronto: fino a %d suoni insieme", cfg.maxVoices);
+}
+
+// Sale sull'auto vicina o scende da quella su cui e'. Mentre guida il corpo
+// del personaggio esce dalla fisica (l'auto non deve sbattere sul guidatore).
+static void enterOrExitVehicle() {
+    if (g_veicoli.seated()) {
+        const glm::vec3 out = g_veicoli.exit(g_world.parts);
+        g_playerPos = out;
+        g_bphys.setCharacterSeated(false, out);
+        g_player.humanoid.velocityY = 0.f;
+        acOnLegitimateMove();
+        return;
+    }
+    const int v = g_veicoli.nearVehicle();
+    if (v >= 0 && g_veicoli.enter(v)) {
+        g_bphys.setCharacterSeated(true, g_playerPos);
+        g_moveVel = {0, 0, 0};
+        // Fino a ~15 stud fino al tetto in un frame: non e' un teletrasporto.
+        acOnLegitimateMove();
+    }
+}
+
+// Dopo la fisica: ruote visibili, auto vicina per il bottone, guidatore
+// seduto sul tetto e camera che si mette dietro l'auto quando si muove.
+static void syncVeicoli(float dt) {
+    if (g_veicoli.takeToggleRequest()) enterOrExitVehicle();
+    g_veicoli.syncWheels(g_world.parts);
+    g_veicoli.scan(g_world.parts, g_playerPos);
+    if (!g_veicoli.seated()) return;
+    // Morto, o l'auto e' uscita dal mondo (caduta oltre il bordo): si scende,
+    // e la fisica del personaggio fa il resto (caduta, respawn).
+    if (g_player.humanoid.dead || !g_bphys.isVehicle(g_veicoli.driving())) {
+        enterOrExitVehicle();
+        return;
+    }
+    g_playerPos = g_veicoli.seatPosition(g_world.parts);
+    const glm::vec3 f = g_veicoli.forwardFlat(g_world.parts);
+    g_playerYaw = yawFromDir(f);
+    if (std::fabs(g_veicoli.speed()) > 2.f && !g_firstPerson) {
+        float diff = glm::degrees(std::atan2(-f.x, -f.z)) - g_orbitYaw;
+        while (diff > 180.f) diff -= 360.f;
+        while (diff < -180.f) diff += 360.f;
+        g_orbitYaw += diff * std::min(1.f, 2.5f * dt);
+    }
+}
+
 static void blockyStepFrame(GLFWwindow* win) {
     static float lastT = (float)glfwGetTime();
     static int frames = 0;
@@ -498,9 +908,10 @@ static void blockyStepFrame(GLFWwindow* win) {
         // blocco e' quello con "Importazione in corso..." gia' disegnato
         // (vedi insertImportedModel/processPendingModelImport).
         processPendingModelImport();
+        applyPendingToolboxModelMeta();
 
         float now = (float)glfwGetTime();
-        float dt = std::min(now - lastT, 0.05f);
+        float dt = blk::resilience::clampSimulationDt(now - lastT);
         lastT = now;
         fpsAcc += dt; frames++;
         if (fpsAcc >= 0.5f) {
@@ -697,6 +1108,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                         enterAvatarPublisher();
                     if (ImGui::IsKeyPressed(ImGuiKey_F2))
                         g_showLuaGuide = !g_showLuaGuide;
+                    // Window Search (Studio platform) — Ctrl+Shift+P
+                    if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift
+                        && ImGui::IsKeyPressed(ImGuiKey_P))
+                        g_showWindowSearch = true;
                 }
             }
             const bool playUiOpen = (g_screen == AppScreen::Playing && g_playMenuOpen)
@@ -818,6 +1233,29 @@ static void blockyStepFrame(GLFWwindow* win) {
                     else
                         wish = glm::vec3(0.f);
 
+                    // Auto: F (o B sul pad) sale/scende; mentre si guida
+                    // l'input va al volante, non alle gambe. Input grezzo, non
+                    // relativo alla camera: W porta avanti l'auto anche se la
+                    // camera guarda di lato.
+                    static bool fWas = false;
+                    const bool fKey = kbOk && glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS;
+                    if ((fKey && !fWas) || (padOk && pad.bPressed)) g_veicoli.requestToggle();
+                    fWas = fKey;
+                    if (g_veicoli.seated()) {
+                        float fwdIn = 0.f, rightIn = 0.f;
+                        if (kbOk && glfwGetKey(win, GLFW_KEY_W)) fwdIn += 1.f;
+                        if (kbOk && glfwGetKey(win, GLFW_KEY_S)) fwdIn -= 1.f;
+                        if (kbOk && glfwGetKey(win, GLFW_KEY_D)) rightIn += 1.f;
+                        if (kbOk && glfwGetKey(win, GLFW_KEY_A)) rightIn -= 1.f;
+                        if (padOk) {
+                            fwdIn += pad.ly;
+                            rightIn += pad.lx;
+                        }
+                        g_veicoli.drive(fwdIn, rightIn);
+                        wish = glm::vec3(0.f);
+                        wishLen = 0.f;
+                    }
+
                     scriptControls().moveHeld = wishLen > 0.001f;
                     scriptControls().sprintHeld = sprintKey && scriptControls().moveHeld;
 
@@ -847,10 +1285,8 @@ static void blockyStepFrame(GLFWwindow* win) {
 
                     // Suono passi: un "passo" ogni tot stud percorsi (non ogni
                     // tot secondi fissi), cosi' sprint = passi piu' ravvicinati.
-                    // g_sounds e' a voce singola (PlaySoundA di WinMM ferma
-                    // sempre il suono precedente) — un passo puo' interrompere
-                    // un altro effetto in corso mentre cammini, limite del
-                    // motore audio attuale, non di questa funzione.
+                    // Passano dall'AudioMixer: si sommano agli altri effetti
+                    // invece di interromperli.
                     static bool g_wasWalking = false;
                     if (g_walking && hSpd > 0.5f) {
                         const float kStrideStuds = 4.5f;
@@ -885,11 +1321,12 @@ static void blockyStepFrame(GLFWwindow* win) {
 
                     static bool spaceWas = false;
                     bool spaceKey = kbOk && glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS;
-                    if (scriptControls().jumpEnabled) {
-                        if ((spaceKey && !spaceWas) || (padOk && pad.aPressed)) {
-                            if (g_player.humanoid.tryJump())
-                                g_sounds.playPath(resolveScriptPath("sounds/jump.wav"));
-                        }
+                    const bool jumpPressed = (spaceKey && !spaceWas) || (padOk && pad.aPressed);
+                    if (g_veicoli.seated()) {
+                        if (jumpPressed) g_veicoli.requestToggle();   // come in Roblox: salto = scendi
+                    } else if (scriptControls().jumpEnabled && jumpPressed) {
+                        if (g_player.humanoid.tryJump())
+                            g_sounds.playPath(resolveScriptPath("sounds/jump.wav"));
                     }
                     spaceWas = spaceKey;
 
@@ -943,7 +1380,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                     insertNewLabel();
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B))
                     insertNewTextButton();
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_U)) insertSound();
+                // Come in Roblox Studio Ctrl+U separa il Model selezionato;
+                // senza Model resta la vecchia scorciatoia "inserisci suono".
+                if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U))
+                    if (!studioUngroupSelection()) insertSound();
                 if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A))
                     beginAnimateSelectedModel();
                 if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R))
@@ -953,12 +1393,14 @@ static void blockyStepFrame(GLFWwindow* win) {
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
                     if (g_undo.applyUndo(g_world, g_selectedPart))
                         g_exportMsg = "Annullato";
+                    studioFollowRebaseline();
                 }
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
                     if (g_undo.applyRedo(g_world, g_selectedPart))
                         g_exportMsg = "Ripetuto";
+                    studioFollowRebaseline();
                 }
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelected();
+                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) studioDuplicateSelection();
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L)) addScriptToSelected();
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelected();
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) {
@@ -1024,8 +1466,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                 if (inPlay) {
                     g_bphys.configure(g_engine.quality);
                     g_bphys.sync(g_world.parts, g_playerPos, dt);
+                    g_bphys.syncJoints(g_world.welds);
                 } else {
                     g_bphys.reset();
+                    g_anchoredWelds.reset();   // all'avvio della prossima partita si riprendono gli offset
                 }
                 physAcc += dt;
                 int guard = 0;
@@ -1040,13 +1484,46 @@ static void blockyStepFrame(GLFWwindow* win) {
                 }
                 if (physAcc > step * 2.f) physAcc = 0.f;
                 if (inPlay) g_bphys.writeBack(g_world.parts, physAcc / step);
+                // Le part libere le tiene insieme Jolt (syncJoints); qui solo
+                // le saldature su part ancorate, che seguono gli script.
+                if (inPlay) g_anchoredWelds.apply(g_world);
+                if (inPlay) {
+                    g_mobs.setPlayer(g_playerPos.x, g_playerPos.y, g_playerPos.z,
+                                     g_lighting.nightAmount() > 0.55f);
+                    updateGeneratedSystems(dt);
+                    {
+                        const float mobDmg = g_mobs.takePlayerDamage();
+                        if (mobDmg > 0.f)
+                            g_player.humanoid.takeDamage(mobDmg);
+                    }
+                    syncClassificaNet();
+                    syncVeicoli(dt);
+                    syncAudioListener();
+                }
+                if (inPlay && g_engine.quality.runtimeWorldGuard) {
+                    static int guardTick = 0;
+                    if ((++guardTick % 12) == 0)
+                        blk::resilience::sanitizeWorldSlice(g_world, g_playerPos);
+                    if ((guardTick % 24) == 0) {
+                        const int pf = g_bphys.sanityClampActiveBodies(
+                            g_engine.quality.mobile ? 110.f : 160.f);
+                        blk::resilience::recordPhysicsFixes(pf);
+                    }
+                }
             }
             acValidateMovement(g_playerPos, g_moveVel, dt, (float)glfwGetTime(),
                                g_player.humanoid.grounded, g_player.humanoid.velocityY);
             g_player.update(dt, g_walking);
             updateFriendPlayers(dt);
             if (g_screen == AppScreen::Playing && g_net.role != NetRole::Offline) {
-                { PROF_SCOPE(plat::prof::Phase::Network); g_net.poll((float)glfwGetTime()); }
+                { PROF_SCOPE(plat::prof::Phase::Network);
+                  g_net.poll((float)glfwGetTime());
+                  // Replica Part host→client (stile Roblox DataModel).
+                  if (g_net.role == NetRole::Host)
+                      g_net.tickWorldReplication(g_world, dt);
+                  else if (g_net.role == NetRole::Client)
+                      g_net.applyIncomingWorld(g_world);
+                }
                 pollPortMapStatus(g_menu.netStatus, sizeof(g_menu.netStatus));
                 if (g_lua.scriptSetChanged) {
                     g_net.localScriptHashes = g_lua.scriptHashes;
@@ -1126,12 +1603,32 @@ static void blockyStepFrame(GLFWwindow* win) {
                 std::string crashReason;
                 bool okFrame = TestSessionGuard::runGuarded([&]() {
                     { PROF_SCOPE(plat::prof::Phase::Scripts); g_lua.fireHeartbeat(dt); }
+                    {
+                        static bool eWas = false;
+                        bool eNow = false;
+                        if (!io.WantCaptureKeyboard)
+                            eNow = glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS;
+                        // anche pad Y / interact se presente
+                        if (gamepad().yPressed) eNow = true;
+                        g_lua.tickProximity(eNow && !eWas);
+                        eWas = eNow;
+                    }
                     pollPartTouched();
                     pollBackpackEquipChanged();
                     tickBoomAutoFuse(dt);
                     tickCameraShake(dt);
                     g_lua.drainRemoteEvents();
                 }, &crashReason);
+                if (g_lua.budgetExceeded) {
+                    bool killHb = false;
+                    blk::resilience::onLuaBudgetExceeded(killHb);
+                    if (killHb) {
+                        g_lua.clearHeartbeats();
+                        g_luaRunMsg = "Script Lua fermati: lag eccessivo (budget Heartbeat)";
+                    }
+                } else {
+                    blk::resilience::onLuaFrameOk();
+                }
                 if (!okFrame) {
                     // Contenimento: uno script ha fatto crashare qualcosa
                     // di nativo a runtime (bug in una delle funzioni C
@@ -1285,6 +1782,14 @@ static void blockyStepFrame(GLFWwindow* win) {
             applyMenuPadCursor(menuPad, dt, (float)g_w, (float)g_h);
         }
         ImGui::NewFrame();
+        if (g_screen == AppScreen::Studio && !g_studioTesting) {
+            studioFeaturesPollHotkeys();
+            studioGroupsPollHotkeys();
+            studioSelectionPollHotkeys();
+            studioMultiplayerTestTick();
+            studio2020PollHotkeys();
+        }
+        multiplayerTestStatusTick();
         {
             // Il testo puo allontanarsi dalla base della piattaforma, non da 1.0.
             // Prima il limite era fisso: su un telefono la base giusta e ~1.6, e
@@ -1295,7 +1800,10 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
         if (playCameraActive()) {
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
-            io.WantCaptureMouse = false;
+            // Non azzerare WantCapture se il dito e' su un widget HUD
+            // (inventario, hamburger, chat): altrimenti il tocco vira la cam.
+            if (!ImGui::IsAnyItemHovered())
+                io.WantCaptureMouse = false;
             io.WantCaptureKeyboard = false;
         } else {
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -1354,6 +1862,38 @@ static void blockyStepFrame(GLFWwindow* win) {
                 blk::remotecatalog::startFetch(g_menu.gameServer);
             }
             {
+                std::string foundHost;
+                if (blk::gameslan::takeFoundHost(foundHost)) {
+                    std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "%s", foundHost.c_str());
+                    blk::remotegames::saveHost(foundHost);
+                    std::string h;
+                    int p = 0;
+                    blk::remotegames::splitHostPort(foundHost, h, p);
+                    netExtraDiscoveryHost() = h;
+                    blk::remotegames::startFetch(foundHost);
+                    blk::remotecatalog::startFetch(foundHost);
+                    g_menu.chatLines.push_back("[Games] Trovato il PC in rete (" + foundHost + ")");
+#ifdef __ANDROID__
+                    g_menu.chatLines.push_back("[Games] Elenco e download automatici dal PC...");
+#endif
+                }
+#ifdef __ANDROID__
+                // Riscopre il PC e ri-chiede /games: ogni gioco pubblicato
+                // compare nel menu e viene accodato al download da solo.
+                if (g_screen == AppScreen::MainMenu) {
+                    g_gamesLanAcc += dt;
+                    if (g_gamesLanAcc > 8.f) {
+                        g_gamesLanAcc = 0.f;
+                        blk::gameslan::startDiscover();
+                        if (g_menu.gameServer[0] && !blk::remotegames::isFetching()) {
+                            blk::remotegames::startFetch(g_menu.gameServer);
+                            blk::remotecatalog::startFetch(g_menu.gameServer);
+                        }
+                    }
+                }
+#endif
+            }
+            {
                 // I giochi del server arrivano da un thread: si innestano nella
                 // lista quando sono pronti, senza aver mai bloccato un frame.
                 std::vector<GameEntry> fromServer;
@@ -1371,11 +1911,23 @@ static void blockyStepFrame(GLFWwindow* win) {
                     for (const auto& g : BlockyProject::listInstalledGames()) {
                         const std::string dir =
                             BlockyProject::joinPath(BlockyProject::gamesInstallDir(), g.id);
-                        if (fileExistsPath(BlockyProject::joinPath(dir, "place.json")))
-                            pkgs.emplace_back(g.id, dir);
+                        const bool hasPlace =
+                            fileExistsPath(BlockyProject::joinPath(dir, "place.json"))
+                            || fileExistsPath(BlockyProject::joinPath(dir, "place.blockyplace"))
+                            || fileExistsPath(BlockyProject::joinPath(dir, "place.blocky"));
+                        if (hasPlace) pkgs.emplace_back(g.id, dir);
                     }
+                    // Con Blocky aperto i giochi sono gia' su HTTP (GamesHost):
+                    // syncAllGames serve solo verso un host esterno, non 127.0.0.1.
+                    const std::string gs = g_menu.gameServer;
+                    const bool selfHost = gs.empty()
+                        || gs.rfind("127.0.0.1", 0) == 0
+                        || gs.rfind("localhost", 0) == 0;
                     if (pkgs.empty())
                         g_menu.chatLines.push_back("[Games] Nessun gioco pubblicato da sincronizzare");
+                    else if (selfHost)
+                        g_menu.chatLines.push_back(
+                            "[Games] Gia' in rete: il telefono li prende da questo PC");
                     else
                         blk::remotegames::syncAllGames(g_menu.gameServer, pkgs);
                 }
@@ -1400,8 +1952,12 @@ static void blockyStepFrame(GLFWwindow* win) {
                 if (!uploadMsg.empty()) g_menu.chatLines.push_back("[Games] " + uploadMsg);
                 if (blk::remotegames::takeResult(fromServer) && !fromServer.empty()) {
                     mergeGamePackages(g_games, fromServer);
+                    blk::remotegames::applyDownloadedToList(g_games);
                     g_menu.chatLines.push_back("[Games] " + std::to_string(fromServer.size())
                                                + " giochi dal server");
+                    // Ogni gioco rilasciato sul PC: in menu subito, download in coda.
+                    if (g_menu.gameServer[0])
+                        blk::remotegames::enqueueMissingDownloads(g_menu.gameServer, fromServer);
                 }
             }
             {
@@ -1412,6 +1968,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                 const std::string dlMsg = blk::remotegames::takeDownloadStatus();
                 if (!dlMsg.empty()) g_menu.chatLines.push_back("[Games] " + dlMsg);
                 if (!doneId.empty()) {
+                    const bool launch = blk::remotegames::takeLastDownloadLaunch();
                     const std::string dir = blk::remotegames::localGameDir(doneId);
                     for (size_t i = 0; i < g_games.size(); ++i) {
                         if (g_games[i].id != doneId) continue;
@@ -1421,8 +1978,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                         if (fileExistsPath(thumb)) g_games[i].iconPath = thumb;
                         const std::string bbc = dir + "/scripts/main.bbc";
                         g_games[i].script = fileExistsPath(bbc) ? bbc : (dir + "/scripts/main.lua");
-                        g_menu.launchGame = (int)i;
-                        g_menu.wantPlay = true;
+                        if (launch) {
+                            g_menu.launchGame = (int)i;
+                            g_menu.wantPlay = true;
+                        }
                         break;
                     }
                 }
@@ -1430,13 +1989,26 @@ static void blockyStepFrame(GLFWwindow* win) {
             if (g_menu.wantPlay && g_menu.launchGame >= 0
                 && g_menu.launchGame < (int)g_games.size()
                 && g_games[g_menu.launchGame].remote) {
-                g_menu.wantPlay = false;
-                const std::string id = g_games[g_menu.launchGame].id;
-                if (blk::remotegames::isDownloading()) {
-                    g_menu.chatLines.push_back("[Games] Download gia in corso...");
+                const int gi = g_menu.launchGame;
+                const std::string id = g_games[gi].id;
+                // Gia' scaricato: punta ai path locali e gioca subito (no rete).
+                if (blk::remotegames::isDownloaded(id)) {
+                    const std::string dir = blk::remotegames::localGameDir(id);
+                    g_games[gi].remote = false;
+                    g_games[gi].placePath = blk::remotegames::localPlacePath(id);
+                    const std::string thumb = blk::remotegames::thumbnailPath(id);
+                    if (fileExistsPath(thumb)) g_games[gi].iconPath = thumb;
+                    const std::string bbc = dir + "/scripts/main.bbc";
+                    g_games[gi].script = fileExistsPath(bbc) ? bbc : (dir + "/scripts/main.lua");
+                    // wantPlay resta true → startLoadingGame sotto
                 } else {
-                    g_menu.chatLines.push_back("[Games] Scarico \"" + id + "\" dal server...");
-                    blk::remotegames::downloadGame(g_menu.gameServer, id);
+                    g_menu.wantPlay = false;
+                    if (blk::remotegames::isDownloading()) {
+                        g_menu.chatLines.push_back("[Games] Download gia in corso...");
+                    } else {
+                        g_menu.chatLines.push_back("[Games] Scarico \"" + id + "\" dal server...");
+                        blk::remotegames::downloadGame(g_menu.gameServer, id);
+                    }
                 }
             }
             if (g_menu.wantPlay && g_menu.launchGame >= 0) {
@@ -1489,6 +2061,8 @@ static void blockyStepFrame(GLFWwindow* win) {
             drawStudioUi(fbx, fbxOk);
             drawRigAnimatorUi();
             drawToolboxWindow();
+            drawPublishToolWindow();
+            drawDeleteToolWindow();
             drawGizmoOverlayHud();
             drawSavePlacePrompt(win);
         }
@@ -1506,7 +2080,24 @@ static void blockyStepFrame(GLFWwindow* win) {
 
         plat::prof::end(plat::prof::Phase::World);
         { PROF_SCOPE(plat::prof::Phase::PostFx);
-        g_bloom.endSceneAndComposite(g_w, g_h, 1.6f, 0.95f, 1.5f, g_upscaleSharpen); }
+        const bool useBloom = g_engine.quality.postFx || (g_look.enabled && g_look.wantPostFx);
+        const float exp = g_look.enabled ? g_look.exposure : 1.f;
+        const float con = g_look.enabled ? g_look.contrast : 1.f;
+        const float sat = g_look.enabled ? g_look.saturation : 1.f;
+        const float vig = g_look.enabled ? g_look.vignette : 0.f;
+        float bloomI = g_look.enabled ? g_look.bloomIntensity : 1.6f;
+        if (g_lighting.sunRaysEnabled)
+            bloomI *= (1.f + g_lighting.sunRaysIntensity * 0.85f * g_lighting.sunRaysSpread);
+        const float thL = g_look.enabled ? g_look.bloomThLow : 0.95f;
+        const float thH = g_look.enabled ? g_look.bloomThHigh : 1.5f;
+        const float sharp = g_look.enabled ? g_look.sharpen
+            : (g_engine.quality.mobile ? 0.35f : g_upscaleSharpen);
+        if (useBloom)
+            g_bloom.endSceneAndComposite(g_w, g_h, bloomI, thL, thH, sharp,
+                                         g_look.enabled, exp, con, sat, vig);
+        else
+            g_bloom.endScenePresent(g_w, g_h, sharp, g_look.enabled, exp, con, sat, vig);
+        }
 
         { PROF_SCOPE(plat::prof::Phase::Ui);
         ImGui::Render();
@@ -1517,6 +2108,9 @@ static void blockyStepFrame(GLFWwindow* win) {
         // bottiglia e la scheda video, non il codice.
         { PROF_SCOPE(plat::prof::Phase::Present); glfwSwapBuffers(win); }
         plat::prof::endFrame(dt);
+        if (blk::resilience::tickLagDefense(plat::prof::state().frameMs, g_engine.quality,
+                                            g_engine.quality.autoLagDefense))
+            updateRenderResolution();
 
         // Limitatore FPS: tiene CPU/GPU a un carico costante invece che al
         // 100% quando vsync/monitor lo permetterebbero — e' la causa piu'
@@ -1541,7 +2135,10 @@ static int blockyInitEngine(GLFWwindow*& win) {
 #endif
     blog::toFile(blockyDataDir() + "/blocky.log");
     LOG_INFO("boot", "Blocky avviato su %s", plat::name());
-
+    registerGeneratedLua();
+    g_lua.extensions.push_back({"Models", &partgroupslua::registerLua, &g_world});
+    g_lua.extensions.push_back({"Constraints", &partconstraintslua::registerLua, &g_world});
+    g_veicoli.attach(&g_bphys);
     intgBoot();
     std::snprintf(g_net.localFingerprint, sizeof(g_net.localFingerprint),
                   "%s", gateClientFingerprint().c_str());
@@ -1551,7 +2148,10 @@ static int blockyInitEngine(GLFWwindow*& win) {
     g_engine = EngineConfig::createDefault();
     g_vsync = g_engine.quality.vsync;
     loadGfxPreset();
+    loadWeakDeviceMute();
+    blk::resilience::syncQualityBaseline(g_engine.quality);
     g_engine.logBanner();
+    startAudioMixer();
 
     glfwSetErrorCallback(onGlfwError);
     if (!glfwInit()) {
@@ -1658,24 +2258,32 @@ static int blockyInitEngine(GLFWwindow*& win) {
 
     refreshGamesList();
     {
-        // Se un server dei giochi era gia stato impostato, lo si interroga
-        // subito all avvio: la richiesta parte in secondo piano, quindi non
-        // rallenta l apertura di una virgola.
+#ifdef _WIN32
+        // Il PC con Blocky aperto serve da solo i giochi pubblicati: il
+        // telefono sulla stessa Wi-Fi li trova senza scrivere l'IP.
+        int gamesPort = 8080;
+        if (blk::gameshost::start())
+            gamesPort = blk::gameshost::port();
+        blk::gameslan::startAnnounce(gamesPort);
+        // I giochi pubblicati in APPDATA/Blocky/games sono subito su HTTP:
+        // il telefono li elenca con GET /games e li scarica da solo.
+        std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "127.0.0.1:%d", gamesPort);
+        std::printf("[Blocky] Giochi pubblicati in rete locale sulla porta %d\n", gamesPort);
+#endif
+#ifdef __ANDROID__
+        // Telefono: IP del PC salvato + scoperta LAN. GET /games → menu + download.
         const std::string savedServer = blk::remotegames::loadHost();
         if (!savedServer.empty()) {
             std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "%s", savedServer.c_str());
             blk::remotegames::startFetch(savedServer);
             blk::remotecatalog::startFetch(savedServer);
-            // Lo stesso computer che ospita i giochi e quasi sempre quello che
-            // ospita le partite: chiederglielo direttamente evita di dipendere
-            // dal broadcast, che non tutti i router inoltrano.
-            {
-                std::string h;
-                int p = 0;
-                blk::remotegames::splitHostPort(savedServer, h, p);
-                netExtraDiscoveryHost() = h;
-            }
+            std::string h;
+            int p = 0;
+            blk::remotegames::splitHostPort(savedServer, h, p);
+            netExtraDiscoveryHost() = h;
         }
+        blk::gameslan::startDiscover();
+#endif
     }
     seedDefaultShop(g_menu);
     if (loadEquippedAvatar(g_catalog)) {
@@ -1782,12 +2390,21 @@ static int blockyInitEngine(GLFWwindow*& win) {
         }
     }
 #endif
+    // Giocatore di prova aperto dal "Test multiplayer" di Studio: entra
+    // subito in partita invece di mostrare il menu.
+    if (!kIsGameEngine) maybeStartMultiplayerTestFromEnv(win);
     return 1;
 }
 
 static void blockyShutdownEngine() {
     persistFastExit();
+    studioStopMultiplayerTest();   // chiudendo Studio si chiudono anche i giocatori di prova
+    blk::gameslan::stop();
+#ifdef _WIN32
+    blk::gameshost::stop();
+#endif
     g_sounds.stopAll();
+    g_audioMixer.shutdown();
     g_net.shutdown();
     closePortIfOpen();
     g_lua.shutdown();

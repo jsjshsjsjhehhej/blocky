@@ -191,6 +191,11 @@ uniform float uIntensity;
 uniform vec2  uSceneSize;   // risoluzione VERA della scena disegnata
 uniform float uUpscale;     // 1 = ricostruisci, 0 = campiona diretto
 uniform float uSharp;       // 0 = niente nitidezza, 1 = massima
+uniform float uLookOn;      // 1 = grade AAA, 0 = passthrough
+uniform float uExposure;
+uniform float uContrast;
+uniform float uSaturation;
+uniform float uVignette;
 
 // Catmull-Rom con 9 prelievi bilineari invece di 16 puntuali: stessa curva,
 // quasi meta' del lavoro. E' il filtro usato dai temporal upscaler moderni.
@@ -241,6 +246,23 @@ vec3 sharpenRCAS(sampler2D tex, vec2 uv, vec2 size, vec3 center, float amount) {
   return clamp(sharp, mn, mx);
 }
 
+vec3 acesTonemap(vec3 x) {
+  const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+  return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+}
+
+vec3 applyLookGrade(vec3 c) {
+  if (uLookOn < 0.5) return c;
+  c *= max(uExposure, 0.01);
+  c = acesTonemap(c);
+  c = (c - 0.5) * uContrast + 0.5;
+  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = mix(vec3(luma), c, uSaturation);
+  float r = length(vUV - vec2(0.5));
+  float vig = 1.0 - smoothstep(0.35, 0.95, r) * clamp(uVignette, 0.0, 1.0);
+  return max(c * vig, vec3(0.0));
+}
+
 void main(){
   vec3 scene;
   if (uUpscale > 0.5) {
@@ -251,7 +273,8 @@ void main(){
     scene = texture(uScene, vUV).rgb;
   }
   vec3 bloom = texture(uBloom, vUV).rgb;
-  FragColor = vec4(scene + bloom * uIntensity, 1.0);
+  vec3 outc = scene + bloom * uIntensity;
+  FragColor = vec4(applyLookGrade(outc), 1.0);
 })";
 
         brightProg = link(compile(GL_VERTEX_SHADER, fsQuadVS), compile(GL_FRAGMENT_SHADER, brightFS));
@@ -281,6 +304,15 @@ void main(){
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
+    void setLookGradeUniforms(bool lookOn, float exposure, float contrast,
+                              float saturation, float vignette) {
+        glUniform1f(glGetUniformLocation(compositeProg, "uLookOn"), lookOn ? 1.f : 0.f);
+        glUniform1f(glGetUniformLocation(compositeProg, "uExposure"), exposure);
+        glUniform1f(glGetUniformLocation(compositeProg, "uContrast"), contrast);
+        glUniform1f(glGetUniformLocation(compositeProg, "uSaturation"), saturation);
+        glUniform1f(glGetUniformLocation(compositeProg, "uVignette"), vignette);
+    }
+
     // Estrae le zone sopra soglia dalla scena appena disegnata, le sfoca
     // (ping-pong orizzontale/verticale a risoluzione dimezzata) e le somma
     // sopra l'immagine originale nel framebuffer reale (screenFbo=0).
@@ -291,7 +323,10 @@ void main(){
     // arrivano gia' oltre 1.0 anche con colori tenui).
     void endSceneAndComposite(int screenW, int screenH, float intensity = 1.6f,
                               float thLow = 0.95f, float thHigh = 1.5f,
-                              float sharpen = 0.6f) {
+                              float sharpen = 0.6f,
+                              bool lookOn = false,
+                              float exposure = 1.f, float contrast = 1.f,
+                              float saturation = 1.f, float vignette = 0.f) {
         if (!ready) {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, screenW, screenH);
@@ -347,6 +382,46 @@ void main(){
                     (float)fullW, (float)fullH);
         glUniform1f(glGetUniformLocation(compositeProg, "uUpscale"), upscaling ? 1.f : 0.f);
         glUniform1f(glGetUniformLocation(compositeProg, "uSharp"), upscaling ? sharpen : 0.f);
+        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette);
+        drawQuad();
+
+        glActiveTexture(GL_TEXTURE0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+    }
+
+    /** Present senza estrazione/blur bloom (1 pass composite/upscale). ~6 fullscreen pass in meno. */
+    void endScenePresent(int screenW, int screenH, float sharpen = 0.45f,
+                         bool lookOn = false,
+                         float exposure = 1.f, float contrast = 1.f,
+                         float saturation = 1.f, float vignette = 0.f) {
+        if (!ready) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, screenW, screenH);
+            return;
+        }
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, screenW, screenH);
+        glUseProgram(compositeProg);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sceneColorTex);
+        glUniform1i(glGetUniformLocation(compositeProg, "uScene"), 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, brightTex);
+        glUniform1i(glGetUniformLocation(compositeProg, "uBloom"), 1);
+        glUniform1f(glGetUniformLocation(compositeProg, "uIntensity"), 0.f);
+        const bool upscaling = (fullW < screenW || fullH < screenH);
+        glUniform2f(glGetUniformLocation(compositeProg, "uSceneSize"),
+                    (float)fullW, (float)fullH);
+        glUniform1f(glGetUniformLocation(compositeProg, "uUpscale"), upscaling ? 1.f : 0.f);
+        glUniform1f(glGetUniformLocation(compositeProg, "uSharp"),
+                    upscaling ? sharpen : 0.f);
+        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette);
         drawQuad();
 
         glActiveTexture(GL_TEXTURE0);

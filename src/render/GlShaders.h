@@ -131,6 +131,7 @@ uniform vec3 uColor,uSun,uCamPos;
 uniform float uEmissive,uSpecular,uRoughness,uAlpha;
 uniform int uMaterial;
 uniform sampler2D uMaterialTex;
+uniform int uHasMaterialTex;
 uniform int uLightCount;
 uniform vec3 uLightPos[8];
 uniform vec3 uLightCol[8];
@@ -169,18 +170,18 @@ void main(){
   vec3 H=normalize(Ls+V);
   float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
   float spec=pow(max(dot(N,H),0.0),shiny)*uSpecular;
-  // wood/grass striping leggero
+  // Texture materiale (PNG/JPG) se caricata; altrimenti pattern procedurali.
   vec3 base=uColor;
-  if(uMaterial==4){ // Wood — texture reale, colore della part solo come tinta leggera
-    vec2 uv=boxUV(vLocalPos,vLocalN)/8.0; // 1 tile ogni 8 stud, non 2 — niente piu' effetto "voxel"
+  if(uHasMaterialTex==1){
+    vec2 uv=boxUV(vLocalPos,vLocalN)/8.0; // 1 tile / 8 stud
     vec3 tex=texture(uMaterialTex,uv).rgb;
     base=tex*mix(vec3(1.0),uColor,0.35);
-  } else if(uMaterial==5){ // Concrete
+  } else if(uMaterial==5){ // Concrete fallback
     float nse=fract(sin(dot(vW.xz,vec2(12.9898,78.233)))*43758.5453);
     base*=mix(0.88,1.05,nse);
-  } else if(uMaterial==6){ // Grass
+  } else if(uMaterial==6){ // Grass fallback
     base*=mix(vec3(0.75,1.05,0.7),vec3(1.0),0.35+0.15*sin(vW.x*2.0));
-  } else if(uMaterial==9){ // Brick
+  } else if(uMaterial==9){ // Brick fallback
     float bx=floor(vW.x*2.0);
     float by=floor(vW.y*2.5);
     float cell=mod(bx+by,2.0);

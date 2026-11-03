@@ -29,6 +29,7 @@ struct PrefabPartSpec {
     PartMaterial material = PartMaterial::Plastic;
     float emissive = 0.f;
     bool pointLight = false;
+    bool vehicle = false;   // non ancorata + VehicleSeat: in Play si guida
 };
 
 struct PartPrefab {
@@ -113,6 +114,16 @@ static const std::vector<PartPrefab>& partPrefabs() {
                 {{0.f, 1.f, 0.f}, {4.f, 2.f, 8.f}, {0.55f, 0.55f, 0.58f}, PartShape::Wedge},
             }
         },
+        {
+            // Una Part sola: senza saldature fra Part (vedi sopra) una
+            // cabina separata non seguirebbe l'auto. Le 4 ruote le crea il
+            // motore in Play.
+            "Auto", "Auto guidabile: in Play avvicinati e premi F (o il bottone Guida)",
+            {
+                {{0.f, 2.5f, 0.f}, {6.f, 2.f, 10.f}, {0.80f, 0.15f, 0.12f},
+                 PartShape::Block, PartMaterial::SmoothPlastic, 0.f, false, true},
+            }
+        },
     };
     return kPrefabs;
 }
@@ -137,6 +148,10 @@ static void insertPrefab(const PartPrefab& prefab) {
         p.emissive = s.emissive;
         p.pointLight = s.pointLight;
         p.useStud = false;
+        if (s.vehicle) {
+            p.anchored = false;
+            p.vehicleSeat = true;
+        }
         const int idx = (int)g_world.parts.size() - 1;
         if (firstIdx < 0) firstIdx = idx;
         g_undo.recordInsert(idx, g_world.parts[idx]);
@@ -150,22 +165,65 @@ static void insertPrefab(const PartPrefab& prefab) {
  * La finestra Toolbox. Un elenco semplice: nome, suggerimento al passaggio
  * del mouse, un pulsante che inserisce.
  */
-static bool g_showToolbox = false;
+static bool g_showToolbox = true; // dock SX stile Roblox Studio (default ON)
+// Bottom dock tabs (defined early so Toolbox height can reserve space).
+static bool g_showAssets = true;
+static bool g_showConsole = false;
+
+// Snap/grid/viewIsolate/g_showCommandBar: definiti in SelectionAndInput.h
+// (prima di GizmoSystem). Qui solo Toolbox UI.
+
+static void drawUserToolboxSection(); // UserToolbox.h
 
 static void drawToolboxWindow() {
     if (!g_showToolbox) return;
-    ImGui::SetNextWindowSize({280, 360}, ImGuiCond_Appearing);
-    if (!ImGui::Begin("Toolbox", &g_showToolbox)) { ImGui::End(); return; }
 
-    ImGui::TextDisabled("Oggetti pronti, costruiti dalle forme del motore.");
+    // Dock a sinistra sotto il ribbon — stesso posto della Toolbox in Studio.
+    constexpr float kToolboxW = 280.f;
+    constexpr float kOutputH = 140.f;
+    const float menuH = ImGui::GetFrameHeight();
+    const float ribbonH = studio::kRibbonHeight;
+    const float panelY = menuH + ribbonH;
+    // Match StudioUiPanel bottom dock + status/command chrome.
+    const bool bottomDock = !g_studioTesting
+        && (g_showLuaOutput || g_showAssets || g_showConsole);
+    const float chromeH = g_studioTesting ? 0.f
+        : (22.f + (g_showCommandBar ? 28.f : 0.f));
+    const float outReserve = (bottomDock ? kOutputH : 0.f) + chromeH;
+    const float panelH = std::max(64.f, (float)g_h - panelY - outReserve);
+
+    ImGui::SetNextWindowPos({0.f, panelY}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({kToolboxW, panelH}, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.f);
+    studio_chrome::pushDockPanelColors();
+    const ImGuiWindowFlags dockFlags =
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
+    if (!ImGui::Begin("Toolbox", &g_showToolbox, dockFlags)) {
+        ImGui::End();
+        studio_chrome::popDockPanelColors();
+        return;
+    }
+
+    ImGui::TextDisabled("Creator Store · oggetti pronti");
     ImGui::Separator();
 
-    for (const PartPrefab& prefab : partPrefabs()) {
-        if (ImGui::Button(prefab.name, {-1, 34}))
-            insertPrefab(prefab);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s\n(%d part)", prefab.hint, (int)prefab.parts.size());
+    if (ImGui::BeginTabBar("##tbxtabs")) {
+        if (ImGui::BeginTabItem("Builtin")) {
+            for (const PartPrefab& prefab : partPrefabs()) {
+                if (ImGui::Button(prefab.name, {-1, 34}))
+                    insertPrefab(prefab);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s\n(%d part)", prefab.hint, (int)prefab.parts.size());
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("I miei tool")) {
+            drawUserToolboxSection();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
 
     ImGui::End();
+    studio_chrome::popDockPanelColors();
 }

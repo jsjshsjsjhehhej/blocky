@@ -131,6 +131,18 @@ foreach(_jolt_isa USE_SSE4_1 USE_SSE4_2 USE_AVX USE_AVX2 USE_LZCNT USE_TZCNT USE
     set(${_jolt_isa} OFF CACHE BOOL "" FORCE)
 endforeach()
 
+# ---- miniaudio (AudioMixer: piu' suoni insieme, suono 3D) ----
+# Un solo file, pubblico dominio / MIT-0. Stessa libreria su Windows (WASAPI)
+# e Android (AAudio/OpenSL): niente da riscrivere per piattaforma.
+# SOURCE_SUBDIR inesistente: serve solo l'header, non i suoi esempi.
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG        0.11.22
+    SOURCE_SUBDIR  solo-header
+)
+FetchContent_MakeAvailable(miniaudio)
+
 # ---- Assimp ----
 FetchContent_Declare(
     assimp
@@ -211,6 +223,9 @@ target_include_directories(imgui_lib PUBLIC
     ${imguicolortextedit_SOURCE_DIR}
 )
 target_compile_definitions(imgui_lib PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
+# Force-include PRIVATE: solo TUs di imgui_lib (non i .c di blocky).
+target_compile_options(imgui_lib PRIVATE
+    "-include${CMAKE_SOURCE_DIR}/src/imgui_blocky_config.h")
 target_link_libraries(imgui_lib PUBLIC glfw glad_gl_core)
 
 glad_add_library(glad_gl_core STATIC API gl:core=3.3)
@@ -365,9 +380,10 @@ add_library(blocky SHARED
     # si limita a ESTRARRE archivi, ne crea uno per spedire al server un gioco
     # appena pubblicato — quindi le funzioni zip_* vanno linkate davvero, non
     # basta piu' il solo header.
-    ${assimp_SOURCE_DIR}/contrib/zip/src/zip.c)
+    ${assimp_SOURCE_DIR}/contrib/zip/src/zip.c
+    src/systems/miniaudio_impl.c)
 target_include_directories(blocky PRIVATE ${CMAKE_SOURCE_DIR}/src ${stb_SOURCE_DIR}
-    ${assimp_SOURCE_DIR}/contrib/zip/src)
+    ${assimp_SOURCE_DIR}/contrib/zip/src ${miniaudio_SOURCE_DIR})
 target_link_libraries(blocky PRIVATE glfw glm::glm glad_gl_core assimp::assimp imgui_lib render_common engine_lib Jolt)
 # Header precompilato: glad/GLFW/ImGui/glm/STL pesanti e stabili, analizzati
 # una volta sola invece che in ognuno dei tre file di questo target — accelera
@@ -375,7 +391,7 @@ target_link_libraries(blocky PRIVATE glfw glm::glm glad_gl_core assimp::assimp i
 target_precompile_headers(blocky PRIVATE ${CMAKE_SOURCE_DIR}/src/pch.h)
 # zip.c e' C, non C++: l'header precompilato (pieno di ImGui, glm, template)
 # non puo' essere applicato a lui, il compilatore C non saprebbe leggerlo.
-set_source_files_properties(${assimp_SOURCE_DIR}/contrib/zip/src/zip.c
+set_source_files_properties(${assimp_SOURCE_DIR}/contrib/zip/src/zip.c src/systems/miniaudio_impl.c
     PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 set_target_properties(blocky PROPERTIES
     PREFIX "lib"
@@ -581,6 +597,127 @@ add_executable(test_physics src/tools/test_physics.cpp)
 target_link_libraries(test_physics PRIVATE Jolt)
 target_include_directories(test_physics PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_physics PRIVATE glm::glm)
+
+# Test dei sistemi creati da tools/genera.py (il generatore scrive qui sotto).
+# @genera:tests
+add_executable(test_classifica src/tools/test_classifica.cpp)
+target_include_directories(test_classifica PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_classifica PRIVATE glm::glm)
+add_executable(test_audio_mixer src/tools/test_audio_mixer.cpp)
+target_include_directories(test_audio_mixer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_audio_mixer PRIVATE glm::glm)
+add_executable(test_veicoli src/tools/test_veicoli.cpp)
+target_include_directories(test_veicoli PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_veicoli PRIVATE glm::glm)
+add_executable(test_tween src/tools/test_tween.cpp)
+target_include_directories(test_tween PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_tween PRIVATE glm::glm)
+add_executable(test_inventario src/tools/test_inventario.cpp)
+target_include_directories(test_inventario PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_inventario PRIVATE glm::glm)
+add_executable(test_missioni src/tools/test_missioni.cpp)
+target_include_directories(test_missioni PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_missioni PRIVATE glm::glm)
+add_executable(test_teams src/tools/test_teams.cpp)
+target_include_directories(test_teams PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_teams PRIVATE glm::glm)
+add_executable(test_tag src/tools/test_tag.cpp)
+target_include_directories(test_tag PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_tag PRIVATE glm::glm)
+add_executable(test_meteo src/tools/test_meteo.cpp)
+target_include_directories(test_meteo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_meteo PRIVATE glm::glm)
+add_executable(test_notifiche src/tools/test_notifiche.cpp)
+target_include_directories(test_notifiche PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_notifiche PRIVATE glm::glm)
+add_executable(test_dialoghi src/tools/test_dialoghi.cpp)
+target_include_directories(test_dialoghi PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_dialoghi PRIVATE glm::glm)
+add_executable(test_zone src/tools/test_zone.cpp)
+target_include_directories(test_zone PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_zone PRIVATE glm::glm)
+add_executable(test_cooldown src/tools/test_cooldown.cpp)
+target_include_directories(test_cooldown PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cooldown PRIVATE glm::glm)
+add_executable(test_crafting src/tools/test_crafting.cpp)
+target_include_directories(test_crafting PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_crafting PRIVATE glm::glm)
+add_executable(test_debris src/tools/test_debris.cpp)
+target_include_directories(test_debris PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_debris PRIVATE glm::glm)
+add_executable(test_prossimita src/tools/test_prossimita.cpp)
+target_include_directories(test_prossimita PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_prossimita PRIVATE glm::glm)
+add_executable(test_hitbox src/tools/test_hitbox.cpp)
+target_include_directories(test_hitbox PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_hitbox PRIVATE glm::glm)
+add_executable(test_badge src/tools/test_badge.cpp)
+target_include_directories(test_badge PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_badge PRIVATE glm::glm)
+add_executable(test_timer src/tools/test_timer.cpp)
+target_include_directories(test_timer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_timer PRIVATE glm::glm)
+add_executable(test_salute src/tools/test_salute.cpp)
+target_include_directories(test_salute PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_salute PRIVATE glm::glm)
+add_executable(test_knockback src/tools/test_knockback.cpp)
+target_include_directories(test_knockback PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_knockback PRIVATE glm::glm)
+add_executable(test_camera_shake src/tools/test_camera_shake.cpp)
+target_include_directories(test_camera_shake PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_camera_shake PRIVATE glm::glm)
+add_executable(test_proiettili src/tools/test_proiettili.cpp)
+target_include_directories(test_proiettili PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_proiettili PRIVATE glm::glm)
+add_executable(test_combo src/tools/test_combo.cpp)
+target_include_directories(test_combo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_combo PRIVATE glm::glm)
+add_executable(test_stamina src/tools/test_stamina.cpp)
+target_include_directories(test_stamina PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_stamina PRIVATE glm::glm)
+add_executable(test_terrain src/tools/test_terrain.cpp)
+target_include_directories(test_terrain PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_terrain PRIVATE glm::glm)
+add_executable(test_mobs src/tools/test_mobs.cpp)
+target_include_directories(test_mobs PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mobs PRIVATE glm::glm)
+add_executable(test_forno src/tools/test_forno.cpp)
+target_include_directories(test_forno PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_forno PRIVATE glm::glm)
+add_executable(test_cassa src/tools/test_cassa.cpp)
+target_include_directories(test_cassa PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_cassa PRIVATE glm::glm)
+add_executable(test_fame src/tools/test_fame.cpp)
+target_include_directories(test_fame PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_fame PRIVATE glm::glm)
+add_executable(test_mondo src/tools/test_mondo.cpp)
+target_include_directories(test_mondo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_mondo PRIVATE glm::glm)
+
+# Model di Studio (Ctrl+G) e Undo a lotti.
+add_executable(test_groups src/tools/test_groups.cpp)
+target_include_directories(test_groups PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_groups PRIVATE glm::glm engine_lib)
+if (WIN32)
+    target_link_libraries(test_groups PRIVATE ws2_32 psapi)
+    # Statico come libblocky.dll: lanciato da Git Bash, altrimenti carica la
+    # libstdc++ vecchia di Git (incompatibile) e crasha in std::ofstream.
+    target_link_options(test_groups PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Vincoli (Weld, Hinge, Rope, Spring, Rod) con la fisica vera.
+add_executable(test_constraints src/tools/test_constraints.cpp)
+target_include_directories(test_constraints PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_constraints PRIVATE glm::glm engine_lib Jolt)
+if (WIN32)
+    target_link_libraries(test_constraints PRIVATE ws2_32 psapi)
+    target_link_options(test_constraints PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Dipendenze in piu' dei sistemi (scritte a mano, il generatore non le sa).
+target_sources(test_audio_mixer PRIVATE src/systems/miniaudio_impl.c)
+target_include_directories(test_audio_mixer PRIVATE ${miniaudio_SOURCE_DIR})
+target_link_libraries(test_veicoli PRIVATE Jolt)
 
 # Controllo asset pre-release: esce != 0 se trova errori, così può fermare
 # uno script di packaging prima che il pacchetto venga creato.

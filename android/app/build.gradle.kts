@@ -9,10 +9,13 @@ android {
 
     defaultConfig {
         applicationId = "com.blocky.preview"
-        minSdk = 24
+        minSdk = 26 // Android 8.0: Blocky non gira su Android 7
         targetSdk = 37
         versionCode = 1
         versionName = "0.1-fase1"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {

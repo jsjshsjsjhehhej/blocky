@@ -109,6 +109,9 @@ add_library(blocky SHARED
     # Stesso motivo del CMake principale: il client crea archivi zip per
     # spedire i giochi al server, quindi le funzioni zip_* servono linkate.
     "${DEPS}/assimp-src/contrib/zip/src/zip.c"
+    # AudioMixer: miniaudio usa AAudio (Android 8+) o OpenSL ES (Android 7),
+    # caricati a runtime, quindi niente librerie in piu' da collegare.
+    "${REPO_ROOT}/src/systems/miniaudio_impl.c"
 )
 
 # glfw_shim PRIMO: e' cosi' che <GLFW/glfw3.h> e <glad/gl.h> trovano i finti
@@ -119,6 +122,7 @@ target_include_directories(blocky PRIVATE
     "${DEPS}/assimp-src/contrib/zip/src"
     "${DEPS}/glm-src"
     "${DEPS}/stb-src"
+    "${DEPS}/miniaudio-src"
 )
 
 # assimp imposta CMAKE_DEBUG_POSTFIX "d" e con add_subdirectory se lo porta

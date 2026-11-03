@@ -44,7 +44,11 @@
  * esiste, e' scritto bene, e viene usato da un file solo su venti.
  */
 
+#include <cstdint>
+#include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "platform/Platform.h"
 
@@ -141,6 +145,81 @@ inline bool launchProcess(const std::string& exePath,
     if (!args.empty()) cmd += " " + args;
     cmd += " >/dev/null 2>&1 &";
     return std::system(cmd.c_str()) == 0;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Processi da tenere d'occhio (Test multiplayer di Studio)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Come launchProcess, ma con variabili d'ambiente in piu' SOLO per il figlio
+// (il motore non legge la riga di comando) e un id per sapere se e' ancora
+// aperto e poterlo chiudere. 0 = non avviato. Solo Windows per ora: altrove
+// risponde 0, non finge.
+
+namespace detail {
+#if defined(_WIN32) && !defined(__ANDROID__)
+inline std::vector<std::pair<uint32_t, HANDLE>>& trackedProcesses() {
+    static std::vector<std::pair<uint32_t, HANDLE>> v;
+    return v;
+}
+#endif
+}
+
+inline uint32_t launchTracked(const std::string& exePath, const std::string& args,
+                              const std::string& workDir,
+                              const std::vector<std::pair<std::string, std::string>>& extraEnv) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+    if (exePath.empty()) return 0;
+    // Blocco ambiente = quello attuale + le variabili in piu', "K=V\0...\0".
+    std::string env;
+    if (char* cur = GetEnvironmentStringsA()) {
+        for (const char* p = cur; *p; p += std::strlen(p) + 1) env.append(p, std::strlen(p) + 1);
+        FreeEnvironmentStringsA(cur);
+    }
+    for (const auto& kv : extraEnv) env += kv.first + "=" + kv.second + '\0';
+    env += '\0';
+
+    std::string cmd = "\"" + exePath + "\"";
+    if (!args.empty()) cmd += " " + args;
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(exePath.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, env.data(),
+                        workDir.empty() ? nullptr : workDir.c_str(), &si, &pi))
+        return 0;
+    CloseHandle(pi.hThread);
+    detail::trackedProcesses().push_back({(uint32_t)pi.dwProcessId, pi.hProcess});
+    return (uint32_t)pi.dwProcessId;
+#else
+    (void)exePath; (void)args; (void)workDir; (void)extraEnv;
+    return 0;
+#endif
+}
+
+inline bool isTrackedAlive(uint32_t id) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+    for (const auto& t : detail::trackedProcesses())
+        if (t.first == id) return WaitForSingleObject(t.second, 0) == WAIT_TIMEOUT;
+#else
+    (void)id;
+#endif
+    return false;
+}
+
+// Chiude solo processi avviati con launchTracked da questo motore.
+inline void terminateTracked(uint32_t id) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+    auto& v = detail::trackedProcesses();
+    for (size_t k = 0; k < v.size(); ++k) {
+        if (v[k].first != id) continue;
+        if (WaitForSingleObject(v[k].second, 0) == WAIT_TIMEOUT) TerminateProcess(v[k].second, 0);
+        CloseHandle(v[k].second);
+        v.erase(v.begin() + (long)k);
+        return;
+    }
+#else
+    (void)id;
 #endif
 }
 

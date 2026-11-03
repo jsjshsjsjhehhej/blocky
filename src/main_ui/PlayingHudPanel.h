@@ -435,41 +435,50 @@ static void tryUseEquippedItem() {
     g_lua.fireItemActivated(it->id, it->name);
 }
 
-static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
-                              const glm::mat4& proj, const glm::vec3& sun) {
-    if (!equippedSword() || g_player.humanoid.dead) return;
-
+// Matrice del braccio destro nella posa di presa (default o holdPose item).
+// Usata da spada / torcia / mesh cosi' l'oggetto resta attaccato alla mano
+// anche quando si regola Left Arm / Torso / ecc.
+static bool heldRightArmMatrix(glm::mat4& outArmM) {
     const HumanoidPartDef* arm = nullptr;
     for (const auto& p : g_player.humanoid.parts) {
         if (p.name == "Right Arm") { arm = &p; break; }
     }
-    if (!arm) return;
+    if (!arm) return false;
 
-    float walkArm = humanoidArmSwing(g_player.humanoid);
-    float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
-    humanoidJumpPose(g_player.humanoid, jL, jR, jl, jr);
-    float bob = humanoidBob(g_player.humanoid);
-    float rx = arm->rotX;
-    float rz = arm->rotZ;
-    bool animDriven = (std::fabs(arm->rotX) + std::fabs(arm->rotZ)) > 0.01f;
-    // Stessa regola del braccio in BlockPlayer::draw: se c e un oggetto
-    // equipaggiato la posa di presa vince su tutto, altrimenti il braccio si
-    // alzerebbe e la mesh resterebbe indietro a meta strada.
-    if (effectiveHeldSlot() >= 0) {
-        rx = kEquippedArmHoldDeg;
-    } else if (!animDriven)
-        rx = -walkArm * (1.f - g_player.humanoid.jumpArmBlend) + jR;
-
-    float swingDeg = g_swordSwing * 70.f;
+    float rx = kEquippedArmHoldDeg;
+    float rz = 0.f;
+    float ry = 0.f;
+    glm::vec3 posAdd{0.f};
+    const BackpackItem* it = equippedBackpackItem();
+    if (it) {
+        if (const HoldPartPose* hp = findHoldPose(it->holdPose, "Right Arm")) {
+            rx = hp->rot.x;
+            ry = hp->rot.y;
+            rz = hp->rot.z;
+            posAdd = hp->pos;
+        }
+    }
 
     glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), g_playerPos),
                                  glm::radians(g_playerYaw), glm::vec3(0, 1, 0));
-    glm::vec3 c = arm->offset;
-    glm::mat4 armM = glm::translate(root, c + arm->pivot);
+    glm::mat4 armM = glm::translate(root, arm->offset + arm->pivot + posAdd);
     if (rx != 0) armM = glm::rotate(armM, glm::radians(rx), glm::vec3(1, 0, 0));
+    if (ry != 0) armM = glm::rotate(armM, glm::radians(ry), glm::vec3(0, 1, 0));
     if (rz != 0) armM = glm::rotate(armM, glm::radians(rz), glm::vec3(0, 0, 1));
     armM = glm::translate(armM, -arm->pivot);
     armM = glm::translate(armM, {0.15f, -0.85f, 0.35f});
+    outArmM = armM;
+    return true;
+}
+
+static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
+                              const glm::mat4& proj, const glm::vec3& sun) {
+    if (!equippedSword() || g_player.humanoid.dead) return;
+
+    glm::mat4 armM;
+    if (!heldRightArmMatrix(armM)) return;
+
+    float swingDeg = g_swordSwing * 70.f;
     armM = glm::rotate(armM, glm::radians(-90.f + swingDeg), glm::vec3(1, 0, 0));
     armM = glm::rotate(armM, glm::radians(8.f), glm::vec3(0, 0, 1));
 
@@ -484,7 +493,6 @@ static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
     drawBit({0, 0.15f, 0}, {0.18f, 0.45f, 0.18f}, hilt);
     drawBit({0, 0.42f, 0}, {0.55f, 0.12f, 0.18f}, guard);
     drawBit({0, 1.35f, 0}, {0.14f, 1.6f, 0.06f}, steel);
-    (void)bob;
 }
 
 // Torcia in mano fatta solo di cubi (manico + fiamma emissiva), stesso
@@ -495,34 +503,8 @@ static void drawEquippedTorch(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun) {
     if (!equippedTorch() || g_player.humanoid.dead) return;
 
-    const HumanoidPartDef* arm = nullptr;
-    for (const auto& p : g_player.humanoid.parts) {
-        if (p.name == "Right Arm") { arm = &p; break; }
-    }
-    if (!arm) return;
-
-    float walkArm = humanoidArmSwing(g_player.humanoid);
-    float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
-    humanoidJumpPose(g_player.humanoid, jL, jR, jl, jr);
-    float rx = arm->rotX;
-    float rz = arm->rotZ;
-    bool animDriven = (std::fabs(arm->rotX) + std::fabs(arm->rotZ)) > 0.01f;
-    // Stessa regola del braccio in BlockPlayer::draw: se c e un oggetto
-    // equipaggiato la posa di presa vince su tutto, altrimenti il braccio si
-    // alzerebbe e la mesh resterebbe indietro a meta strada.
-    if (effectiveHeldSlot() >= 0) {
-        rx = kEquippedArmHoldDeg;
-    } else if (!animDriven)
-        rx = -walkArm * (1.f - g_player.humanoid.jumpArmBlend) + jR;
-
-    glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), g_playerPos),
-                                 glm::radians(g_playerYaw), glm::vec3(0, 1, 0));
-    glm::vec3 c = arm->offset;
-    glm::mat4 armM = glm::translate(root, c + arm->pivot);
-    if (rx != 0) armM = glm::rotate(armM, glm::radians(rx), glm::vec3(1, 0, 0));
-    if (rz != 0) armM = glm::rotate(armM, glm::radians(rz), glm::vec3(0, 0, 1));
-    armM = glm::translate(armM, -arm->pivot);
-    armM = glm::translate(armM, {0.15f, -0.85f, 0.35f});
+    glm::mat4 armM;
+    if (!heldRightArmMatrix(armM)) return;
     armM = glm::rotate(armM, glm::radians(-70.f), glm::vec3(1, 0, 0));
 
     const glm::vec3 wood{0.36f, 0.24f, 0.14f};
@@ -545,14 +527,24 @@ static void drawEquippedTorch(GLuint vao, GLuint partP, const glm::mat4& view,
 
 static std::map<std::string, StaticMesh> g_heldItemMeshCache;
 
-static StaticMesh* getHeldItemMesh(const std::string& path) {
+static StaticMesh* getHeldItemMesh(const std::string& pathIn) {
+    if (pathIn.empty()) return nullptr;
+    // Su Android il place tiene path relativi o ancora C:\... del PC:
+    // risolvi sempre rispetto al gioco attivo (downloaded/<id>/).
+    const std::string path = resolvePackageAssetPath(g_activeGame.placePath, pathIn);
     if (path.empty()) return nullptr;
+
     auto it = g_heldItemMeshCache.find(path);
     if (it != g_heldItemMeshCache.end())
         return it->second.loaded ? &it->second : nullptr;
 
     StaticMesh mesh;
-    mesh.load(path);
+    if (!mesh.load(path)) {
+        // Non mettere in cache i fallimenti: il file puo' arrivare dopo il download.
+        std::fprintf(stderr, "[HeldMesh] load fail: %s (from %s)\n",
+                     path.c_str(), pathIn.c_str());
+        return nullptr;
+    }
     auto [ins, ok] = g_heldItemMeshCache.emplace(path, std::move(mesh));
     (void)ok;
     return ins->second.loaded ? &ins->second : nullptr;
@@ -569,35 +561,8 @@ static void drawEquippedItemMesh(GLuint, GLuint partP, GLuint meshP,
     StaticMesh* mesh = getHeldItemMesh(it->meshPath);
     if (!mesh) return;
 
-    const HumanoidPartDef* arm = nullptr;
-    for (const auto& p : g_player.humanoid.parts) {
-        if (p.name == "Right Arm") { arm = &p; break; }
-    }
-    if (!arm) return;
-
-    float walkArm = humanoidArmSwing(g_player.humanoid);
-    float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
-    humanoidJumpPose(g_player.humanoid, jL, jR, jl, jr);
-    float rx = arm->rotX;
-    float rz = arm->rotZ;
-    bool animDriven = (std::fabs(arm->rotX) + std::fabs(arm->rotZ)) > 0.01f;
-    // Stessa regola del braccio in BlockPlayer::draw: se c e un oggetto
-    // equipaggiato la posa di presa vince su tutto, altrimenti il braccio si
-    // alzerebbe e la mesh resterebbe indietro a meta strada.
-    if (effectiveHeldSlot() >= 0) {
-        rx = kEquippedArmHoldDeg;
-    } else if (!animDriven)
-        rx = -walkArm * (1.f - g_player.humanoid.jumpArmBlend) + jR;
-
-    glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), g_playerPos),
-                                 glm::radians(g_playerYaw), glm::vec3(0, 1, 0));
-    glm::mat4 armM = glm::translate(root, arm->offset + arm->pivot);
-    if (rx != 0) armM = glm::rotate(armM, glm::radians(rx), glm::vec3(1, 0, 0));
-    if (rz != 0) armM = glm::rotate(armM, glm::radians(rz), glm::vec3(0, 0, 1));
-    armM = glm::translate(armM, -arm->pivot);
-    // Punto di presa: in fondo al braccio, leggermente in avanti — grosso modo
-    // dove sta la mano.
-    armM = glm::translate(armM, {0.15f, -0.85f, 0.35f});
+    glm::mat4 armM;
+    if (!heldRightArmMatrix(armM)) return;
 
     // Scala: se l'item non ne impone una, si adatta la mesh perche' il suo lato
     // piu' lungo misuri kGripTargetLen stud.
@@ -720,43 +685,67 @@ static void pollBackpackSwitch(GLFWwindow* win) {
 static void drawInventoryHud() {
     auto& bp = g_world.backpack;
     const int nItems = (int)bp.size();
-    const float slotR = 22.f;
-    const float gap = 6.f;
+    const float slotR = 26.f;
+    const float gap = 8.f;
     const int showN = DataModel::kHotbarSlots;
     const float totalW = showN * (slotR * 2.f) + (showN - 1) * gap;
     const float x0 = ((float)g_w - totalW) * 0.5f + slotR;
-    const float y0 = (float)g_h - slotR - 14.f;
+    // Sopra stick/salto: su Android il salto a destra non deve coprire gli slot.
+    const float y0 = (float)g_h - slotR - 18.f;
 
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
+#ifdef __ANDROID__
+    // Zona hotbar → Android non assegna Look (altrimenti il tocco gira la cam).
+    blk::touch::setInventoryUiRect(x0 - slotR - 8.f, y0 - slotR - 8.f,
+                                   x0 - slotR + totalW + 8.f, y0 + slotR + 8.f);
+#else
+    blk::touch::inventoryUiValid() = false;
+#endif
+
     ImGui::SetNextWindowPos({x0 - slotR - 12, y0 - slotR - 28}, ImGuiCond_Always);
-    ImGui::SetNextWindowSize({totalW + 40, slotR * 2.f + 48}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({totalW + 24, slotR * 2.f + 44}, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.f);
+    // Come l'hamburger: InvisibleButton per slot. Prima c'era NoInputs —
+    // su Android senza tasti 1-9 l'inventario era solo disegno, mai cliccabile.
     ImGui::Begin("##InvCircle", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav |
-        ImGuiWindowFlags_NoInputs);
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav);
 
+    ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText({x0 - slotR, y0 - slotR - 22}, IM_COL32(255, 255, 255, 220), L("hud.inventory"));
+#ifdef __ANDROID__
+    dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(200, 205, 220, 180),
+                nItems == 0 ? "vuoto  ·  tocca uno slot" : "tocca  ·  di nuovo = togli");
+#else
     if (nItems == 0)
         dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(170, 170, 180, 170),
                     "empty  ·  1-9");
     else
         dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(200, 205, 220, 180),
                     "1-9  (di nuovo = togli)");
+#endif
 
     for (int i = 0; i < showN; ++i) {
-        float cx = x0 + i * (slotR * 2.f + gap);
-        float cy = y0;
-        bool has = i < nItems;
-        bool eq = (g_world.equippedBackpack == i);
+        const float cx = x0 + i * (slotR * 2.f + gap);
+        const float cy = y0;
+        const bool has = i < nItems;
+        const bool eq = (g_world.equippedBackpack == i);
+
+        ImGui::SetCursorScreenPos({cx - slotR, cy - slotR});
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##slot", {slotR * 2.f, slotR * 2.f})) {
+            if (has) g_world.equipBackpackSlot(i, true);
+        }
+        const bool hover = ImGui::IsItemHovered();
+        ImGui::PopID();
 
         if (has)
             dl->AddCircleFilled({cx, cy}, slotR, backpackHueColor(bp[i].iconHue), 48);
         else
             dl->AddCircleFilled({cx, cy}, slotR, IM_COL32(32, 34, 40, 220), 48);
 
-        ImU32 ring = eq ? IM_COL32(230, 40, 40, 255) : IM_COL32(255, 255, 255, 255);
+        ImU32 ring = eq ? IM_COL32(230, 40, 40, 255)
+                        : (hover ? IM_COL32(120, 180, 255, 255) : IM_COL32(255, 255, 255, 255));
         dl->AddCircle({cx, cy}, slotR, ring, 48, eq ? 5.0f : 2.8f);
         if (eq)
             dl->AddCircle({cx, cy}, slotR + 6.f, IM_COL32(255, 50, 50, 160), 48, 2.2f);
@@ -780,6 +769,47 @@ static void drawInventoryHud() {
         }
     }
     ImGui::End();
+}
+
+// Avviso una tantum su telefoni/PC deboli: "potrebbe non girare fluido".
+static void drawWeakDevicePopup(GLFWwindow* win) {
+    if (!g_weakDevicePopupPending) return;
+    const char* id = "##weakdevice";
+    if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, {0.5f, 0.5f});
+    ImGui::SetNextWindowSize({std::min(420.f, (float)g_w - 24.f), 0.f}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(id, nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    const auto& d = plat::devcap::info();
+    ImGui::TextColored({1.f, 0.80f, 0.30f, 1.f}, "%s", L("weak.title"));
+    ImGui::Separator();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 400.f);
+    ImGui::TextWrapped("%s", L("weak.body"));
+    if (d.reason[0])
+        ImGui::TextDisabled("%s", d.reason);
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", L("weak.tip"));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+
+    auto closeIt = [&]() {
+        g_weakDevicePopupPending = false;
+        ImGui::CloseCurrentPopup();
+        syncPlayCursor(win);
+    };
+    if (ImGui::Button(L("weak.low"), {-1, 34})) {
+        applyGfxPreset(QualityPreset::Low);
+        closeIt();
+    }
+    if (ImGui::Button(L("weak.ok"), {-1, 34}))
+        closeIt();
+    if (ImGui::Button(L("weak.dontshow"), {-1, 28})) {
+        saveWeakDeviceMute();
+        closeIt();
+    }
+    ImGui::EndPopup();
 }
 
 static void drawReportPopup() {
@@ -899,6 +929,7 @@ static void drawPlayingHud(GLFWwindow* win) {
     ImGui::PopStyleColor();
 
     drawHealthBarHud();
+    drawGeneratedHud();
     drawPlayerHeadHealthBar();
     drawHamburgerMenuHud();
     drawChatBubbleHud();
@@ -1033,6 +1064,22 @@ static void drawPlayingHud(GLFWwindow* win) {
                             g_engine.quality.studTextures ? "" : " · stud off");
         ImGui::TextDisabled("Ombre luci Neon: %s · MSAA al riavvio",
                             g_engine.quality.shadowOccluders > 0 ? "sì" : "no");
+        if (plat::devcap::isWeakDevice()) {
+            ImGui::TextColored({1.f, 0.78f, 0.30f, 1.f}, "%s", L("weak.title"));
+            ImGui::TextDisabled("%s", plat::devcap::info().reason);
+            if (g_weakDeviceAdviceMuted && ImGui::SmallButton("Riattiva avviso")) {
+                std::remove(weakDeviceMutePath().c_str());
+                g_weakDeviceAdviceMuted = false;
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.14f, 0.42f, 0.62f, 1.f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22f, 0.52f, 0.78f, 1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text, {1, 1, 1, 1});
+        if (ImGui::Button(g_showProfiler ? "Statistiche prestazioni: ON" : "Statistiche prestazioni…", {-1, 34}))
+            g_showProfiler = !g_showProfiler;
+        ImGui::PopStyleColor(3);
 
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.52f, 0.95f, 1.f});
@@ -1082,6 +1129,7 @@ static void drawPlayingHud(GLFWwindow* win) {
 
     drawPlayersPanel();
     drawReportPopup();
+    drawWeakDevicePopup(win);
 
     if (g_showChat) {
         ImGui::SetNextWindowPos({12, 112}, ImGuiCond_Appearing);

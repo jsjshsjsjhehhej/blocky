@@ -3,9 +3,11 @@
 // Ogni controllo stampa il numero misurato, non solo OK/FALLITO.
 
 #include "engine/BlockyPhysics.h"
+#include "engine/PartProps.h"
 
 #include <chrono>
 #include <cstdio>
+#include <sstream>
 
 static int g_fail = 0;
 
@@ -205,6 +207,86 @@ static void testCharacter() {
     }
 }
 
+static void testGeneratedProps() {
+    std::printf("\nProprieta' generate (PartProps.def):\n");
+    WorkspacePart a;
+    a.anchored = false; a.canCollide = false;
+    a.density = 3.5f; a.friction = 0.05f; a.elasticity = 0.9f;
+    WorkspacePart b;   // default
+
+    std::ostringstream o;
+    o << "[{\"name\":\"A\"";
+    partprops::writeAll(o, a);
+    o << "},{\"name\":\"B\"";
+    partprops::writeAll(o, b);
+    o << "},{\"name\":\"Vecchia\"}]";   // file salvato prima delle proprieta' nuove
+    const std::string json = o.str();
+
+    auto load = [&](const char* name) {
+        WorkspacePart p;
+        size_t from = json.find(std::string("{\"name\":\"") + name);
+        size_t next = json.find("{\"name\"", from + 1);
+        partprops::readAll(json, from, std::min(next, json.size()), p);
+        return p;
+    };
+    WorkspacePart la = load("A"), lb = load("B"), old = load("Vecchia");
+    check(!la.anchored && !la.canCollide && la.density == 3.5f && la.friction == 0.05f
+          && la.elasticity == 0.9f, "salva e ricarica tutte le proprieta'");
+    check(lb.anchored && lb.canCollide && lb.density == 0.7f, "i default restano default");
+    check(old.anchored && old.friction == 0.5f && old.elasticity == 0.1f,
+          "file vecchio senza chiavi: default, non i valori della part dopo");
+
+    WorkspacePart bad;
+    const std::string badJson = "{\"name\":\"X\",\"friction\":99,\"density\":-4}";
+    partprops::readAll(badJson, 0, badJson.size(), bad);
+    check(bad.friction == 2.f && bad.density == 0.01f, "valori fuori limite riportati nel limite");
+
+    // Effetto vero in fisica: stessa palla, rimbalzo diverso.
+    auto bounceHeight = [](float elasticity) {
+        bphys::World phys;
+        phys.configure(profileFor(TargetPlatform::PC));
+        auto parts = baseplateWorld();
+        parts[0].elasticity = elasticity;
+        WorkspacePart ball = makePart({0, 20, 0}, {2, 2, 2}, false, PartShape::Ball);
+        ball.elasticity = elasticity;
+        parts.push_back(ball);
+        simulate(phys, parts, 1.0f, 72.f);        // cade e tocca terra
+        float best = 0.f;
+        for (int i = 0; i < 60; ++i) {
+            simulate(phys, parts, 1.f / 60.f, 72.f);
+            best = std::max(best, parts[1].position.y);
+        }
+        return best;
+    };
+    const float low = bounceHeight(0.1f), high = bounceHeight(0.9f);
+    std::printf("  palla da y=20: rimbalza fino a %.2f con Elasticity 0.1, %.2f con 0.9\n", low, high);
+    check(high > low + 5.f, "Elasticity cambia davvero il rimbalzo");
+
+    // Cassa su una rampa di 20 gradi: scivola solo se l'attrito e' sotto
+    // tan(20) = 0.36.
+    auto slideDistance = [](float friction) {
+        bphys::World phys;
+        phys.configure(profileFor(TargetPlatform::PC));
+        auto parts = baseplateWorld();
+        WorkspacePart ramp = makePart({0, 6, 0}, {30, 1, 10}, true);
+        ramp.rotation = {0, 0, 20};
+        ramp.friction = friction;
+        parts.push_back(ramp);
+        WorkspacePart box = makePart({0, 8.2f, 0}, {2, 2, 2}, false);
+        box.rotation = {0, 0, 20};
+        box.friction = friction;
+        parts.push_back(box);
+        simulate(phys, parts, 0.3f, 72.f);
+        const glm::vec3 start = parts[2].position;
+        simulate(phys, parts, 1.0f, 72.f);
+        return glm::length(parts[2].position - start);
+    };
+    const float icy = slideDistance(0.05f), rubber = slideDistance(1.0f);
+    std::printf("  cassa su rampa di 20 gradi: scivola %.2f stud con Friction 0.05, %.2f con 1.0\n",
+                icy, rubber);
+    check(icy > 5.f && rubber < 0.5f, "Friction cambia davvero lo scivolamento");
+}
+
 static void testCost() {
     for (TargetPlatform tp : {TargetPlatform::MobileAndroid, TargetPlatform::PC}) {
         QualityProfile q = profileFor(tp);
@@ -244,6 +326,7 @@ int main() {
     testLanding(profileFor(TargetPlatform::PC));
     testBudget();
     testCharacter();
+    testGeneratedProps();
     testCost();
     std::printf("\n%s (%d falliti)\n", g_fail ? "FALLITO" : "TUTTO OK", g_fail);
     return g_fail ? 1 : 0;

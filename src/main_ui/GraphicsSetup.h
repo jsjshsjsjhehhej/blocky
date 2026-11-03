@@ -3,6 +3,9 @@
 // usa direttamente le globali di main.cpp (g_engine, g_vsync, ecc.).
 // Compila solo se incluso da main.cpp esattamente in questo punto.
 
+#include "platform/Resilience.h"
+#include "platform/DeviceCapability.h"
+
 static std::string gfxPresetPath() { return blockyDataDir() + "/graphics.txt"; }
 
 static const char* gfxPresetName(QualityPreset p) {
@@ -25,12 +28,22 @@ static void saveGfxPreset() {
 static void applyGfxPreset(QualityPreset p) {
     g_engine.setPreset(p);
     g_vsync = g_engine.quality.vsync;
+    blk::resilience::syncQualityBaseline(g_engine.quality);
     saveGfxPreset();
 }
 
 static void loadGfxPreset() {
     FILE* f = std::fopen(gfxPresetPath().c_str(), "rb");
-    if (!f) return;
+    if (!f) {
+        // Nessuna scelta salvata: su un dispositivo debole si parte gia' da
+        // "Low" invece di aspettare che la difesa anti-lag intervenga dopo
+        // qualche secondo di scatti. L'utente puo' comunque alzarla dal menu.
+        if (plat::devcap::isWeakDevice()) {
+            g_engine.setPreset(QualityPreset::Low);
+            g_vsync = g_engine.quality.vsync;
+        }
+        return;
+    }
     char line[32] = {};
     bool ok = std::fgets(line, sizeof(line), f) != nullptr;
     std::fclose(f);
@@ -44,6 +57,33 @@ static void loadGfxPreset() {
     else if (std::strcmp(line, "Ultra") == 0)   g_engine.setPreset(QualityPreset::Ultra);
     else                                        g_engine.setPreset(QualityPreset::PlatformDefault);
     g_vsync = g_engine.quality.vsync;
+}
+
+// Avviso "dispositivo debole" all'ingresso in un gioco (platform/DeviceCapability.h).
+static bool g_weakDevicePopupPending = false;
+static bool g_weakDeviceAdviceMuted = false;
+
+static std::string weakDeviceMutePath() { return blockyDataDir() + "/weak_device_ack.txt"; }
+
+static void loadWeakDeviceMute() {
+    FILE* f = std::fopen(weakDeviceMutePath().c_str(), "rb");
+    if (!f) return;
+    std::fclose(f);
+    g_weakDeviceAdviceMuted = true;
+}
+
+static void saveWeakDeviceMute() {
+    FILE* f = std::fopen(weakDeviceMutePath().c_str(), "wb");
+    if (!f) return;
+    std::fprintf(f, "1\n");
+    std::fclose(f);
+    g_weakDeviceAdviceMuted = true;
+}
+
+static void requestWeakDeviceAdvice() {
+    if (g_weakDeviceAdviceMuted) return;
+    if (!plat::devcap::isWeakDevice()) return;
+    g_weakDevicePopupPending = true;
 }
 
 static std::string g_speechText;

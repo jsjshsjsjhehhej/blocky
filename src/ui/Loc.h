@@ -211,6 +211,17 @@ struct Loc {
             {"menu.engine_settings", {"Impostazioni engine", "Engine settings"}},
             {"menu.chat", {"Chat", "Chat"}},
 
+            {"weak.title", {"Avviso prestazioni", "Performance notice"}},
+            {"weak.body", {"Questo dispositivo potrebbe non essere abbastanza potente per far "
+                           "girare i giochi in modo fluido. Potresti notare scatti o cali di FPS.",
+                           "This device may not be powerful enough to run games smoothly. "
+                           "You may notice stutter or low FPS."}},
+            {"weak.tip", {"Consiglio: usa il preset grafico Low dal menu di gioco e chiudi le altre app.",
+                          "Tip: use the Low graphics preset from the game menu and close other apps."}},
+            {"weak.ok", {"Ho capito", "Got it"}},
+            {"weak.low", {"Imposta grafica Low", "Set Low graphics"}},
+            {"weak.dontshow", {"Non mostrare piu'", "Don't show again"}},
+
             {"map.baseplate", {"Baseplate", "Baseplate"}},
             {"map.garden", {"Garden", "Garden"}},
             {"map.obby", {"Obby", "Obby"}},

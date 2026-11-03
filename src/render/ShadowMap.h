@@ -149,10 +149,16 @@ void main(){})";
         return true;
     }
 
+    // Location risolta una volta: setModel gira per ogni part a ogni frame.
     void setModel(const glm::mat4& m) const {
-        glUniformMatrix4fv(glGetUniformLocation(depthProg, "uModel"), 1, GL_FALSE,
-                           glm::value_ptr(m));
+        if (modelLoc_ < 0 || modelLocProg_ != depthProg) {
+            modelLoc_ = glGetUniformLocation(depthProg, "uModel");
+            modelLocProg_ = depthProg;
+        }
+        glUniformMatrix4fv(modelLoc_, 1, GL_FALSE, glm::value_ptr(m));
     }
+    mutable GLint modelLoc_ = -1;
+    mutable GLuint modelLocProg_ = 0;
 
     // restoreFbo: il framebuffer su cui si stava disegnando la scena prima
     // di questo pass di profondita' (0 = schermo reale, oppure la scena

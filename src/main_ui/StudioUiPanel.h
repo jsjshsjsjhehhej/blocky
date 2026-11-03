@@ -10,11 +10,20 @@
  * viveva prima — mai da studio_main.cpp, BlockyApi.cpp o altre TU (non
  * condividono nessuno di questi simboli, fallirebbe la compilazione).
  *
- * Copre l'intera UI ImGui di Studio: barra menu, BuildBar, Explorer,
- * Properties, editor script, Guida Lua, pannello piattaforma, Chat —
- * incluso il ramo HUD di Test/Play in cima (salute/hamburger/chat/
- * inventario), che scatta quando g_studioTesting e' vero.
+ * Shell stile Roblox Studio: menu, ribbon (Home/Avatar/UI/Script/Model/
+ * Test), Toolbox SX, Explorer+Properties DX stacked, Output basso,
+ * editor script, Guida Lua, Chat — + HUD Test/Play se g_studioTesting.
+ *
+ * Dock extras (Assets, Console, window search) in StudioPlatformPanels.h.
  */
+
+#include "main_ui/StudioFeaturesUi.h"
+#include "main_ui/StudioGroupsUi.h"
+#include "main_ui/StudioSelectionUi.h"
+#include "main_ui/StudioMultiplayerTest.h"
+#include "main_ui/Studio2020Ui.h"
+#include "main_ui/StudioProUi.h"
+#include "main_ui/StudioPlatformPanels.h"
 
 static void drawScriptCreatedGuidePopup() {
     if (!g_showScriptCreatedGuide) return;
@@ -51,16 +60,40 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
     g_studioUiTime = (float)glfwGetTime();
 
     if (g_studioTesting) {
-        ImGui::SetNextWindowPos({70, 12}, ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.45f);
-        ImGui::Begin("##TestHud", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-            ImGuiWindowFlags_NoInputs);
-        ImGui::TextColored({0.3f, 1.f, 0.5f, 1.f}, "%s", L("test.playing"));
-        ImGui::TextDisabled("%s  ·  Esc/F1 stop", g_world.placeName.c_str());
-        ImGui::End();
+        // Barra Stop SEMPRE cliccabile: prima spariva con tutta la BuildBar e
+        // col cursore locked sembrava che Test "non funzionasse".
+        {
+            const float barW = ImGui::GetIO().DisplaySize.x;
+            ImGui::SetNextWindowPos({0, 0}, ImGuiCond_Always);
+            ImGui::SetNextWindowSize({barW, 44}, ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.82f);
+            ImGui::Begin("##TestStopBar", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNav);
+            ImGui::TextColored({0.3f, 1.f, 0.5f, 1.f}, "%s", L("test.playing"));
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", g_world.placeName.c_str());
+            ImGui::SameLine(barW - 100.f);
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.82f, 0.22f, 0.18f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.32f, 0.25f, 1.f});
+            if (ImGui::Button(LB("stop", "stopbtn"), {88, 28})) {
+                if (g_playCursorLocked)
+                    setPlayCursor(glfwGetCurrentContext(), false);
+                stopStudioTest(glfwGetCurrentContext());
+            }
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Esc / F1 = stop");
+            ImGui::End();
+        }
+        // Se il mouse e' sulla barra Stop, sblocca il cursore cosi' il click arriva.
+        if (g_playCursorLocked && ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)
+            && ImGui::GetIO().MousePos.y < 48.f) {
+            setPlayCursor(glfwGetCurrentContext(), false);
+        }
         drawHealthBarHud();
+        drawGeneratedHud();
         drawPlayerHeadHealthBar();
         drawHamburgerMenuHud();
         drawChatBubbleHud();
@@ -97,11 +130,10 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
     }
 
     if (ImGui::BeginMainMenuBar()) {
-        ImGui::TextColored({0.35f, 0.78f, 1.f, 1.f}, "Blocky");
+        // Menu stile Roblox Studio: brand discreto + File/Edit/View…
+        ImGui::TextColored({0.55f, 0.58f, 0.62f, 1.f}, "Blocky Studio");
         ImGui::SameLine();
-        ImGui::TextColored({0.95f, 0.75f, 0.25f, 1.f}, "Studio");
-        ImGui::SameLine();
-        ImGui::TextDisabled("  ·  %s", g_world.placeName.c_str());
+        ImGui::TextDisabled("%s", g_world.placeName.c_str());
         ImGui::SameLine();
         ImGui::Spacing();
         if (ImGui::BeginMenu(L("file"))) {
@@ -115,6 +147,11 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 if (ImGui::MenuItem(L("map.arena"))) applyMapTemplate(3);
                 if (ImGui::MenuItem(L("map.park"))) applyMapTemplate(4);
                 if (ImGui::MenuItem(L("map.city"))) applyMapTemplate(5);
+                ImGui::Separator();
+                ImGui::TextDisabled("Game kits (script pronti)");
+                if (ImGui::MenuItem("FPS Kit (hitscan)")) applyMapTemplate(6);
+                if (ImGui::MenuItem("Tycoon Kit (Coins)")) applyMapTemplate(7);
+                if (ImGui::MenuItem("Survival Kit (NPC)")) applyMapTemplate(8);
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem(L("menu.open_place"), "Ctrl+O")) doOpenPlace();
@@ -208,16 +245,25 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         if (ImGui::BeginMenu(L("edit"))) {
             if (ImGui::MenuItem("Annulla", "Ctrl+Z", false, g_undo.canUndo())) {
                 g_undo.applyUndo(g_world, g_selectedPart);
+                studioFollowRebaseline();
                 g_exportMsg = "Annullato";
             }
             if (ImGui::MenuItem("Ripeti", "Ctrl+Y", false, g_undo.canRedo())) {
                 g_undo.applyRedo(g_world, g_selectedPart);
+                studioFollowRebaseline();
                 g_exportMsg = "Ripetuto";
             }
             ImGui::Separator();
-            if (ImGui::MenuItem(L("menu.dup"), "Ctrl+D")) duplicateSelected();
+            if (ImGui::MenuItem("Raggruppa in Model", "Ctrl+G")) studioGroupSelection();
+            if (ImGui::MenuItem("Separa Model", "Ctrl+U", false, !studioSelectedWholeGroups().empty()))
+                studioUngroupSelection();
+            if (ImGui::MenuItem("Duplica selezione", "Ctrl+D")) studioDuplicateSelection();
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("menu.dup"), "Ctrl+D")) studioDuplicateSelectionOffset();
             if (ImGui::MenuItem(L("menu.script_part"), "Ctrl+L")) addScriptToSelected();
             if (ImGui::MenuItem(L("menu.delete"), "Del")) deleteSelected();
+            drawStudioFeaturesEditMenu();
+            drawStudioProEditMenu();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(L("player"))) {
@@ -246,14 +292,36 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::MenuItem("Dock clip Player", nullptr, &g_showAnimDock);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Script")) {
+            ImGui::MenuItem("Riferimento API (Roblox-style)", nullptr, &g_showApiReference);
+            ImGui::MenuItem("Output Lua (print)", nullptr, &g_showLuaOutput);
+            ImGui::Separator();
+            ImGui::MenuItem("Guida Lua Blocky", "F2", &g_showLuaGuide);
+            if (ImGui::MenuItem("Apri script globale place"))
+                g_showScript = true;
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Test")) {
+            ImGui::MenuItem("Test multiplayer (2-4 giocatori)...", nullptr, &g_showMpTest);
+            if (ImGui::MenuItem("Chiudi i giocatori di prova", nullptr, false, !g_mpTestClients.empty()))
+                studioStopMultiplayerTest();
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu(L("view"))) {
             ImGui::MenuItem(L("menu.explorer"), nullptr, &g_showExplorer);
             ImGui::MenuItem(L("menu.properties"), nullptr, &g_showProps);
             ImGui::MenuItem(L("menu.create_panel"), nullptr, &g_showCreatePanel);
             ImGui::MenuItem(L("menu.global_script"), nullptr, &g_showScript);
             ImGui::MenuItem("Guida Lua Blocky", "F2", &g_showLuaGuide);
+            ImGui::MenuItem("Riferimento API", nullptr, &g_showApiReference);
+            ImGui::MenuItem("Output Lua", nullptr, &g_showLuaOutput);
             ImGui::MenuItem(L("menu.engine_settings"), nullptr, &g_showPlatformPanel);
             ImGui::MenuItem(L("menu.chat"), nullptr, &g_showChat);
+            ImGui::MenuItem("Statistiche prestazioni", "F4", &g_showProfiler);
+            drawViewMenuPlatformItems();
+            drawStudioFeaturesViewMenu();
+            drawStudio2020ViewMenu();
+            drawStudioProViewMenu();
             ImGui::Separator();
             ImGui::TextDisabled("%s", L("lang"));
             drawLanguageSelector("studiolang");
@@ -268,151 +336,207 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
 
     const float menuH = ImGui::GetFrameHeight();
 
-    // Explorer/Properties ancorati ai lati (vedi kPanelLeft/kPanelRight in
-    // studio_main.cpp per lo stesso pattern) — stesse dimensioni di sempre
-    // (erano gia' queste come ImGuiCond_FirstUseEver), solo che ora non si
-    // trascinano/ridimensionano/sovrappongono piu' per sbaglio.
-    constexpr float kStudioPanelLeft = 300.f;
-    constexpr float kStudioPanelRight = 328.f;
+    // Shell Roblox Studio (come screenshot):
+    //   SX = Toolbox · DX = Explorer (alto) + Properties (basso) · basso = Output
+    constexpr float kToolboxW = 280.f;
+    constexpr float kStudioPanelRight = 320.f;
+    constexpr float kOutputH = 140.f;
+    constexpr float kRibbonH = studio::kRibbonHeight;
     constexpr ImGuiWindowFlags kStudioPanelFlags =
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
-    const float panelY = menuH + 56.f;
-    const float panelH = (float)g_h - panelY - 12.f;
+    const float ribbonY = menuH;
+    const float panelY = menuH + kRibbonH;
+    const bool bottomDockOpen = !g_studioTesting
+        && (g_showLuaOutput || g_showAssets || g_showConsole);
+    const float chromeReserve = studioBottomChromeReserve();
+    const float dockH = bottomDockOpen ? kOutputH : 0.f;
+    const float outputReserve = dockH + chromeReserve;
+    const float panelH = (float)g_h - panelY - outputReserve;
 
-    ImGui::SetNextWindowPos({(float)g_w * 0.5f - 340.f, menuH + 6}, ImGuiCond_Always);
-    ImGui::SetNextWindowSize({680, 48}, ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {6.f, 4.f});
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.07f, 0.09f, 0.14f, 0.94f});
-    ImGui::Begin("##BuildBar", nullptr,
+    const float safePanelH = std::max(64.f, panelH);
+    const float safeOutputH = dockH > 0.f ? std::max(80.f, dockH) : 0.f;
+    const float leftW = (g_showToolbox && !g_studioTesting) ? kToolboxW : 0.f;
+    const float rightW = ((g_showExplorer || g_showProps) && !g_studioTesting) ? kStudioPanelRight : 0.f;
+    const float rightX = (float)g_w - rightW;
+    // Explorer ~55% / Properties ~45% impilati a destra (come Studio).
+    const float explorerH = g_showExplorer
+        ? (g_showProps ? std::floor(safePanelH * 0.55f) : safePanelH)
+        : 0.f;
+    const float propsH = g_showProps
+        ? (g_showExplorer ? std::max(64.f, safePanelH - explorerH) : safePanelH)
+        : 0.f;
+    const float propsY = panelY + (g_showExplorer ? explorerH : 0.f);
+
+    ImGui::SetNextWindowPos({0.f, ribbonY}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({std::max(1.f, (float)g_w), kRibbonH}, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f, 0.f});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.20f, 0.20f, 0.21f, 1.f});
+    if (ImGui::Begin("##StudioRibbon", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus))
+    {
+        // Tab come Roblox Studio: Home · Avatar · UI · Script · Model · Test
+        static const char* kTabs[] = { "Home", "Avatar", "UI", "Script", "Model", "Test" };
+        if (g_studioRibbonTab < 0 || g_studioRibbonTab > 5) g_studioRibbonTab = 0;
+        studio::ribbonTabs(kTabs, 6, g_studioRibbonTab);
+        ImGui::Dummy({0.f, 3.f});
+        ImGui::Indent(8.f);
 
-    auto toolBtn = [](const char* label, StudioTool t) {
-        bool on = (g_tool == t);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f);
-        if (on) {
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.48f, 0.90f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.28f, 0.58f, 1.f, 1.f});
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.16f, 0.20f, 0.28f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22f, 0.30f, 0.42f, 1.f});
-        }
-        if (ImGui::Button(label, {0, 30})) {
-            g_tool = t;
+        auto clearGizmoDrag = []() {
             g_scaleDragging = false;
             g_moveDragging = false;
             g_rotateDragging = false;
+        };
+        auto sep = []() {
+            ImGui::SameLine(0.f, 8.f);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            dl->AddLine({p.x, p.y + 4.f}, {p.x, p.y + 70.f}, IM_COL32(62, 70, 84, 255));
+            ImGui::Dummy({8.f, 1.f});
+            ImGui::SameLine(0.f, 0.f);
+        };
+
+        // ---- HOME: tools + Part + Play (come ribbon Studio) ----
+        if (g_studioRibbonTab == 0) {
+            if (studio::ribbonBigButton("sel", studio::Icon::Cursor, "Select",
+                                        g_tool == StudioTool::Select)) {
+                g_tool = StudioTool::Select; clearGizmoDrag();
+            }
+            if (studio::ribbonBigButton("mov", studio::Icon::Move, "Move",
+                                        g_tool == StudioTool::Move)) {
+                g_tool = StudioTool::Move; clearGizmoDrag();
+            }
+            if (studio::ribbonBigButton("scl", studio::Icon::Scale, "Scale",
+                                        g_tool == StudioTool::Scale)) {
+                g_tool = StudioTool::Scale; clearGizmoDrag();
+            }
+            if (studio::ribbonBigButton("rot", studio::Icon::Rotate, "Rotate",
+                                        g_tool == StudioTool::Rotate)) {
+                g_tool = StudioTool::Rotate; clearGizmoDrag();
+            }
+            sep();
+            if (studio::ribbonBigButton("part", studio::Icon::Cube, "Part"))
+                insertNewPart();
+            if (studio::ribbonBigButton("mdl", studio::Icon::Package, "Model"))
+                insertImportedModel();
+            if (studio::ribbonBigButton("tbx", studio::Icon::Folder, "Toolbox", g_showToolbox))
+                g_showToolbox = !g_showToolbox;
+            if (studio::ribbonBigButton("ast", studio::Icon::Package, "Assets", g_showAssets)) {
+                g_showAssets = !g_showAssets;
+                if (g_showAssets) g_bottomDockTab = 1;
+            }
+            sep();
+            drawStudioSnapViewRibbonExtras();
+            drawStudio2020RibbonExtras();
+            drawStudioProRibbonExtras();
+            sep();
+            if (studio::ribbonBigButton("scrH", studio::Icon::Script, "Script"))
+                addScriptToSelected();
+            if (studio::ribbonBigButton("playH", studio::Icon::Play, "Play",
+                                       false, !g_studioTesting))
+                startStudioTest(glfwGetCurrentContext());
         }
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar();
-    };
-    toolBtn(LB("tool.select", "tsel"), StudioTool::Select);
-    ImGui::SameLine();
-    toolBtn(LB("tool.move", "tmov"), StudioTool::Move);
-    ImGui::SameLine();
-    toolBtn(LB("tool.scale", "tscl"), StudioTool::Scale);
-    ImGui::SameLine();
-    toolBtn(LB("tool.rotate", "trot"), StudioTool::Rotate);
-    ImGui::SameLine();
-    ImGui::Dummy({10, 0});
-    ImGui::SameLine();
-    if (!g_studioTesting) {
-        ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.68f, 0.34f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.18f, 0.80f, 0.42f, 1.f});
-        if (ImGui::Button(LB("test", "testbtn"), {72, 30}))
-            startStudioTest(glfwGetCurrentContext());
-        ImGui::PopStyleColor(2);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("F5 · Esc = stop");
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, {0.82f, 0.22f, 0.18f, 1.f});
-        if (ImGui::Button(LB("stop", "stopbtn"), {72, 30}))
-            stopStudioTest(glfwGetCurrentContext());
-        ImGui::PopStyleColor();
-    }
-    ImGui::SameLine();
-    ImGui::Dummy({8, 0});
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.42f, 0.32f, 1.f});
-    if (ImGui::Button(LB("btn.part", "bpart"), {0, 30})) insertNewPart();
-    ImGui::PopStyleColor();
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.35f, 0.35f, 1.f});
-    if (ImGui::Button("Sfera", {0, 30})) insertShapedPart(PartShape::Ball);
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ball — sfera");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.3f, 0.5f, 0.85f, 1.f});
-    if (ImGui::Button("Cilindro", {0, 30})) insertShapedPart(PartShape::Cylinder);
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cylinder — asse Y");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.35f, 0.7f, 0.35f, 1.f});
-    if (ImGui::Button("Wedge", {0, 30})) insertShapedPart(PartShape::Wedge);
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wedge — triangolo / rampa");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.55f, 0.35f, 0.70f, 1.f});
-    if (ImGui::Button("Toolbox", {0, 30})) g_showToolbox = true;
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Oggetti pronti (scala, porta, albero...)");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.72f, 0.55f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.20f, 0.85f, 0.65f, 1.f});
-    if (ImGui::Button("Neon", {0, 30})) insertNeonPart();
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Parte lucente + luce dinamica");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.72f, 0.18f, 1.f});
-    if (ImGui::Button("Light", {0, 30})) insertPointLightPart();
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PointLight dinamico");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.82f, 0.22f, 0.15f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.32f, 0.2f, 1.f});
-    if (ImGui::Button("Boom", {0, 30})) insertExplodePart();
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Explode Part — tocco = boom");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.62f, 0.38f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.75f, 0.48f, 1.f});
-    if (ImGui::Button("Amico", {0, 30})) insertFriendPlayer();
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Player amico — in Test ti segue");
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.28f, 0.42f, 0.72f, 1.f});
-    if (ImGui::Button(LB("btn.model", "bmodel"), {0, 30})) insertImportedModel();
-    ImGui::PopStyleColor();
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.45f, 0.18f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.55f, 0.25f, 1.f});
-    if (ImGui::Button(LB("btn.anima", "banima"), {0, 30}))
-        beginAnimateSelectedModel();
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Anima Model · Ctrl+Shift+A · Move + Set Frame (K)");
-    ImGui::SameLine();
-    if (ImGui::Button(LB("more", "insMore"), {0, 30}))
-        ImGui::OpenPopup("##studioMore");
-    if (ImGui::BeginPopup("##studioMore")) {
-        if (ImGui::MenuItem(L("menu.textlabel"))) insertNewTextLabel();
-        if (ImGui::MenuItem(L("menu.label"))) insertNewLabel();
-        if (ImGui::MenuItem(L("menu.textbutton"))) insertNewTextButton();
-        if (ImGui::MenuItem(L("menu.sound"))) insertSound();
-        if (ImGui::MenuItem("Player amico")) insertFriendPlayer();
-        ImGui::Separator();
-        if (ImGui::MenuItem(L("menu.dup"), "Ctrl+D")) duplicateSelected();
-        if (ImGui::MenuItem(L("menu.script_part"), "Ctrl+L")) addScriptToSelected();
-        if (ImGui::MenuItem(L("menu.delete"), "Del")) deleteSelected();
-        ImGui::Separator();
-        if (ImGui::MenuItem(L("btn.avatar"), "F8")) enterAvatarPublisher();
-        if (ImGui::MenuItem(L("btn.publish_anim"))) g_showPlayerAnimPublisher = true;
-        if (ImGui::MenuItem(L("btn.create"))) g_showCreatePanel = true;
-        ImGui::EndPopup();
-    }
-    if (!g_exportMsg.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored({1.f, 0.85f, 0.4f, 1.f}, "  %s", g_exportMsg.c_str());
+        // ---- AVATAR ----
+        else if (g_studioRibbonTab == 1) {
+            if (studio::ribbonBigButton("avat", studio::Icon::Torso, "Avatar"))
+                enterAvatarPublisher();
+            if (studio::ribbonBigButton("rig", studio::Icon::ArmRight, "Rig"))
+                beginRigPlayer();
+            if (studio::ribbonBigButton("anid", studio::Icon::Walk, "AnimId"))
+                g_showPlayerAnimPublisher = true;
+            if (studio::ribbonBigButton("friend", studio::Icon::Head, "Friend"))
+                insertFriendPlayer();
+        }
+        // ---- UI ----
+        else if (g_studioRibbonTab == 2) {
+            if (studio::ribbonBigButton("tlbl", studio::Icon::NewFile, "TextLabel"))
+                insertNewTextLabel();
+            if (studio::ribbonBigButton("tbtn", studio::Icon::NewFile, "TextButton"))
+                insertNewTextButton();
+            if (studio::ribbonBigButton("frm", studio::Icon::NewFile, "Frame"))
+                insertNewFrame();
+            if (studio::ribbonBigButton("img", studio::Icon::NewFile, "ImageLabel"))
+                insertNewImageLabel();
+            if (studio::ribbonBigButton("lbl", studio::Icon::NewFile, "Label 3D"))
+                insertNewLabel();
+            if (studio::ribbonBigButton("snd", studio::Icon::Package, "Sound"))
+                insertSound();
+        }
+        // ---- SCRIPT ----
+        else if (g_studioRibbonTab == 3) {
+            if (studio::ribbonBigButton("scr", studio::Icon::Script, "Script"))
+                addScriptToSelected();
+            if (studio::ribbonBigButton("anim", studio::Icon::Walk, "Animate"))
+                beginAnimateSelectedModel();
+            sep();
+            if (studio::ribbonBigButton("out", studio::Icon::Script, "Output", g_showLuaOutput))
+                g_showLuaOutput = !g_showLuaOutput;
+            if (studio::ribbonBigButton("guide", studio::Icon::Script, "Guida Lua", g_showLuaGuide))
+                g_showLuaGuide = !g_showLuaGuide;
+        }
+        // ---- MODEL ----
+        else if (g_studioRibbonTab == 4) {
+            if (studio::ribbonBigButton("blk", studio::Icon::Cube, "Block"))
+                insertNewPart();
+            if (studio::ribbonBigButton("ball", studio::Icon::Sphere, "Ball"))
+                insertShapedPart(PartShape::Ball);
+            if (studio::ribbonBigButton("cyl", studio::Icon::Cylinder, "Cylinder"))
+                insertShapedPart(PartShape::Cylinder);
+            if (studio::ribbonBigButton("wed", studio::Icon::Wedge, "Wedge"))
+                insertShapedPart(PartShape::Wedge);
+            sep();
+            if (studio::ribbonBigButton("neon", studio::Icon::Light, "Neon"))
+                insertNeonPart();
+            if (studio::ribbonBigButton("pl", studio::Icon::Light, "PointLight"))
+                insertPointLightPart();
+            if (studio::ribbonBigButton("boom", studio::Icon::Trash, "Explode"))
+                insertExplodePart();
+            sep();
+            if (studio::ribbonBigButton("dup", studio::Icon::Duplicate, "Duplicate"))
+                duplicateSelected();
+            if (studio::ribbonBigButton("del", studio::Icon::Trash, "Delete"))
+                deleteSelected();
+            sep();
+            if (studio::ribbonBigButton("anc", studio::Icon::Anchor, "Anchor"))
+                studioSetAnchoredOnSelection(true);
+            if (studio::ribbonBigButton("uanc", studio::Icon::Anchor, "Unanchor"))
+                studioSetAnchoredOnSelection(false);
+            if (studio::ribbonBigButton("col", studio::Icon::Cube, "Collide"))
+                studioSetCanCollideOnSelection(true);
+            if (studio::ribbonBigButton("ncol", studio::Icon::Cube, "NoCollide"))
+                studioSetCanCollideOnSelection(false);
+            sep();
+            drawStudioModelTabExtras();
+            drawStudioTransformRibbonExtras();
+        }
+        // ---- TEST ----
+        else if (g_studioRibbonTab == 5) {
+            if (!g_studioTesting) {
+                if (studio::ribbonBigButton("play", studio::Icon::Play, "Play"))
+                    startStudioTest(glfwGetCurrentContext());
+            } else {
+                if (studio::ribbonBigButton("stop", studio::Icon::Stop, "Stop", true))
+                    stopStudioTest(glfwGetCurrentContext());
+            }
+            sep();
+            if (studio::ribbonBigButton("exp", studio::Icon::Folder, "Explorer", g_showExplorer))
+                g_showExplorer = !g_showExplorer;
+            if (studio::ribbonBigButton("prp", studio::Icon::Transform, "Properties", g_showProps))
+                g_showProps = !g_showProps;
+            if (studio::ribbonBigButton("tbx2", studio::Icon::Package, "Toolbox", g_showToolbox))
+                g_showToolbox = !g_showToolbox;
+            if (studio::ribbonBigButton("cam", studio::Icon::Camera, "Camera"))
+                g_mode = CamMode::Studio;
+        }
+
+        if (!g_exportMsg.empty()) {
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored({1.f, 0.85f, 0.4f, 1.f}, "%s", g_exportMsg.c_str());
+        }
+        ImGui::Unindent(8.f);
     }
     ImGui::End();
     ImGui::PopStyleColor();
@@ -475,46 +599,31 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         drawStudioPlayerAnimPanel();
 
     if (g_showExplorer) {
-        ImGui::SetNextWindowPos({12, panelY}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({kStudioPanelLeft, panelH}, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({rightX, panelY}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({kStudioPanelRight, std::max(64.f, explorerH)}, ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(1.f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.08f, 0.11f, 0.18f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_Text, {0.93f, 0.96f, 1.00f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled, {0.55f, 0.65f, 0.78f, 1.f});
+        studio_chrome::pushDockPanelColors();
         ImGui::Begin("Explorer", &g_showExplorer, kStudioPanelFlags);
 
+        drawExplorerToolbar();
+        ImGui::Separator();
+        // Albero game → Workspace / Services (come Studio a destra).
+        ImGui::TextDisabled("game");
         if (ImGui::TreeNodeEx("Workspace", ImGuiTreeNodeFlags_DefaultOpen)) {
             if (ImGui::Selectable("SpawnLocation##sp", g_selectedSpawn))
                 selectSpawn();
+            {
+                char tbuf[96];
+                std::snprintf(tbuf, sizeof(tbuf), "Terrain (%d voxel)##terrain", g_terrain.blockCount());
+                ImGui::Selectable(tbuf, false);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "workspace.Terrain — FillBlock, ReadVoxels, WriteVoxels\n"
+                        "Solo via script (Test/Play), stile Roblox Studio.");
+            }
 
             if (ImGui::TreeNodeEx("Parts", ImGuiTreeNodeFlags_DefaultOpen)) {
-                for (int i = 0; i < (int)g_world.parts.size(); ++i) {
-                    auto& p = g_world.parts[i];
-                    bool sel = (i == g_selectedPart) && !g_editingPartScript;
-                    std::string label = p.name;
-                    if (p.shape != PartShape::Block)
-                        label += std::string(" [") + partShapeName(p.shape) + "]";
-                    if (p.isNeon()) label += " [Neon]";
-                    else if (p.pointLight) label += " [Light]";
-                    else if (p.material != PartMaterial::Plastic)
-                        label += std::string(" [") + partMaterialName(p.material) + "]";
-                    label += "##part" + std::to_string(i);
-                    if (ImGui::Selectable(label.c_str(), sel)) {
-                        selectPart(i);
-                        g_editingPartScript = false;
-                    }
-                    if (!p.script.empty()) {
-                        ImGui::Indent();
-                        bool scriptSel = (i == g_selectedPart) && g_editingPartScript;
-                        std::string slabel = std::string("Script##sc") + std::to_string(i);
-                        if (ImGui::Selectable(slabel.c_str(), scriptSel)) {
-                            selectPart(i);
-                            g_editingPartScript = true;
-                            g_showProps = true;
-                        }
-                        ImGui::Unindent();
-                    }
-                }
+                drawExplorerPartsTree();
                 ImGui::TreePop();
             }
 
@@ -531,7 +640,20 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::TreePop();
             }
 
+            ImGui::TreePop(); // Workspace
+        }
+
+        ImGui::Separator();
+        if (ImGui::TreeNodeEx("Services", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Full DataModel service catalog (scriptable via GetService).
+            if (ImGui::TreeNodeEx("All Services", ImGuiTreeNodeFlags_DefaultOpen)) {
+                drawExplorerServiceTree();
+                ImGui::TreePop();
+            }
+
             if (ImGui::TreeNodeEx("StarterGui", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Selectable("StarterGui (service)##svc7", g_selectedService == 7))
+                    toggleService(7);
                 if (ImGui::TreeNodeEx("ScreenGui", ImGuiTreeNodeFlags_DefaultOpen)) {
                     for (int i = 0; i < (int)g_world.labels.size(); ++i) {
                         auto& l = g_world.labels[i];
@@ -549,8 +671,11 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::TreePop();
             }
 
-            if (ImGui::TreeNodeEx("Backpack", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::TextDisabled("Item → inventario circolare in Test/Play");
+            if (ImGui::TreeNodeEx("StarterPack", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Selectable("StarterPack (service)##svc15",
+                        g_selectedService == studio::platform::Svc_StarterPack))
+                    toggleService(studio::platform::Svc_StarterPack);
+                ImGui::TextDisabled("Tool → hotbar in Test/Play (un solo percorso)");
                 for (int i = 0; i < (int)g_world.backpack.size(); ++i) {
                     auto& b = g_world.backpack[i];
                     bool eq = (g_world.equippedBackpack == i);
@@ -574,6 +699,8 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             }
 
             if (ImGui::TreeNodeEx("Players", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Selectable("Players (service)##svc10", g_selectedService == 10))
+                    toggleService(10);
                 bool playerOpen = ImGui::TreeNodeEx("LocalPlayer",
                     ImGuiTreeNodeFlags_DefaultOpen
                     | (g_selectedPlayer && g_selectedPlayerPart < 0 ? ImGuiTreeNodeFlags_Selected : 0));
@@ -603,20 +730,19 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::TreePop();
             }
 
-            ImGui::TreePop();
-        }
-
-        ImGui::Separator();
-        if (ImGui::TreeNodeEx("Services", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::Selectable("Lighting##svc0", g_selectedService == 0)) toggleService(0);
-            if (ImGui::Selectable("RunService##svc1", g_selectedService == 1)) toggleService(1);
-            if (ImGui::Selectable("TweenService##svc2", g_selectedService == 2)) toggleService(2);
-            if (ImGui::Selectable("UserInputService##svc3", g_selectedService == 3)) toggleService(3);
-            if (ImGui::Selectable("Chat##svc4", g_selectedService == 4)) toggleService(4);
-            if (ImGui::Selectable("Debris##svc5", g_selectedService == 5)) toggleService(5);
-            if (ImGui::Selectable("ReplicatedStorage##svc6", g_selectedService == 6)) toggleService(6);
-            if (ImGui::Selectable("StarterGui##svc7", g_selectedService == 7)) toggleService(7);
+            if (ImGui::TreeNodeEx("StarterPlayer")) {
+                if (ImGui::Selectable("StarterPlayer##svc13",
+                        g_selectedService == studio::platform::Svc_StarterPlayer))
+                    toggleService(studio::platform::Svc_StarterPlayer);
+                if (ImGui::Selectable("StarterCharacter##svc14",
+                        g_selectedService == studio::platform::Svc_StarterCharacter))
+                    toggleService(studio::platform::Svc_StarterCharacter);
+                ImGui::TreePop();
+            }
             if (ImGui::TreeNodeEx("SoundService", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Selectable("SoundService (service)##svc30",
+                        g_selectedService == studio::platform::Svc_SoundService))
+                    toggleService(studio::platform::Svc_SoundService);
                 for (int i = 0; i < (int)g_sounds.sounds.size(); ++i) {
                     auto& s = g_sounds.sounds[i];
                     std::string label = s.name + (s.playing ? " [playing]" : "") + "##snd" + std::to_string(i);
@@ -640,27 +766,107 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         }
 
         ImGui::Separator();
+        if (ImGui::BeginMenu("Create object")) {
+            if (ImGui::MenuItem("Part")) insertNewPart();
+            if (ImGui::MenuItem("Ball")) insertShapedPart(PartShape::Ball);
+            if (ImGui::MenuItem("Cylinder")) insertShapedPart(PartShape::Cylinder);
+            if (ImGui::MenuItem("Wedge")) insertShapedPart(PartShape::Wedge);
+            if (ImGui::MenuItem("Model (import)")) insertImportedModel();
+            ImGui::Separator();
+            if (ImGui::MenuItem("TextLabel")) insertNewTextLabel();
+            if (ImGui::MenuItem("TextButton")) insertNewTextButton();
+            if (ImGui::MenuItem("Sound")) insertSound();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Script on selection")) addScriptToSelected();
+            if (ImGui::MenuItem("Tool (StarterPack)"))
+                g_world.addBackpackItem("Tool", (int)g_world.backpack.size());
+            ImGui::EndMenu();
+        }
         if (ImGui::Button("Aggiungi Script al blocco", {-1, 0}))
             addScriptToSelected();
         if (g_showFbx && fbxOk) ImGui::BulletText("FBX (legacy)");
         ImGui::End();
-        ImGui::PopStyleColor(3);
+        studio_chrome::popDockPanelColors();
     }
 
     if (g_showProps) {
-        ImGui::SetNextWindowPos({(float)g_w - kStudioPanelRight - 12.f, panelY}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({kStudioPanelRight, panelH}, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({rightX, propsY}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({kStudioPanelRight, std::max(64.f, propsH)}, ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(1.f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.08f, 0.11f, 0.18f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.10f, 0.14f, 0.22f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_Text, {0.93f, 0.96f, 1.00f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled, {0.55f, 0.65f, 0.78f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, {0.12f, 0.18f, 0.30f, 1.f});
-        ImGui::PushStyleColor(ImGuiCol_Border, {0.22f, 0.34f, 0.52f, 1.f});
+        studio_chrome::pushDockPanelColors();
         ImGui::Begin("Properties", &g_showProps, kStudioPanelFlags);
 
         if (g_selectedService == 0) {
-            ImGui::TextColored({1.f, 0.88f, 0.35f, 1.f}, "Services · Lighting");
+            studio_chrome::drawClassNameBanner("Lighting", "game.Lighting");
+            studio_chrome::section("Grafica");
+            ImGui::TextWrapped(
+                "Performance / Studio Default / Beautiful — Quality + luce + post.");
+            {
+                if (ImGui::Button("Performance##studiogfx")) {
+                    applyStudioGraphicsPreset(StudioGraphicsPreset::Performance,
+                                             g_engine.quality, g_look, g_lighting);
+                    g_lookPresetUi = 0;
+                    g_exportMsg = "Grafica: Performance";
+                    markPlaceDirty();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Studio Default##studiogfx")) {
+                    applyStudioGraphicsPreset(StudioGraphicsPreset::StudioDefault,
+                                             g_engine.quality, g_look, g_lighting);
+                    g_lookPresetUi = 0;
+                    g_exportMsg = "Grafica: Studio Default";
+                    markPlaceDirty();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Beautiful##studiogfx")) {
+                    applyStudioGraphicsPreset(StudioGraphicsPreset::Beautiful,
+                                             g_engine.quality, g_look, g_lighting);
+                    g_lookPresetUi = (int)LookPreset::CleanAaa;
+                    g_exportMsg = "Grafica: Beautiful";
+                    markPlaceDirty();
+                }
+            }
+            ImGui::Checkbox("Ombre (quality.shadows)", &g_engine.quality.shadows);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Deve essere ON insieme a Ombre sole/luna sotto.");
+
+            ImGui::Separator();
+            ImGui::TextColored({0.95f, 0.55f, 0.85f, 1.f}, "Look AAA (atmosfera)");
+            ImGui::TextWrapped(
+                "Preset atmosfera (fog/luce/grade). Preferisci Grafica Studio sopra "
+                "per un look di base; questi sono varianti cinematiche.");
+            {
+                const char* lookNames[] = {
+                    "Default (off)", "Forest (bosco)", "Cinematic", "Golden Hour",
+                    "Night Neon", "Clean AAA", "Misty / Atmosphere"
+                };
+                if (ImGui::Combo("Preset Look##lookaaa", &g_lookPresetUi, lookNames,
+                                 IM_ARRAYSIZE(lookNames))) {
+                    applyLookPreset((LookPreset)g_lookPresetUi, g_look, g_lighting);
+                    if (g_look.enabled) {
+                        if (g_look.wantPostFx) g_engine.quality.postFx = true;
+                        if (g_look.wantShadows) {
+                            g_lighting.globalShadows = true;
+                            g_engine.quality.shadows = true;
+                            if (g_engine.quality.shadowOccluders < 4)
+                                g_engine.quality.shadowOccluders = 8;
+                        }
+                        g_exportMsg = std::string("Look AAA: ") + g_look.presetName;
+                        markPlaceDirty();
+                    } else {
+                        g_exportMsg = "Look AAA disattivato";
+                    }
+                }
+            }
+            if (g_look.enabled) {
+                ImGui::TextDisabled("Attivo: %s", g_look.presetName);
+                ImGui::SliderFloat("Exposure", &g_look.exposure, 0.5f, 1.8f, "%.2f");
+                ImGui::SliderFloat("Contrast", &g_look.contrast, 0.7f, 1.6f, "%.2f");
+                ImGui::SliderFloat("Saturation", &g_look.saturation, 0.5f, 1.6f, "%.2f");
+                ImGui::SliderFloat("Vignette", &g_look.vignette, 0.f, 0.8f, "%.2f");
+                ImGui::SliderFloat("Bloom", &g_look.bloomIntensity, 0.f, 3.5f, "%.2f");
+            }
+            ImGui::Separator();
 
             ImGui::TextColored({0.55f, 0.85f, 1.f, 1.f}, "Giorno / Notte");
             int mode = (int)g_lighting.dayNight;
@@ -702,6 +908,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::ColorEdit3("FogColor", &g_lighting.fogColor.x);
             ImGui::DragFloat("FogStart", &g_lighting.fogStart, 1.f, 0.f, 5000.f);
             ImGui::DragFloat("FogEnd", &g_lighting.fogEnd, 1.f, 1.f, 8000.f);
+            ImGui::Checkbox("Atmosphere", &g_lighting.atmosphereEnabled);
+            if (g_lighting.atmosphereEnabled) {
+                ImGui::SliderFloat("Atm Density", &g_lighting.atmosphereDensity, 0.f, 1.f);
+                ImGui::SliderFloat("Atm Haze", &g_lighting.atmosphereHaze, 0.f, 1.f);
+            }
+            ImGui::Checkbox("SunRays", &g_lighting.sunRaysEnabled);
+            if (g_lighting.sunRaysEnabled)
+                ImGui::SliderFloat("SunRays Intensity", &g_lighting.sunRaysIntensity, 0.f, 2.f);
             if (ImGui::Button("Mezzogiorno (12)")) g_lighting.clockTime = 12.f;
             ImGui::SameLine();
             if (ImGui::Button("Tramonto (19)")) g_lighting.clockTime = 19.f;
@@ -714,11 +928,13 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::TextDisabled("Lua: game.Lighting:SetClockTime(14)");
         } else if (g_selectedService == 1) {
             ImGui::TextColored({0.45f, 0.85f, 1.f, 1.f}, "Services · RunService");
-            ImGui::TextWrapped("Heartbeat via game.RunService.Heartbeat:Connect(fn).");
-            ImGui::TextDisabled("Usato dagli script in Test/Play.");
+            ImGui::TextWrapped(
+                "Heartbeat / Stepped / RenderStepped :Connect(fn(dt))\n"
+                "IsStudio · IsClient · IsServer — come Roblox.");
+            ImGui::TextDisabled("Attivo in Test (F5) e Play.");
         } else if (g_selectedService == 2) {
             ImGui::TextColored({0.75f, 0.55f, 1.f, 1.f}, "Services · TweenService");
-            ImGui::TextWrapped("TweenService:Create(...):Play() — stub compatibile (espansione in corso).");
+            ImGui::TextWrapped("TweenService:Create(...):Play()");
         } else if (g_selectedService == 3) {
             ImGui::TextColored({0.55f, 0.95f, 0.65f, 1.f}, "Services · UserInputService");
             ImGui::TextWrapped("DisableJump / EnableJump da Lua.");
@@ -728,12 +944,114 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         } else if (g_selectedService == 5) {
             ImGui::TextColored({0.9f, 0.5f, 0.4f, 1.f}, "Services · Debris");
             ImGui::TextWrapped("Debris:AddItem(part, seconds) — rimozione parti.");
-        } else if (g_selectedService == 6) {
-            ImGui::TextColored({0.5f, 0.8f, 1.f, 1.f}, "Services · ReplicatedStorage");
-            ImGui::TextWrapped("Alias Events — condivisione dati/script.");
+        } else if (g_selectedService == studio::platform::Svc_ReplicatedStorage
+                   || g_selectedService == studio::platform::Svc_ServerStorage
+                   || g_selectedService == studio::platform::Svc_ServerScriptService) {
+            SharedService svc = SharedService::ReplicatedStorage;
+            const char* title = "ReplicatedStorage";
+            if (g_selectedService == studio::platform::Svc_ServerStorage) {
+                svc = SharedService::ServerStorage;
+                title = "ServerStorage";
+            } else if (g_selectedService == studio::platform::Svc_ServerScriptService) {
+                svc = SharedService::ServerScriptService;
+                title = "ServerScriptService";
+            }
+            ImGui::TextColored({0.5f, 0.8f, 1.f, 1.f}, "Services · %s", title);
+            ImGui::TextWrapped(
+                "Container professionale: Folder, ModuleScript (require), RemoteEvent.\n"
+                "Luau: local M = require(game.ReplicatedStorage.MyModule)");
+            if (ImGui::Button("+ ModuleScript")) {
+                auto& s = g_world.addShared(svc, "ModuleScript",
+                    "Module" + std::to_string(g_world.instances.size() + 1));
+                s.source = "local module = {}\n\nfunction module.hello()\n"
+                           "    print(\"hello from\", script.Name)\nend\n\nreturn module\n";
+                g_selectedSharedInstance = (int)g_world.instances.size() - 1;
+                markPlaceDirty();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ RemoteEvent")) {
+                g_world.addShared(svc, "RemoteEvent",
+                    "Remote" + std::to_string(g_world.instances.size() + 1));
+                g_selectedSharedInstance = (int)g_world.instances.size() - 1;
+                markPlaceDirty();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ RemoteFunction")) {
+                g_world.addShared(svc, "RemoteFunction",
+                    "RemoteFn" + std::to_string(g_world.instances.size() + 1));
+                g_selectedSharedInstance = (int)g_world.instances.size() - 1;
+                markPlaceDirty();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Folder")) {
+                g_world.addShared(svc, "Folder",
+                    "Folder" + std::to_string(g_world.instances.size() + 1));
+                g_selectedSharedInstance = (int)g_world.instances.size() - 1;
+                markPlaceDirty();
+            }
+            if (svc == SharedService::ServerScriptService) {
+                ImGui::SameLine();
+                if (ImGui::Button("+ Script")) {
+                    auto& s = g_world.addShared(svc, "Script",
+                        "Script" + std::to_string(g_world.instances.size() + 1));
+                    s.source =
+                        "-- Server Script (SSS)\n"
+                        "print(script.Name, \"boot\")\n";
+                    g_selectedSharedInstance = (int)g_world.instances.size() - 1;
+                    markPlaceDirty();
+                }
+            }
+            if (g_selectedSharedInstance >= 0
+                && g_selectedSharedInstance < (int)g_world.instances.size()) {
+                auto& s = g_world.instances[g_selectedSharedInstance];
+                ImGui::Separator();
+                ImGui::Text("%s · %s", s.className.c_str(), s.name.c_str());
+                char nbuf[64];
+                std::snprintf(nbuf, sizeof(nbuf), "%s", s.name.c_str());
+                if (ImGui::InputText("Name##sh", nbuf, sizeof(nbuf))) {
+                    s.name = nbuf;
+                    markPlaceDirty();
+                }
+                if (s.className == "ModuleScript" || s.className == "Script"
+                    || s.className == "LocalScript") {
+                    static char srcBuf[8192];
+                    static int synced = -1;
+                    if (synced != g_selectedSharedInstance) {
+                        synced = g_selectedSharedInstance;
+                        std::snprintf(srcBuf, sizeof(srcBuf), "%s", s.source.c_str());
+                    }
+                    ImGui::TextDisabled(s.className == "ModuleScript"
+                        ? "Source (return module)" : "Source (auto-run on Play)");
+                    if (ImGui::InputTextMultiline("##modsrc", srcBuf, sizeof(srcBuf),
+                            {-1.f, 180.f})) {
+                        s.source = srcBuf;
+                        markPlaceDirty();
+                    }
+                }
+                if (ImGui::Button("Elimina Instance")) {
+                    g_world.instances.erase(g_world.instances.begin() + g_selectedSharedInstance);
+                    for (auto& o : g_world.instances)
+                        if (o.parentIndex == g_selectedSharedInstance) o.parentIndex = -1;
+                        else if (o.parentIndex > g_selectedSharedInstance) --o.parentIndex;
+                    g_selectedSharedInstance = -1;
+                    markPlaceDirty();
+                }
+            }
         } else if (g_selectedService == 7) {
             ImGui::TextColored({0.6f, 0.9f, 1.f, 1.f}, "Services · StarterGui");
             ImGui::TextWrapped("Contiene ScreenGui → TextLabel / Label / TextButton.");
+        } else if (g_selectedService == 8) {
+            ImGui::TextColored({0.55f, 0.75f, 1.f, 1.f}, "Services · DataStoreService");
+            ImGui::TextWrapped("GetDataStore(name):GetAsync / SetAsync / IncrementAsync");
+        } else if (g_selectedService == 9) {
+            ImGui::TextColored({0.7f, 0.95f, 0.55f, 1.f}, "Services · CollectionService");
+            ImGui::TextWrapped("AddTag · RemoveTag · HasTag · GetTagged · GetTags");
+            ImGui::TextDisabled("Alias interno: global Tag (id numerici).");
+        } else if (g_selectedService == 10) {
+            ImGui::TextColored({0.95f, 0.7f, 0.45f, 1.f}, "Services · Players");
+            ImGui::TextWrapped("game.Players.LocalPlayer · Humanoid · Character");
+        } else if (g_selectedService >= 12) {
+            drawServicePropertyFallback(g_selectedService);
         } else if (g_selectedLabel >= 0 && g_selectedLabel < (int)g_world.labels.size()) {
             auto& l = g_world.labels[g_selectedLabel];
             ImGui::TextColored({0.35f, 0.85f, 1.f, 1.f}, "ScreenGui · %s",
@@ -796,10 +1114,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                         "##labelscript", 140.f);
                     l.script = g_labelScriptBuf;
                     {
-                        static const char* kScriptTypeNames[] = {"Legacy (ovunque)", "Server", "Client"};
+                        static const char* kScriptTypeNames[] = {
+                            "Legacy (compat)", "Script (Server)",
+                            "LocalScript (Client)", "ModuleScript"
+                        };
                         int st = (int)l.scriptType;
+                        if (st < 0 || st > 3) st = 0;
                         ImGui::SetNextItemWidth(-1);
-                        if (ImGui::Combo("##labelscripttype", &st, kScriptTypeNames, 3))
+                        if (ImGui::Combo("##labelscripttype", &st, kScriptTypeNames, 4))
                             l.scriptType = (ScriptType)st;
                     }
                     ImGui::SameLine();
@@ -869,52 +1191,69 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::TextDisabled("Mesh: %s", b.meshPath.c_str());
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Togli mesh")) b.meshPath.clear();
+            }
 
-                // Regolazione della presa. Serve perche un modello importato
-                // arriva con la scala e l orientamento con cui e stato
-                // esportato, che non hanno rapporto col nostro personaggio.
-                // Mostra l oggetto in mano al personaggio mentre lo si regola:
-                // senza questo si cambiavano i numeri e non si vedeva nulla,
-                // perche la mesh viene disegnata solo per l oggetto equipaggiato
-                // e in Studio lo si seleziona, non lo si equipaggia.
-                g_gripPreviewSlot = g_selectedBackpack;
+            // Anteprima in mano anche senza mesh (Sword/Torch/posa corpo).
+            g_gripPreviewSlot = g_selectedBackpack;
 
-                ImGui::SeparatorText("Come sta in mano");
+            ImGui::SeparatorText("Come sta in mano");
 
-                // I due modi: si arma qui e poi si trascina nel mondo, con
-                // l'oggetto in mano che si muove sotto il mouse. Le caselle
-                // restano sotto per la regolazione fine e per copiare un
-                // valore che si sa gia'.
-                const float half = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
-                auto modeButton = [&](const char* label, int mode, ImVec4 col) {
-                    const bool on = (g_gripEditMode == mode);
-                    ImGui::PushStyleColor(ImGuiCol_Button,
-                        on ? ImVec4{col.x * 1.4f, col.y * 1.4f, col.z * 1.4f, 1.f} : col);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                        {col.x * 1.5f, col.y * 1.5f, col.z * 1.5f, 1.f});
-                    if (ImGui::Button(label, {half, 32}))
-                        g_gripEditMode = on ? 0 : mode;   // riclicca = spegni
-                    ImGui::PopStyleColor(2);
+            // Cosa si regola: oggetto O una parte R6 (braccia, torso, ...).
+            {
+                const char* targets[] = {
+                    "Oggetto", "Braccio DX", "Braccio SX", "Torso",
+                    "Testa", "Gamba DX", "Gamba SX"
                 };
-                modeButton(g_gripEditMode == 1 ? "Sposta: ATTIVO" : "Sposta col mouse",
-                           1, {0.18f, 0.42f, 0.72f, 1.f});
-                ImGui::SameLine(0, 6);
-                modeButton(g_gripEditMode == 2 ? "Ruota: ATTIVO" : "Ruota col mouse",
-                           2, {0.55f, 0.35f, 0.15f, 1.f});
-
-                if (g_gripEditMode != 0) {
-                    ImGui::TextColored({0.4f, 0.9f, 0.5f, 1.f},
-                        g_gripEditMode == 1
-                            ? "Trascina nel mondo: destra/sinistra e su/giu."
-                            : "Trascina nel mondo per girarla.");
-                    ImGui::TextDisabled(g_gripEditMode == 1
-                            ? "Shift + trascina = avanti / indietro."
-                            : "Shift + trascina = inclina di lato.");
-                } else {
-                    ImGui::TextDisabled("Premi un modo, poi trascina sull'oggetto in mano.");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("Cosa muovo##gripTarget", &g_gripEditTarget,
+                                 targets, IM_ARRAYSIZE(targets))) {
+                    // Entrando su una parte corpo, crea subito la posa cosi'
+                    // si vede il braccio gia' in hold e non a riposo.
+                    if (g_gripEditTarget >= 1) {
+                        static const char* kPart[] = {
+                            "Right Arm", "Left Arm", "Torso", "Head",
+                            "Right Leg", "Left Leg"
+                        };
+                        ensureHoldPose(b.holdPose, kPart[g_gripEditTarget - 1],
+                                       kEquippedArmHoldDeg);
+                    }
                 }
+            }
 
-                ImGui::Spacing();
+            const float half = (ImGui::GetContentRegionAvail().x - 6.f) * 0.5f;
+            auto modeButton = [&](const char* label, int mode, ImVec4 col) {
+                const bool on = (g_gripEditMode == mode);
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                    on ? ImVec4{col.x * 1.4f, col.y * 1.4f, col.z * 1.4f, 1.f} : col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                    {col.x * 1.5f, col.y * 1.5f, col.z * 1.5f, 1.f});
+                if (ImGui::Button(label, {half, 32}))
+                    g_gripEditMode = on ? 0 : mode;
+                ImGui::PopStyleColor(2);
+            };
+            modeButton(g_gripEditMode == 1 ? "Sposta: ATTIVO" : "Sposta col mouse",
+                       1, {0.18f, 0.42f, 0.72f, 1.f});
+            ImGui::SameLine(0, 6);
+            modeButton(g_gripEditMode == 2 ? "Ruota: ATTIVO" : "Ruota col mouse",
+                       2, {0.55f, 0.35f, 0.15f, 1.f});
+
+            if (g_gripEditMode != 0) {
+                ImGui::TextColored({0.4f, 0.9f, 0.5f, 1.f},
+                    g_gripEditMode == 1
+                        ? "Trascina: destra/sinistra e su/giu."
+                        : "Trascina per ruotare.");
+                ImGui::TextDisabled(g_gripEditMode == 1
+                        ? "Shift + trascina = avanti / indietro."
+                        : "Shift + trascina = inclina di lato.");
+            } else {
+                ImGui::TextDisabled(
+                    g_gripEditTarget == 0
+                        ? "Premi un modo, poi trascina l'oggetto in mano."
+                        : "Premi un modo, poi trascina la parte del corpo.");
+            }
+
+            ImGui::Spacing();
+            if (g_gripEditTarget == 0) {
                 ImGui::TextDisabled("Scala: 1 = come la adatta il motore, 2 = il doppio");
                 ImGui::SetNextItemWidth(-90);
                 ImGui::DragFloat("Scala##grip", &b.gripScale, 0.02f, 0.05f, 20.f, "%.2f");
@@ -922,18 +1261,52 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::DragFloat3("Ruota##grip", &b.gripRotation.x, 1.f, -360.f, 360.f, "%.1f");
                 ImGui::SetNextItemWidth(-90);
                 ImGui::DragFloat3("Sposta##grip", &b.gripOffset.x, 0.02f, -10.f, 10.f, "%.3f");
-                if (ImGui::SmallButton("Rimetti a zero")) {
+                if (ImGui::SmallButton("Rimetti a zero##item")) {
                     b.gripScale = 1.f;
                     b.gripRotation = glm::vec3(0.f);
                     b.gripOffset = glm::vec3(0.f);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Metti orizzontale")) {
-                    // La posa che serve quasi sempre a un'arma importata: le
-                    // mesh di fucili e pistole escono quasi tutte puntate
-                    // lungo un asse che non e' quello della mano.
+                if (ImGui::SmallButton("Metti orizzontale"))
                     b.gripRotation = glm::vec3(0.f, 90.f, 0.f);
+            } else {
+                static const char* kPart[] = {
+                    "Right Arm", "Left Arm", "Torso", "Head",
+                    "Right Leg", "Left Leg"
+                };
+                const char* partName = kPart[g_gripEditTarget - 1];
+                HoldPartPose* hp = findHoldPose(b.holdPose, partName);
+                ImGui::TextDisabled("Posa di \"%s\" mentre l'item e' tenuto", partName);
+                if (!hp) {
+                    ImGui::TextWrapped(
+                        "Nessuna posa salvata: la parte segue camminata "
+                        "(braccio DX = hold default).");
+                    if (ImGui::Button("Crea posa per questa parte", {-1, 28}))
+                        ensureHoldPose(b.holdPose, partName, kEquippedArmHoldDeg);
+                } else {
+                    ImGui::SetNextItemWidth(-90);
+                    ImGui::DragFloat3("Ruota parte##hold", &hp->rot.x, 1.f, -360.f, 360.f, "%.1f");
+                    ImGui::SetNextItemWidth(-90);
+                    ImGui::DragFloat3("Sposta parte##hold", &hp->pos.x, 0.02f, -10.f, 10.f, "%.3f");
+                    if (ImGui::SmallButton("Azzera questa parte")) {
+                        hp->pos = glm::vec3(0.f);
+                        hp->rot = (std::string(partName) == "Right Arm")
+                            ? glm::vec3(kEquippedArmHoldDeg, 0.f, 0.f)
+                            : glm::vec3(0.f);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Togli posa parte")) {
+                        b.holdPose.erase(
+                            std::remove_if(b.holdPose.begin(), b.holdPose.end(),
+                                           [&](const HoldPartPose& h) {
+                                               return h.name == partName;
+                                           }),
+                            b.holdPose.end());
+                    }
                 }
+                if (!b.holdPose.empty()
+                    && ImGui::SmallButton("Azzera tutte le parti corpo"))
+                    b.holdPose.clear();
             }
             bool eq = (g_world.equippedBackpack == g_selectedBackpack);
             if (ImGui::Checkbox("Equipaggiato (default)", &eq)) {
@@ -964,7 +1337,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             }
         } else if (g_selectedPlayer) {
             auto& h = g_player.humanoid;
-            ImGui::TextColored({0.45f, 0.85f, 1.f, 1.f}, "Players · LocalPlayer");
+            studio_chrome::drawClassNameBanner("Player", "LocalPlayer");
             ImGui::TextDisabled(h.userRigged ? "Rig R6 attivo" : "Non riggato");
             ImGui::DragFloat3("Position (world)", &g_playerPos.x, 0.1f);
             ImGui::DragFloat("Yaw °", &g_playerYaw, 1.f);
@@ -978,7 +1351,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::DragFloat3("Size", &p.size.x, 0.05f, 0.2f, 8.f);
                 ImGui::DragFloat("Rot X", &p.rotX, 1.f);
                 ImGui::DragFloat("Rot Z", &p.rotZ, 1.f);
-                ImGui::ColorEdit3("Color", &p.color.x);
+                drawPartColorPicker(p.color);
             }
             ImGui::Separator();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.15f, 0.65f, 0.40f, 1.f});
@@ -1049,7 +1422,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             bool xformEdited = false;
             xformEdited |= ImGui::DragFloat3("Position", &m.position.x, 0.25f);
             xformEdited |= ImGui::DragFloat3("Rotation °", &m.rotation.x, 1.f);
-            xformEdited |= ImGui::DragFloat3("Scale", &m.scale.x, 0.05f, 0.05f, 80.f);
+            xformEdited |= ImGui::DragFloat3("Scale", &m.scale.x, 0.05f, 0.01f, 100000.f);
             if (xformEdited) {
                 m.anim.reseedIfStatic(m.position, m.rotation, m.scale);
                 markPlaceDirty();
@@ -1060,6 +1433,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Il player si ferma contro il volume del modello\n"
                                   "(un parallelepipedo, non la mesh esatta).");
+            drawModelPrimaryPartProps(m);
 
             ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.45f, 0.20f, 1.f});
             if (ImGui::Button("Anima questo Model...", {-1, 40}))
@@ -1100,10 +1474,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                     markPlaceDirty();
                 }
                 {
-                    static const char* kScriptTypeNames[] = {"Legacy (ovunque)", "Server", "Client"};
+                    static const char* kScriptTypeNames[] = {
+                        "Legacy (compat)", "Script (Server)",
+                        "LocalScript (Client)", "ModuleScript"
+                    };
                     int st = (int)m.scriptType;
+                    if (st < 0 || st > 3) st = 0;
                     ImGui::SetNextItemWidth(-1);
-                    if (ImGui::Combo("##modelscripttype", &st, kScriptTypeNames, 3)) {
+                    if (ImGui::Combo("##modelscripttype", &st, kScriptTypeNames, 4)) {
                         m.scriptType = (ScriptType)st;
                         markPlaceDirty();
                     }
@@ -1163,7 +1541,9 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::TextDisabled("Salva/Pubblica sono sempre in fondo a questo pannello.");
         } else {
             auto& p = g_world.parts[g_selectedPart];
-            ImGui::TextColored({0.45f, 0.85f, 1.f, 1.f}, "Part · %s", partShapeName(p.shape));
+            studio_chrome::drawClassNameBanner("Part", p.name.c_str());
+            drawMultiPartPropertiesSection();
+            ImGui::TextDisabled("Shape: %s", partShapeName(p.shape));
             if (ImGui::InputText("Name", g_partNameBuf, sizeof(g_partNameBuf)))
                 p.name = g_partNameBuf;
             {
@@ -1180,38 +1560,35 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::Separator();
             ImGui::Text("Transform");
             ImGui::DragFloat3("Position", &p.position.x, 0.25f);
-            ImGui::DragFloat3("Size", &p.size.x, 0.25f, 0.5f, 80.f);
+            ImGui::DragFloat3("Size", &p.size.x, 0.25f, 0.05f, 100000.f);
             ImGui::DragFloat3("Rotation °", &p.rotation.x, 1.f);
             if (g_tool == StudioTool::Move)
                 ImGui::TextWrapped("Muovi: frecce RGB. Snap 0.25 · Shift=0.05 · Ctrl=libero.");
             else if (g_tool == StudioTool::Scale)
-                ImGui::TextWrapped("Scala: cubetti sulle facce. Snap 0.25 · Shift=0.1 · Ctrl=libero.");
+                ImGui::TextWrapped("Scala: cubetti sulle facce (lento · Shift=piu' veloce · Ctrl=libero).");
             else if (g_tool == StudioTool::Rotate)
                 ImGui::TextWrapped("Ruota: anelli RGB + tick 15°. Snap 5° · Shift=1° · Ctrl=libero.");
             else
                 ImGui::TextWrapped("Seleziona: scegli Muovi / Scala / Ruota dalla toolbar.");
-            if (ImGui::Button("Allarga X")) p.size.x = std::min(80.f, p.size.x + 1.f);
+            if (ImGui::Button("Allarga X")) p.size.x = std::min(100000.f, p.size.x + 1.f);
             ImGui::SameLine();
-            if (ImGui::Button("Allarga Z")) p.size.z = std::min(80.f, p.size.z + 1.f);
+            if (ImGui::Button("Allarga Z")) p.size.z = std::min(100000.f, p.size.z + 1.f);
             ImGui::SameLine();
-            if (ImGui::Button("Alza Y")) p.size.y = std::min(80.f, p.size.y + 1.f);
-            if (ImGui::Button("Ingrandisci x1.25")) scaleSelected(1.25f);
+            if (ImGui::Button("Alza Y")) p.size.y = std::min(100000.f, p.size.y + 1.f);
+            if (ImGui::Button("Ingrandisci x1.25")) studioScaleSelection(1.25f);
             ImGui::SameLine();
-            if (ImGui::Button("Riduci x0.8")) scaleSelected(0.8f);
+            if (ImGui::Button("Riduci x0.8")) studioScaleSelection(0.8f);
 
             ImGui::Separator();
             drawPartColorPicker(p.color);
             ImGui::Separator();
-            ImGui::Checkbox("Anchored", &p.anchored);
-            if (p.anchored)
-                ImGui::TextDisabled("Anchored = ferma in Play (in Studio puoi comunque muovere)");
-            else
+#define PART_PROP(T, field, luaName, jsonKey, def, mn, mx, help) \
+            partprops::editUi(luaName, p.field, mn, mx);          \
+            partprops::helpTooltip(help);
+#include "engine/PartProps.def"
+#undef PART_PROP
+            if (!p.anchored)
                 ImGui::TextColored({0.45f, 0.8f, 1.f, 1.f}, "Non ancorata: in Play cade, rotola e si spinge");
-            ImGui::Checkbox("CanCollide", &p.canCollide);
-            if (!p.canCollide)
-                ImGui::TextColored({1.f, 0.55f, 0.2f, 1.f}, "No Collision — solo questa Part");
-            else
-                ImGui::TextDisabled("Collisione attiva solo su questa Part");
             ImGui::Checkbox("Stud texture", &p.useStud);
 
             ImGui::Separator();
@@ -1221,11 +1598,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 if (matIdx < 0 || matIdx >= (int)PartMaterial::Count) matIdx = 0;
                 const char* mats[] = {
                     "Plastic", "SmoothPlastic", "Neon", "Metal", "Wood",
-                    "Concrete", "Grass", "Glass", "Ice", "Brick", "ForceField"
+                    "Concrete", "Grass", "Glass", "Ice", "Brick", "ForceField",
+                    "Fabric", "Marble", "Sand", "Slate", "DiamondPlate",
+                    "CorrodedMetal", "Granite", "Asphalt"
                 };
                 if (ImGui::Combo("Material##mat", &matIdx, mats, IM_ARRAYSIZE(mats)))
                     p.setMaterial((PartMaterial)matIdx);
             }
+            drawPartStudioExtras(p);
             ImGui::SliderFloat("Emissive", &p.emissive, 0.f, 2.f, "%.2f");
             ImGui::Checkbox("PointLight (illumina intorno)", &p.pointLight);
             if (p.pointLight) {
@@ -1352,15 +1732,21 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                     "##partscript", 140.f);
                 p.script = g_partScriptBuf;
                 {
-                    static const char* kScriptTypeNames[] = {"Legacy (ovunque)", "Server", "Client"};
+                    static const char* kScriptTypeNames[] = {
+                        "Legacy (compat)", "Script (Server)",
+                        "LocalScript (Client)", "ModuleScript"
+                    };
                     int st = (int)p.scriptType;
+                    if (st < 0 || st > 3) st = 0;
                     ImGui::SetNextItemWidth(-1);
-                    if (ImGui::Combo("##scripttype", &st, kScriptTypeNames, 3))
+                    if (ImGui::Combo("##scripttype", &st, kScriptTypeNames, 4))
                         p.scriptType = (ScriptType)st;
                     if (p.scriptType == ScriptType::Server)
-                        ImGui::TextDisabled("Non gira su chi si unisce come Client.");
+                        ImGui::TextDisabled("Solo host — stesso place PC + Android.");
                     else if (p.scriptType == ScriptType::Client)
-                        ImGui::TextDisabled("Gira su ogni peer, incluso chi si unisce.");
+                        ImGui::TextDisabled("LocalScript: ogni client (input/UI/viewmodel).");
+                    else if (p.scriptType == ScriptType::ModuleScript)
+                        ImGui::TextDisabled("Non parte da solo — require da altri script.");
                 }
                 if (ImGui::SmallButton("Inserisci Explode")) {
                     std::string cur = g_partScriptBuf;
@@ -1434,7 +1820,6 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             } else {
                 ImGui::TextDisabled("Nessuna icona — mostra il colore accent");
             }
-            ImGui::PushStyleColor(ImGuiCol_Text, {1.f, 1.f, 1.f, 1.f});
             if (ImGui::Button("Apri Place...", { -1, 0 })) doOpenPlace();
             if (ImGui::Button("Salva Place", { -1, 0 })) doSavePlace();
             ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.48f, 0.78f, 1.f});
@@ -1481,10 +1866,9 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::TextDisabled("Bozza: %s", g_publishDraftPath.c_str());
             ImGui::SliderFloat("FOV", &g_cam.fov, 40.f, 100.f);
             ImGui::Checkbox("VSync", &g_vsync);
-            ImGui::PopStyleColor();
         }
         ImGui::End();
-        ImGui::PopStyleColor(6);
+        studio_chrome::popDockPanelColors();
     }
 
     if (g_showScript) {
@@ -1559,6 +1943,26 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             }
         }
         ImGui::SameLine();
+        if (ImGui::Button("Carica cart_lontano.lua")) {
+            std::string path = resolveScriptPath("scripts/cart_lontano.lua");
+            std::string src = readTextFile(path);
+            if (!src.empty()) {
+                std::snprintf(g_luaEditBuf, sizeof(g_luaEditBuf), "%s", src.c_str());
+                g_loadCartLontano = true;
+                g_luaRunMsg = "Carrello caricato — Test (F5), poi clicca VIA!";
+            } else {
+                g_loadCartLontano = false;
+                g_luaRunMsg = "File cart_lontano.lua non trovato in assets/scripts";
+            }
+        }
+        if (g_loadCartLontano) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Rimuovi carrello")) {
+                g_loadCartLontano = false;
+                g_luaRunMsg = "Carrello disattivato";
+            }
+        }
+        ImGui::SameLine();
         ImGui::TextDisabled("part:Explode · Particles · Humanoid · barre UI · raycast...");
         if (!g_luaRunMsg.empty()) ImGui::TextWrapped("%s", g_luaRunMsg.c_str());
         if (!g_lua.lastError.empty())
@@ -1604,9 +2008,11 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGui::BulletText("Humanoid.SetJumpPower(50)");
         ImGui::BulletText("Humanoid.SetJumpEnabled(false)");
         ImGui::Separator();
-        ImGui::TextColored({0.45f, 0.9f, 1.f, 1.f}, "Mondo");
+        ImGui::TextColored({0.45f, 0.9f, 1.f, 1.f}, "Mondo / Terrain");
+        ImGui::BulletText("workspace.Terrain:FillBlock(cframe, size, material)");
         ImGui::BulletText("workspace:Raycast(origin, direction)");
-        ImGui::BulletText("workspace:FindFirstChild(\"Nome\")");
+        ImGui::BulletText("workspace:GetDescendants() · FindFirstChild");
+        ImGui::BulletText("game:GetService(\"CollectionService\")");
         ImGui::BulletText("Vector3.new(x,y,z)  ·  Color3.new(r,g,b)");
         ImGui::Separator();
         ImGui::TextDisabled("Preset Properties: Blocco esplosivo / Blocco che salta");
@@ -1631,7 +2037,23 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGui::Text("Graphics:   %s", gfxApiName(g_engine.gfxApi));
         ImGui::Text("Profilo:    %s", g_engine.quality.name);
         ImGui::Separator();
-        ImGui::TextDisabled("Ottimizza per questa sessione:");
+        ImGui::TextDisabled("Grafica Studio (Quality + Lighting + post):");
+        if (ImGui::Button("Performance##engfx")) {
+            applyStudioGraphicsPreset(StudioGraphicsPreset::Performance,
+                                     g_engine.quality, g_look, g_lighting);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Studio Default##engfx")) {
+            applyStudioGraphicsPreset(StudioGraphicsPreset::StudioDefault,
+                                     g_engine.quality, g_look, g_lighting);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Beautiful##engfx")) {
+            applyStudioGraphicsPreset(StudioGraphicsPreset::Beautiful,
+                                     g_engine.quality, g_look, g_lighting);
+            g_lookPresetUi = (int)LookPreset::CleanAaa;
+        }
+        ImGui::TextDisabled("Preset tecnici:");
         if (ImGui::Button("Low"))    g_engine.setPreset(QualityPreset::Low);
         ImGui::SameLine();
         if (ImGui::Button("Medium")) g_engine.setPreset(QualityPreset::Medium);
@@ -1641,13 +2063,59 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         if (ImGui::Button("Ultra"))  g_engine.setPreset(QualityPreset::Ultra);
         ImGui::SameLine();
         if (ImGui::Button("Default")) g_engine.setPreset(QualityPreset::PlatformDefault);
+        ImGui::Checkbox("Shadows (quality)", &g_engine.quality.shadows);
         ImGui::SliderFloat("Render scale", &g_engine.quality.renderScale, 0.5f, 1.25f, "%.2f");
-        ImGui::SliderFloat("Draw distance", &g_engine.quality.maxDrawDistance, 50.f, 1200.f, "%.0f");
-        ImGui::SliderInt("Max parts", &g_engine.quality.maxVisibleParts, 100, 12000);
+        ImGui::SliderFloat("Draw distance", &g_engine.quality.maxDrawDistance, 50.f, 2500.f, "%.0f");
+        ImGui::SliderInt("Max parts", &g_engine.quality.maxVisibleParts, 100, 50000);
+        ImGui::SliderInt("Max modelli", &g_engine.quality.maxVisibleModels, 8, 512);
+        ImGui::SliderInt("Max vertici modelli", &g_engine.quality.maxModelVerts, 100000, 12000000);
+        ImGui::Checkbox("Cull part a priorita'", &g_engine.quality.priorityPartCull);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Sotto overload tiene part grandi/vicine, scarta le piccole lontane.");
         ImGui::SliderFloat("Physics Hz", &g_engine.quality.physicsHz, 20.f, 120.f, "%.0f");
-        ImGui::SliderInt("Lua budget us", &g_engine.quality.luaBudgetUs, 500, 12000);
+        ImGui::SliderInt("Lua budget us", &g_engine.quality.luaBudgetUs, 500, 16000);
+        ImGui::Checkbox("Auto LOD + culling", &g_engine.quality.autoLod);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Attiva insieme: LOD distanza, frustum e occlusion culling.");
+        ImGui::Checkbox("Frustum culling", &g_engine.quality.frustumCull);
+        ImGui::Checkbox("Occlusion culling", &g_engine.quality.occlusionCull);
+        ImGui::Checkbox("LOD part (stud/mesh)", &g_engine.quality.partLod);
+        ImGui::Checkbox("Culling part piccole", &g_engine.quality.cullSmallParts);
+        if (g_engine.quality.autoLod) {
+            g_engine.quality.frustumCull = true;
+            g_engine.quality.occlusionCull = true;
+            g_engine.quality.partLod = true;
+            g_engine.quality.cullSmallParts = true;
+        }
+        ImGui::Checkbox("Auto difesa lag", &g_engine.quality.autoLagDefense);
+        ImGui::Checkbox("Guardia mondo (NaN)", &g_engine.quality.runtimeWorldGuard);
         ImGui::Checkbox("Stud textures", &g_engine.quality.studTextures);
+        ImGui::Checkbox("Post FX / Bloom", &g_engine.quality.postFx);
         ImGui::Checkbox("VSync", &g_engine.quality.vsync);
+        ImGui::Separator();
+        ImGui::TextColored({0.95f, 0.55f, 0.85f, 1.f}, "Look AAA rapido");
+        if (ImGui::Button("Forest")) {
+            g_lookPresetUi = (int)LookPreset::Forest;
+            applyLookPreset(LookPreset::Forest, g_look, g_lighting);
+            g_engine.quality.postFx = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cinematic")) {
+            g_lookPresetUi = (int)LookPreset::Cinematic;
+            applyLookPreset(LookPreset::Cinematic, g_look, g_lighting);
+            g_engine.quality.postFx = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clean AAA")) {
+            g_lookPresetUi = (int)LookPreset::CleanAaa;
+            applyLookPreset(LookPreset::CleanAaa, g_look, g_lighting);
+            g_engine.quality.postFx = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Off")) {
+            g_lookPresetUi = 0;
+            applyLookPreset(LookPreset::Default, g_look, g_lighting);
+        }
         g_vsync = g_engine.quality.vsync;
         ImGui::Separator();
         ImGui::TextColored({1.f, 0.55f, 0.35f, 1.f}, "AntiCheat / AntiTamper");
@@ -1699,6 +2167,69 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGui::End();
     }
 
+    if (g_showApiReference) {
+        ImGui::SetNextWindowSize({560, 520}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos({24.f, 90.f}, ImGuiCond_FirstUseEver);
+        ImGui::Begin("Riferimento API Blocky (Roblox-style)", &g_showApiReference);
+        if (ImGui::BeginTabBar("##apiref")) {
+            if (ImGui::BeginTabItem("Servizi")) {
+                ImGui::TextWrapped(
+                    "game:GetService(\"RunService|Lighting|Workspace|Players|"
+                    "ReplicatedStorage|TweenService|Debris|DataStoreService|"
+                    "CollectionService|UserInputService|StarterGui|SoundService\")");
+                ImGui::Separator();
+                ImGui::BulletText("RunService: Heartbeat, Stepped, RenderStepped, IsStudio");
+                ImGui::BulletText("Lighting: ClockTime, Fog, OutdoorAmbient, Brightness");
+                ImGui::BulletText("CollectionService: tag sulle Part live");
+                ImGui::BulletText("ServerScriptService / ServerStorage / StarterPlayer (contenitori)");
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Workspace")) {
+                ImGui::BulletText("workspace:FindFirstChild(name) · GetChildren()");
+                ImGui::BulletText("workspace:GetDescendants() · FindFirstChildOfClass(\"Part\")");
+                ImGui::BulletText("workspace:Raycast(origin, dir, maxDist?)");
+                ImGui::BulletText("workspace.Terrain: Clear, FillBlock, FillBall, Read/WriteVoxels");
+                ImGui::BulletText("workspace.CurrentCamera:ScreenPointToRay(x,y)");
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Instance")) {
+                ImGui::BulletText("Part: Name, Position, Touched, Explode, Destroy");
+                ImGui::BulletText("Humanoid: WalkSpeed, JumpPower, TakeDamage");
+                ImGui::BulletText("task.wait · task.spawn · task.delay");
+                ImGui::BulletText("math.noise · math.clamp · Enum.Material");
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Blocky way")) {
+                ImGui::TextWrapped(
+                    "Un solo modo sensato (niente doppioni):");
+                ImGui::BulletText("UI gioco → StarterGui / ScreenGui (non ImGui da C++)");
+                ImGui::BulletText("Tool → StarterPack + Equipped/Unequipped/Activated");
+                ImGui::BulletText("Server logic → Script (Server) sullo stesso place");
+                ImGui::BulletText("Client (camera/UI) → LocalScript (Client)");
+                ImGui::BulletText("Codice condiviso → ModuleScript (require)");
+                ImGui::BulletText("Grafica → Lighting → Performance / Studio Default / Beautiful");
+                ImGui::Separator();
+                ImGui::TextDisabled("PC Test e Android Hub usano lo stesso place.");
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+        ImGui::End();
+    }
+
+    // Bottom dock: Output · Assets · Console (sopra command/status bar).
+    if (safeOutputH > 0.f) {
+        const float outX = leftW;
+        const float outW = std::max(64.f, (float)g_w - leftW - rightW);
+        const float outY = (float)g_h - chromeReserve - safeOutputH;
+        drawBottomDockTabs(outX, outY, outW, safeOutputH, kStudioPanelFlags);
+    }
+
+    drawWindowSearchPopup();
+    drawStudioFeaturesOverlays();
+    drawStudio2020Overlays();
+    drawStudioProOverlays();
+    studioProPollHotkeys();
     drawScriptCreatedGuidePopup();
     drawSelectedPartLabel();
 }

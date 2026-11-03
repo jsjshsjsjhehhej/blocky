@@ -177,14 +177,17 @@ void handleGamesIndex(SOCKET s) {
 
             const std::string info = GamePublish::readTextFile((entry.path() / "info.json").string());
             const std::string index = GamePublish::readTextFile((entry.path() / "game_index.json").string());
-            if (info.empty() && index.empty()) continue;
+            const std::string pkg = GamePublish::readTextFile((entry.path() / "game.blocky.json").string());
+            if (info.empty() && index.empty() && pkg.empty()) continue;
 
             std::string id = jsonStr(info, "id");
+            if (id.empty()) id = jsonStr(pkg, "id");
             if (id.empty()) id = jsonStr(index, "gameId");
             if (id.empty()) id = name;
 
             std::string title = jsonStr(info, "name");
             if (title.empty()) title = jsonStr(info, "title");
+            if (title.empty()) title = jsonStr(pkg, "title");
             if (title.empty()) title = jsonStr(index, "title");
             if (title.empty()) title = id;
 

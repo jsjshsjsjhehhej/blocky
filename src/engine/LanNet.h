@@ -11,8 +11,10 @@
 #include "../platform/TargetPlatform.h"
 #include "PoolProtocol.h"
 using namespace blk::PoolProtocol; // pacchetti Register/Resolve/Relay... vedi PoolProtocol.h
+#include "WorldReplication.h"
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <chrono>
 #include <thread>
@@ -159,8 +161,10 @@ enum class NetMsg : uint8_t {
     Reject = 6,
     Discover = 7,
     Announce = 8,
-    RemoteEvent = 9,
-    ScriptReport = 10
+    RemoteEvent = 9,   // legacy chat/stats (payload 160) — non toccare size
+    ScriptReport = 10,
+    RemoteEventEx = 11, // remotes grandi + FireClient (variabile)
+    WorldDelta = 12,    // replica Part host→client
 };
 
 enum class NetRejectReason : uint8_t {
@@ -262,11 +266,24 @@ struct NetRemoteEvent {
 
 struct IncomingRemoteEvent {
     char name[32] = {};
-    char payload[160] = {};
+    std::string payload; // RemoteEventEx puo' superare i 160 byte legacy
     char fromName[24] = {};
     uint8_t fromId = 0;
     bool toServer = true;
 };
+
+/** Header RemoteEventEx + payload variabile (max kRemoteExMaxPayload). */
+static constexpr int kRemoteExMaxPayload = 900;
+#pragma pack(push, 1)
+struct NetRemoteEventExHdr {
+    NetHeader hdr;
+    uint8_t   targetId; // 0 = tutti i client (FireAll) / verso server
+    uint8_t   flags;    // bit0 = toServer (client→host)
+    char      name[32];
+    uint16_t  payloadLen;
+    // char payload[payloadLen] segue in rete
+};
+#pragma pack(pop)
 
 struct RemotePlayer {
     uint8_t   id = 0;
@@ -355,9 +372,19 @@ struct LanNet {
         bool hasValidPos = false;
         float lastStateTime = 0.f;
         int speedViolations = 0;
+        bool needsWorldSync = false; // appena joinato: stream snapshot Part
+        int  worldSyncIndex = 0;
     };
     PeerSlot peers[kMaxPeers]{};
     std::vector<IncomingRemoteEvent> incomingRemotes;
+    std::vector<WorldReplication::PartPacket> incomingWorld;
+
+    // Replica mondo (solo Host genera; Client applica).
+    uint32_t nextPartNetId = 1;
+    WorldReplication::SentCache worldSentCache;
+    float worldReplAcc = 0.f;
+    static constexpr float kWorldReplHz = 12.f; // upsert dirty ~12/s
+    static constexpr int kWorldSyncPartsPerTick = 24; // snapshot join
 
     // Seconda copia della stessa inizializzazione, nello stesso file. Ora
     // entrambe passano da plat::sys::netInit(), che e idempotente.
@@ -440,6 +467,11 @@ struct LanNet {
         relayCode[0] = '\0';
         clearRemotes();
         incomingRemotes.clear();
+        incomingWorld.clear();
+        incomingStats.clear();
+        worldSentCache.clear();
+        nextPartNetId = 1;
+        worldReplAcc = 0.f;
         for (auto& p : peers) p = {};
         setStatus("Offline");
 
@@ -836,7 +868,7 @@ struct LanNet {
         if (sock == kInvalidSock || role == NetRole::Offline) return;
 
         for (;;) {
-            char buf[512];
+            char buf[2048];
             sockaddr_in from{};
             NetAddrLen fromLen = (NetAddrLen)sizeof(from);
             int n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
@@ -1031,10 +1063,13 @@ struct LanNet {
             wel.spawnZ = (float)((peers[slot].id / 5) * 3 + 2);
             sendTo(from, &wel, sizeof(wel));
 
+            peers[slot].needsWorldSync = true;
+            peers[slot].worldSyncIndex = 0;
+
             upsertRemote(peers[slot].id, peers[slot].name,
                          {wel.spawnX, wel.spawnY, wel.spawnZ}, 180.f, false);
             updateHostStatus();
-            std::printf("[Net] Join #%d %s (%d/%d)\n",
+            std::printf("[Net] Join #%d %s (%d/%d) — world sync queued\n",
                         (int)peers[slot].id, peers[slot].name, occupiedSlots(), maxPlayers);
             return;
         }
@@ -1110,16 +1145,24 @@ struct LanNet {
                 relayChatFromClient(fromNm, ev.payload);
                 return;
             }
+            if (std::strcmp(ev.name, kStatsEventName) == 0) {
+                relayStatsFromClient(fromNm, ev.payload);
+                return;
+            }
 
             IncomingRemoteEvent in{};
             std::snprintf(in.name, sizeof(in.name), "%.31s", ev.name);
-            std::snprintf(in.payload, sizeof(in.payload), "%.159s", ev.payload);
+            in.payload = ev.payload;
             std::snprintf(in.fromName, sizeof(in.fromName), "%.23s", fromNm);
             in.fromId = fromId;
             in.toServer = true;
             incomingRemotes.push_back(in);
             return;
         }
+
+        if (hdr.type == (uint8_t)NetMsg::RemoteEventEx)
+            handleRemoteEventEx(buf, n, from, /*asHost=*/true);
+        // WorldDelta: solo host→client; host ignora
     }
 
     void handleClientPacket(const char* buf, int n, const NetHeader& hdr) {
@@ -1169,10 +1212,19 @@ struct LanNet {
                 incomingChat.push_back(ev.payload);
                 return;
             }
+            // Punteggi gia' firmati dall'host: "giocatore|Monete=10;..."
+            if (std::strcmp(ev.name, kStatsEventName) == 0) {
+                ev.payload[sizeof(ev.payload) - 1] = '\0';
+                const char* bar = std::strchr(ev.payload, '|');
+                if (bar && bar != ev.payload)
+                    incomingStats.push_back({std::string(ev.payload, (size_t)(bar - ev.payload)),
+                                             std::string(bar + 1)});
+                return;
+            }
 
             IncomingRemoteEvent in{};
             std::snprintf(in.name, sizeof(in.name), "%.31s", ev.name);
-            std::snprintf(in.payload, sizeof(in.payload), "%.159s", ev.payload);
+            in.payload = ev.payload;
             std::snprintf(in.fromName, sizeof(in.fromName), "%.23s",
                           ev.hdr.peerId ? "Peer" : "Host");
             for (const auto& r : remotes) {
@@ -1186,27 +1238,152 @@ struct LanNet {
             in.fromId = ev.hdr.peerId;
             in.toServer = false;
             incomingRemotes.push_back(in);
+            return;
         }
+
+        if (hdr.type == (uint8_t)NetMsg::RemoteEventEx)
+            handleRemoteEventEx(buf, n, hostAddr, /*asHost=*/false);
+
+        if (hdr.type == (uint8_t)NetMsg::WorldDelta
+            && n >= (int)sizeof(WorldReplication::PartPacket)) {
+            WorldReplication::PartPacket pkt{};
+            std::memcpy(&pkt, buf, sizeof(pkt));
+            if (incomingWorld.size() >= 512)
+                incomingWorld.erase(incomingWorld.begin(), incomingWorld.begin() + 64);
+            incomingWorld.push_back(pkt);
+        }
+    }
+
+    void handleRemoteEventEx(const char* buf, int n, const sockaddr_in& from, bool asHost) {
+        if (n < (int)sizeof(NetRemoteEventExHdr)) return;
+        NetRemoteEventExHdr eh{};
+        std::memcpy(&eh, buf, sizeof(eh));
+        if (eh.payloadLen > kRemoteExMaxPayload) return;
+        if (n < (int)sizeof(NetRemoteEventExHdr) + (int)eh.payloadLen) return;
+        std::string payload;
+        if (eh.payloadLen > 0)
+            payload.assign(buf + sizeof(NetRemoteEventExHdr), eh.payloadLen);
+
+        const bool toServer = (eh.flags & 1) != 0;
+        eh.name[sizeof(eh.name) - 1] = '\0';
+
+        if (asHost) {
+            int slot = findPeerSlotByAddr(from);
+            const char* fromNm = (slot >= 0) ? peers[slot].name : "Player";
+            uint8_t fromId = (slot >= 0) ? peers[slot].id : eh.hdr.peerId;
+
+            // FireClient inoltrato: targetId != 0 e non toServer → relay a quel peer
+            if (!toServer && eh.targetId != 0) {
+                for (auto& p : peers) {
+                    if (!p.used || p.id != eh.targetId) continue;
+                    sendTo(p.addr, buf, n);
+                    return;
+                }
+                return;
+            }
+
+            IncomingRemoteEvent in{};
+            std::snprintf(in.name, sizeof(in.name), "%.31s", eh.name);
+            in.payload = std::move(payload);
+            std::snprintf(in.fromName, sizeof(in.fromName), "%.23s", fromNm);
+            in.fromId = fromId;
+            in.toServer = true; // client→host = OnServerEvent
+            incomingRemotes.push_back(std::move(in));
+            return;
+        }
+
+        // Client: evento dall'host (OnClientEvent)
+        IncomingRemoteEvent in{};
+        std::snprintf(in.name, sizeof(in.name), "%.31s", eh.name);
+        in.payload = std::move(payload);
+        std::snprintf(in.fromName, sizeof(in.fromName), "Host");
+        in.fromId = eh.hdr.peerId;
+        in.toServer = false;
+        if (incomingRemotes.size() >= 256)
+            incomingRemotes.erase(incomingRemotes.begin());
+        incomingRemotes.push_back(std::move(in));
+    }
+
+    bool sendRemoteEventExPacket(uint8_t targetId, bool toServer, const char* name,
+                                 const char* payload, const sockaddr_in* toAddr) {
+        if (sock == kInvalidSock) return false;
+        const char* pl = payload ? payload : "";
+        size_t len = std::strlen(pl);
+        if (len > (size_t)kRemoteExMaxPayload) len = (size_t)kRemoteExMaxPayload;
+
+        char packet[sizeof(NetRemoteEventExHdr) + kRemoteExMaxPayload];
+        NetRemoteEventExHdr* eh = reinterpret_cast<NetRemoteEventExHdr*>(packet);
+        std::memset(packet, 0, sizeof(NetRemoteEventExHdr));
+        fillMagic(eh->hdr, NetMsg::RemoteEventEx, localId, (uint16_t)gameIndex);
+        eh->targetId = targetId;
+        eh->flags = toServer ? 1 : 0;
+        std::snprintf(eh->name, sizeof(eh->name), "%.31s", name ? name : "Event");
+        eh->payloadLen = (uint16_t)len;
+        if (len) std::memcpy(packet + sizeof(NetRemoteEventExHdr), pl, len);
+        const int total = (int)sizeof(NetRemoteEventExHdr) + (int)len;
+
+        if (toAddr) {
+            sendTo(*toAddr, packet, total);
+            return true;
+        }
+        if (role == NetRole::Host && !toServer) {
+            if (targetId == 0)
+                broadcastAll(packet, total);
+            else {
+                for (auto& p : peers) {
+                    if (p.used && p.id == targetId) {
+                        sendTo(p.addr, packet, total);
+                        break;
+                    }
+                }
+            }
+            return true;
+        }
+        if (role == NetRole::Client && connected) {
+            sendTo(hostAddr, packet, total);
+            return true;
+        }
+        return false;
     }
 
     bool sendRemoteEventToServer(const char* name, const char* payload) {
         if (sock == kInvalidSock || role == NetRole::Offline) return false;
-        NetRemoteEvent ev{};
-        fillMagic(ev.hdr, NetMsg::RemoteEvent, localId, (uint16_t)gameIndex);
-        std::snprintf(ev.name, sizeof(ev.name), "%.31s", name ? name : "Event");
-        std::snprintf(ev.payload, sizeof(ev.payload), "%.159s", payload ? payload : "");
+        const char* pl = payload ? payload : "";
+        const size_t len = std::strlen(pl);
+
+        // Payload corto: canale legacy (compat). Lungo: RemoteEventEx.
+        if (len <= 159) {
+            NetRemoteEvent ev{};
+            fillMagic(ev.hdr, NetMsg::RemoteEvent, localId, (uint16_t)gameIndex);
+            std::snprintf(ev.name, sizeof(ev.name), "%.31s", name ? name : "Event");
+            std::snprintf(ev.payload, sizeof(ev.payload), "%.159s", pl);
+            if (role == NetRole::Host) {
+                IncomingRemoteEvent in{};
+                std::snprintf(in.name, sizeof(in.name), "%s", ev.name);
+                in.payload = ev.payload;
+                std::snprintf(in.fromName, sizeof(in.fromName), "%s", localName);
+                in.fromId = localId;
+                in.toServer = true;
+                incomingRemotes.push_back(std::move(in));
+                return true;
+            }
+            sendTo(hostAddr, &ev, sizeof(ev));
+            return true;
+        }
+
         if (role == NetRole::Host) {
             IncomingRemoteEvent in{};
-            std::snprintf(in.name, sizeof(in.name), "%s", ev.name);
-            std::snprintf(in.payload, sizeof(in.payload), "%s", ev.payload);
+            std::snprintf(in.name, sizeof(in.name), "%.31s", name ? name : "Event");
+            in.payload = pl;
+            if (in.payload.size() > (size_t)kRemoteExMaxPayload)
+                in.payload.resize((size_t)kRemoteExMaxPayload);
             std::snprintf(in.fromName, sizeof(in.fromName), "%s", localName);
             in.fromId = localId;
             in.toServer = true;
-            incomingRemotes.push_back(in);
+            incomingRemotes.push_back(std::move(in));
             return true;
         }
-        sendTo(hostAddr, &ev, sizeof(ev));
-        return true;
+        return sendRemoteEventExPacket(0, true, name, pl, &hostAddr);
     }
 
 
@@ -1270,21 +1447,201 @@ struct LanNet {
         broadcastAll(&ev, sizeof(ev));
     }
 
-    bool fireRemoteEventAllClients(const char* name, const char* payload) {
-        if (sock == kInvalidSock || role != NetRole::Host) return false;
+    // ---- Classifica (punteggi) ----------------------------------------
+    //
+    // Stesso schema della chat: ognuno manda SOLO la propria riga, senza
+    // nome; il nome lo aggiunge l'host, quindi nessuno puo' scrivere i
+    // punteggi di un altro.
+
+    static constexpr const char* kStatsEventName = "__blkstats";
+
+    struct IncomingStats {
+        std::string player;
+        std::string payload;   // "Monete=10;Uccisioni=2"
+    };
+    std::vector<IncomingStats> incomingStats;
+
+    bool sendStats(const char* payload) {
+        if (!payload || sock == kInvalidSock) return false;
+        if (role == NetRole::Host) {
+            broadcastStats(localName, payload);
+            return true;
+        }
+        if (role == NetRole::Client && connected) {
+            NetRemoteEvent ev{};
+            fillMagic(ev.hdr, NetMsg::RemoteEvent, localId, (uint16_t)gameIndex);
+            std::snprintf(ev.name, sizeof(ev.name), "%s", kStatsEventName);
+            std::snprintf(ev.payload, sizeof(ev.payload), "%.159s", payload);
+            sendTo(hostAddr, &ev, sizeof(ev));
+            return true;
+        }
+        return false;
+    }
+
+    void relayStatsFromClient(const char* fromName, const char* payload) {
+        const char* nm = fromName ? fromName : "Player";
+        // Un server dedicato rilancia e basta, nessuno svuota questa coda:
+        // senza tetto crescerebbe per tutta la vita del processo.
+        if (incomingStats.size() >= 256) incomingStats.erase(incomingStats.begin());
+        incomingStats.push_back({nm, payload ? payload : ""});
+        broadcastStats(nm, payload ? payload : "");
+    }
+
+    void broadcastStats(const char* player, const char* payload) {
         NetRemoteEvent ev{};
         fillMagic(ev.hdr, NetMsg::RemoteEvent, localId, (uint16_t)gameIndex);
-        std::snprintf(ev.name, sizeof(ev.name), "%.31s", name ? name : "Event");
-        std::snprintf(ev.payload, sizeof(ev.payload), "%.159s", payload ? payload : "");
+        std::snprintf(ev.name, sizeof(ev.name), "%s", kStatsEventName);
+        std::snprintf(ev.payload, sizeof(ev.payload), "%.23s|%.135s", player, payload);
+        broadcastAll(&ev, sizeof(ev));
+    }
+
+    bool fireRemoteEventAllClients(const char* name, const char* payload) {
+        if (sock == kInvalidSock || role != NetRole::Host) return false;
+        const char* pl = payload ? payload : "";
         IncomingRemoteEvent in{};
-        std::snprintf(in.name, sizeof(in.name), "%s", ev.name);
-        std::snprintf(in.payload, sizeof(in.payload), "%s", ev.payload);
+        std::snprintf(in.name, sizeof(in.name), "%.31s", name ? name : "Event");
+        in.payload = pl;
+        if (in.payload.size() > (size_t)kRemoteExMaxPayload)
+            in.payload.resize((size_t)kRemoteExMaxPayload);
         std::snprintf(in.fromName, sizeof(in.fromName), "%s", localName);
         in.fromId = localId;
         in.toServer = false;
         incomingRemotes.push_back(in);
-        broadcastAll(&ev, sizeof(ev));
-        return true;
+
+        if (std::strlen(pl) <= 159) {
+            NetRemoteEvent ev{};
+            fillMagic(ev.hdr, NetMsg::RemoteEvent, localId, (uint16_t)gameIndex);
+            std::snprintf(ev.name, sizeof(ev.name), "%.31s", name ? name : "Event");
+            std::snprintf(ev.payload, sizeof(ev.payload), "%.159s", pl);
+            broadcastAll(&ev, sizeof(ev));
+            return true;
+        }
+        return sendRemoteEventExPacket(0, false, name, pl, nullptr);
+    }
+
+    /** Come Roblox RemoteEvent:FireClient(player, ...). peerId = Net peer id. */
+    bool fireRemoteEventToClient(uint8_t peerId, const char* name, const char* payload) {
+        if (sock == kInvalidSock || role != NetRole::Host) return false;
+        if (peerId == 0) return fireRemoteEventAllClients(name, payload);
+        const char* pl = payload ? payload : "";
+        // Host locale: se e' il nostro id, consegna in-process
+        if (peerId == localId) {
+            IncomingRemoteEvent in{};
+            std::snprintf(in.name, sizeof(in.name), "%.31s", name ? name : "Event");
+            in.payload = pl;
+            if (in.payload.size() > (size_t)kRemoteExMaxPayload)
+                in.payload.resize((size_t)kRemoteExMaxPayload);
+            std::snprintf(in.fromName, sizeof(in.fromName), "%s", localName);
+            in.fromId = localId;
+            in.toServer = false;
+            incomingRemotes.push_back(std::move(in));
+            return true;
+        }
+        return sendRemoteEventExPacket(peerId, false, name, pl, nullptr);
+    }
+
+    uint8_t findPeerIdByName(const char* playerName) const {
+        if (!playerName || !playerName[0]) return 0;
+        if (std::strcmp(playerName, localName) == 0) return localId ? localId : 1;
+        for (const auto& p : peers) {
+            if (p.used && std::strcmp(p.name, playerName) == 0)
+                return p.id;
+        }
+        for (const auto& r : remotes) {
+            if (std::strcmp(r.name, playerName) == 0)
+                return r.id;
+        }
+        return 0;
+    }
+
+    /** Host: assegna netId e manda snapshot + dirty Part ai client. */
+    void tickWorldReplication(DataModel& world, float dt) {
+        if (role != NetRole::Host || sock == kInvalidSock) return;
+        WorldReplication::ensureNetIds(world, nextPartNetId);
+
+        // Snapshot per peer appena connessi
+        for (auto& peer : peers) {
+            if (!peer.used || !peer.needsWorldSync) continue;
+            int sent = 0;
+            while (peer.worldSyncIndex < (int)world.parts.size()
+                   && sent < kWorldSyncPartsPerTick) {
+                const auto& part = world.parts[peer.worldSyncIndex++];
+                if (part.netId == 0) continue;
+                WorldReplication::PartPacket pkt{};
+                WorldReplication::fillPartPacket(
+                    pkt, (uint8_t)NetMsg::WorldDelta, localId, (uint16_t)gameIndex,
+                    WorldReplication::Op::Upsert, part);
+                sendTo(peer.addr, &pkt, sizeof(pkt));
+                worldSentCache.hashByNetId[part.netId] = WorldReplication::partStateHash(part);
+                ++sent;
+            }
+            if (peer.worldSyncIndex >= (int)world.parts.size()) {
+                peer.needsWorldSync = false;
+                peer.worldSyncIndex = 0;
+                std::printf("[Net] World sync completo → #%d %s (%d parts)\n",
+                            (int)peer.id, peer.name, (int)world.parts.size());
+            }
+        }
+
+        worldReplAcc += dt;
+        if (worldReplAcc < 1.f / kWorldReplHz) return;
+        worldReplAcc = 0.f;
+
+        // Dirty: unanchored sempre; anchored se hash cambiato (Lua ha mosso/creato)
+        int budget = 48;
+        for (const auto& part : world.parts) {
+            if (budget <= 0) break;
+            if (part.netId == 0) continue;
+            const uint64_t h = WorldReplication::partStateHash(part);
+            auto it = worldSentCache.hashByNetId.find(part.netId);
+            const bool dirty = (it == worldSentCache.hashByNetId.end()) || (it->second != h);
+            const bool forcePhys = !part.anchored;
+            if (!dirty && !forcePhys) continue;
+            // Unanchored: invia solo se spostato davvero (dirty), non ogni tick cieco
+            if (forcePhys && !dirty) continue;
+
+            WorldReplication::PartPacket pkt{};
+            WorldReplication::fillPartPacket(
+                pkt, (uint8_t)NetMsg::WorldDelta, localId, (uint16_t)gameIndex,
+                WorldReplication::Op::Upsert, part);
+            broadcastAll(&pkt, sizeof(pkt));
+            worldSentCache.hashByNetId[part.netId] = h;
+            --budget;
+        }
+
+        // Destroy: netId spariti dal mondo
+        if (!worldSentCache.hashByNetId.empty()) {
+            std::vector<uint32_t> gone;
+            for (const auto& kv : worldSentCache.hashByNetId) {
+                if (!WorldReplication::findByNetId(world, kv.first))
+                    gone.push_back(kv.first);
+            }
+            for (uint32_t id : gone) {
+                WorkspacePart ghost;
+                ghost.netId = id;
+                WorldReplication::PartPacket pkt{};
+                WorldReplication::fillPartPacket(
+                    pkt, (uint8_t)NetMsg::WorldDelta, localId, (uint16_t)gameIndex,
+                    WorldReplication::Op::Destroy, ghost);
+                broadcastAll(&pkt, sizeof(pkt));
+                worldSentCache.hashByNetId.erase(id);
+            }
+        }
+    }
+
+    /** Client: applica coda WorldDelta al DataModel locale. */
+    int applyIncomingWorld(DataModel& world) {
+        if (role != NetRole::Client) {
+            incomingWorld.clear();
+            return 0;
+        }
+        int n = 0;
+        for (const auto& pkt : incomingWorld) {
+            if (WorldReplication::applyPacket(world, pkt))
+                ++n;
+        }
+        incomingWorld.clear();
+        return n;
     }
 
     void sendScriptReport(float dt) {

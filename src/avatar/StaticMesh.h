@@ -85,6 +85,7 @@ public:
         subs = std::move(o.subs);
         loaded = o.loaded;
         hasBones = o.hasBones;
+        exactImport = o.exactImport;
         boundsMin = o.boundsMin;
         boundsMax = o.boundsMax;
         path = std::move(o.path);
@@ -95,6 +96,7 @@ public:
         o.vertexCount = 0;
         o.loaded = false;
         o.hasBones = false;
+        o.exactImport = false;
         o.subs.clear();
         return *this;
     }
@@ -118,23 +120,56 @@ public:
         return s;
     }
 
-    static bool isJunkMeshName(const std::string& raw) {
+    /** Solo mesh NON renderizzabili (fisica / helper). Non tocca dettagli piccoli. */
+    static bool isCollisionOrHelperName(const std::string& raw) {
         std::string n = toLower(raw);
         static const char* junk[] = {
-            "collision", "collider", "colmesh", "col_", "_col",
-            "hitbox", "hurtbox", "physic", "physics", "convex", "hull",
-            "ucx_", "ubx_", "usx_", "mdc_",
-            "lod1", "lod2", "lod3", "lod4", "_lod", "lod_",
-            "helper", "dummy", "nullobject", "empty.",
-            "shadow", "occluder", "occlusion",
-            "armature", "rig_", "ik_",
-            "camera", "light", "lamp",
+            "collision", "collider", "colmesh", "colonly", "collisionmesh",
+            "hitbox", "hurtbox", "physic", "physics", "convexhull", "convex_hull",
+            "ucx_", "ubx_", "usx_", "mdc_", "ucx-", "ubx-",
+            "nullobject", "empty.", "locator", "socket.",
+            "occluder", "occlusionproxy", "shadowcaster", "shadow_proxy",
+            "armature", "ik_target", "iktarget",
+            "camera", "cam_",
         };
         for (const char* j : junk) {
             if (n.find(j) != std::string::npos)
                 return true;
         }
+        // Prefissi Unreal collision: UCX_Nome, UBX_Nome
+        if (n.size() >= 4 && (n.compare(0, 4, "ucx_") == 0 || n.compare(0, 4, "ubx_") == 0
+                              || n.compare(0, 4, "usx_") == 0))
+            return true;
         return false;
+    }
+
+    /** LOD secondari (lod1+). lod0 / "high" restano. */
+    static int lodLevelFromName(const std::string& raw) {
+        std::string n = toLower(raw);
+        // lod0 / lod_0 / _lod0 = alta qualita'
+        auto dig = [](const std::string& s, size_t pos) -> int {
+            if (pos >= s.size() || s[pos] < '0' || s[pos] > '9') return -1;
+            return s[pos] - '0';
+        };
+        for (const char* key : {"lod_", "lod", "_lod"}) {
+            size_t p = n.find(key);
+            if (p == std::string::npos) continue;
+            size_t d = p + std::strlen(key);
+            while (d < n.size() && (n[d] == '_' || n[d] == '-' || n[d] == '.')) ++d;
+            int lv = dig(n, d);
+            if (lv >= 0) return lv;
+        }
+        if (n.find("lod1") != std::string::npos) return 1;
+        if (n.find("lod2") != std::string::npos) return 2;
+        if (n.find("lod3") != std::string::npos) return 3;
+        if (n.find("lod4") != std::string::npos) return 4;
+        if (n.find("lowpoly") != std::string::npos || n.find("low_poly") != std::string::npos)
+            return 2;
+        return -1; // nessun LOD esplicito = keep
+    }
+
+    static bool isJunkMeshName(const std::string& raw) {
+        return isCollisionOrHelperName(raw) || lodLevelFromName(raw) >= 1;
     }
 
     static bool readFileBytes(const std::string& file, std::vector<char>& out) {
@@ -324,9 +359,11 @@ public:
         static const aiTextureType types[] = {
             aiTextureType_BASE_COLOR,
             aiTextureType_DIFFUSE,
-            aiTextureType_UNKNOWN,
+            aiTextureType_UNKNOWN,   // glTF pbrMetallicRoughness a volte qui
+            aiTextureType_SPECULAR,
+            aiTextureType_AMBIENT,
         };
-        return loadTextureOfTypes(sc, mat, modelDir, types, 3, outMissing);
+        return loadTextureOfTypes(sc, mat, modelDir, types, 5, outMissing);
     }
 
     GLuint loadEmissiveTexture(const aiScene* sc, const aiMaterial* mat,
@@ -357,8 +394,10 @@ public:
 
             std::string name = mesh->mName.C_Str();
             if (name.empty()) name = node->mName.C_Str();
-            if (!exactImport
-                && (isJunkMeshName(name) || isJunkMeshName(node->mName.C_Str())))
+            // Sempre escludi collision/helper. I LOD bassi si filtrano dopo
+            // (cosi' se esiste solo lod2 non resta vuoto).
+            if (isCollisionOrHelperName(name)
+                || isCollisionOrHelperName(node->mName.C_Str()))
                 continue;
 
             glm::vec3 bmin(1e9f), bmax(-1e9f);
@@ -396,34 +435,40 @@ public:
         std::vector<float> v;
         v.reserve((size_t)mesh->mNumFaces * 3 * kStride);
 
+        auto emitVert = [&](unsigned idx) {
+            if (idx >= mesh->mNumVertices) return;
+            aiVector3D p = mesh->mVertices[idx];
+            glm::vec4 wp = xform * glm::vec4(p.x, p.y, p.z, 1.f);
+            aiVector3D an = mesh->HasNormals() ? mesh->mNormals[idx] : aiVector3D(0, 1, 0);
+            glm::vec3 wn = nmat * glm::vec3(an.x, an.y, an.z);
+            float len = glm::length(wn);
+            if (len > 1e-6f) wn /= len; else wn = {0, 1, 0};
+            float u = 0.f, vv = 0.f;
+            if (mesh->HasTextureCoords(0)) {
+                u = mesh->mTextureCoords[0][idx].x;
+                vv = mesh->mTextureCoords[0][idx].y;
+            }
+            glm::vec3 vc{1.f};
+            if (hasVCol) {
+                const aiColor4D& cc = mesh->mColors[0][idx];
+                vc = {cc.r, cc.g, cc.b};
+            }
+            v.push_back(wp.x); v.push_back(wp.y); v.push_back(wp.z);
+            v.push_back(wn.x); v.push_back(wn.y); v.push_back(wn.z);
+            v.push_back(u); v.push_back(vv);
+            v.push_back(vc.r); v.push_back(vc.g); v.push_back(vc.b);
+            bmin = glm::min(bmin, glm::vec3(wp));
+            bmax = glm::max(bmax, glm::vec3(wp));
+        };
+
         for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
             const aiFace& face = mesh->mFaces[f];
-            if (face.mNumIndices != 3) continue;
-            for (unsigned k = 0; k < 3; ++k) {
-                unsigned idx = face.mIndices[k];
-                if (idx >= mesh->mNumVertices) continue;
-                aiVector3D p = mesh->mVertices[idx];
-                glm::vec4 wp = xform * glm::vec4(p.x, p.y, p.z, 1.f);
-                aiVector3D an = mesh->HasNormals() ? mesh->mNormals[idx] : aiVector3D(0, 1, 0);
-                glm::vec3 wn = nmat * glm::vec3(an.x, an.y, an.z);
-                float len = glm::length(wn);
-                if (len > 1e-6f) wn /= len; else wn = {0, 1, 0};
-                float u = 0.f, vv = 0.f;
-                if (mesh->HasTextureCoords(0)) {
-                    u = mesh->mTextureCoords[0][idx].x;
-                    vv = mesh->mTextureCoords[0][idx].y;
-                }
-                glm::vec3 vc{1.f};
-                if (hasVCol) {
-                    const aiColor4D& cc = mesh->mColors[0][idx];
-                    vc = {cc.r, cc.g, cc.b};
-                }
-                v.push_back(wp.x); v.push_back(wp.y); v.push_back(wp.z);
-                v.push_back(wn.x); v.push_back(wn.y); v.push_back(wn.z);
-                v.push_back(u); v.push_back(vv);
-                v.push_back(vc.r); v.push_back(vc.g); v.push_back(vc.b);
-                bmin = glm::min(bmin, glm::vec3(wp));
-                bmax = glm::max(bmax, glm::vec3(wp));
+            if (face.mNumIndices < 3) continue;
+            // Fan triangulation: copre n-goni se Assimp non ha triangolato tutto.
+            for (unsigned t = 1; t + 1 < face.mNumIndices; ++t) {
+                emitVert(face.mIndices[0]);
+                emitVert(face.mIndices[t]);
+                emitVert(face.mIndices[t + 1]);
             }
         }
         if (v.empty()) return;
@@ -499,17 +544,38 @@ public:
         Assimp::Importer imp;
         imp.SetPropertyInteger(AI_CONFIG_PP_SBP_REMOVE,
             aiPrimitiveType_POINT | aiPrimitiveType_LINE);
+        // Pivot FBX spezzati = mesh "deformate"/offset: meglio trasformare gia' nei nodi.
         imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
-        imp.SetPropertyInteger(AI_CONFIG_PP_SLM_VERTEX_LIMIT, 250000);
-        imp.SetPropertyInteger(AI_CONFIG_PP_SLM_TRIANGLE_LIMIT, 500000);
+#ifdef AI_CONFIG_IMPORT_FBX_READ_ALL_GEOMETRY_LAYERS
+        imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_READ_ALL_GEOMETRY_LAYERS, true);
+#endif
+#ifdef AI_CONFIG_IMPORT_FBX_READ_MATERIALS
+        imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_READ_MATERIALS, true);
+#endif
+#ifdef AI_CONFIG_IMPORT_FBX_READ_TEXTURES
+        imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_READ_TEXTURES, true);
+#endif
+        // Degenerati fuori: niente triangoli nulli che bucano la mesh.
+        imp.SetPropertyInteger(AI_CONFIG_PP_FD_REMOVE, 1);
+        // Split solo su mesh enormi (altrimenti spezza materiali inutilmente).
+        imp.SetPropertyInteger(AI_CONFIG_PP_SLM_VERTEX_LIMIT, 1'000'000);
+        imp.SetPropertyInteger(AI_CONFIG_PP_SLM_TRIANGLE_LIMIT, 2'000'000);
 
-        const unsigned flags =
+        // Niente PreTransformVertices: rovina gerarchie e skin.
+        // Niente rotazione FBX extra: Assimp porta gia' a Y-up; il -90X deformava.
+        unsigned flags =
             aiProcess_Triangulate |
             aiProcess_GenSmoothNormals |
             aiProcess_JoinIdenticalVertices |
+            aiProcess_ImproveCacheLocality |
             aiProcess_SortByPType |
-            aiProcess_FlipUVs |
-            aiProcess_SplitLargeMeshes;
+            aiProcess_FindDegenerates |
+            aiProcess_FindInvalidData |
+            aiProcess_ValidateDataStructure |
+            aiProcess_OptimizeMeshes |
+            aiProcess_FlipUVs;
+        if (!exactImport)
+            flags |= aiProcess_SplitLargeMeshes;
 
         const aiScene* sc = nullptr;
         try {
@@ -520,7 +586,7 @@ public:
                     std::fprintf(stderr, "StaticMesh cannot open: %s\n", file.c_str());
                     return false;
                 }
-                if (bytes.size() > 120u * 1024u * 1024u) {
+                if (bytes.size() > 256u * 1024u * 1024u) {
                     std::fprintf(stderr, "StaticMesh troppo grande: %s\n", file.c_str());
                     return false;
                 }
@@ -554,7 +620,8 @@ public:
                 g.name = g.mesh ? g.mesh->mName.C_Str() : "";
                 g.xform = glm::mat4(1.f);
                 g.volume = 1.f;
-                if (g.mesh && g.mesh->HasPositions())
+                if (g.mesh && g.mesh->HasPositions() && g.mesh->mNumFaces > 0
+                    && !isCollisionOrHelperName(g.name))
                     gathered.push_back(g);
             }
         }
@@ -563,33 +630,49 @@ public:
             return false;
         }
 
-        std::vector<Gathered> keep;
-        if (exactImport) {
-            keep = gathered;
-        } else {
-            float maxVol = 0.f;
-            for (const auto& g : gathered) maxVol = std::max(maxVol, g.volume);
-            for (const auto& g : gathered) {
-                if (maxVol > 0.f && g.volume < maxVol * 0.008f) {
-                    std::printf("[StaticMesh] skip tiny '%s'\n", g.name.c_str());
-                    continue;
-                }
-                keep.push_back(g);
+        // Se esistono LOD multipli, tieni solo il livello migliore (0 se c'e',
+        // altrimenti il numero piu' basso). Mesh senza tag LOD restano sempre.
+        int bestLod = 99;
+        bool anyExplicitLod = false;
+        for (const auto& g : gathered) {
+            int lv = lodLevelFromName(g.name);
+            if (lv >= 0) {
+                anyExplicitLod = true;
+                bestLod = std::min(bestLod, lv);
             }
-            if (keep.empty()) keep = gathered;
+        }
+        std::vector<Gathered> keep;
+        keep.reserve(gathered.size());
+        for (const auto& g : gathered) {
+            int lv = lodLevelFromName(g.name);
+            if (anyExplicitLod && lv >= 0 && lv != bestLod)
+                continue;
+            keep.push_back(g);
+        }
+        if (keep.empty()) keep = gathered;
+
+        // Import non-exact: togli solo detriti ridicoli (<0.05% volume), non dettagli.
+        if (!exactImport) {
+            float maxVol = 0.f;
+            for (const auto& g : keep) maxVol = std::max(maxVol, g.volume);
+            std::vector<Gathered> filtered;
+            filtered.reserve(keep.size());
+            for (const auto& g : keep) {
+                if (maxVol > 0.f && g.volume < maxVol * 0.0005f)
+                    continue;
+                filtered.push_back(g);
+            }
+            if (!filtered.empty()) keep.swap(filtered);
         }
 
-        std::string ext = extensionOf(file);
-        glm::mat4 axisCorr(1.f);
-        if (ext == ".fbx")
-            axisCorr = glm::rotate(glm::mat4(1.f), glm::radians(-90.f), glm::vec3(1, 0, 0));
-
+        // Assimp normalizza gia' FBX/glTF in Y-up: nessuna correzione asse extra
+        // (il vecchio -90° X sui .fbx deformava armi/personaggi).
         glm::vec3 rawMin(1e9f), rawMax(-1e9f);
         for (const auto& g : keep) {
-            glm::mat4 x = axisCorr * g.xform;
+            if (!g.mesh) continue;
             for (unsigned vi = 0; vi < g.mesh->mNumVertices; ++vi) {
                 const auto& p = g.mesh->mVertices[vi];
-                glm::vec4 wp = x * glm::vec4(p.x, p.y, p.z, 1.f);
+                glm::vec4 wp = g.xform * glm::vec4(p.x, p.y, p.z, 1.f);
                 rawMin = glm::min(rawMin, glm::vec3(wp));
                 rawMax = glm::max(rawMax, glm::vec3(wp));
             }
@@ -600,18 +683,20 @@ public:
         float scl = targetMaxDim / maxDim;
         glm::vec3 center = (rawMin + rawMax) * 0.5f;
         glm::mat4 norm = glm::scale(glm::mat4(1.f), glm::vec3(scl))
-                       * glm::translate(glm::mat4(1.f), -center)
-                       * axisCorr;
+                       * glm::translate(glm::mat4(1.f), -center);
 
         std::string modelDir = dirOf(file);
         boundsMin = glm::vec3(1e9f);
         boundsMax = glm::vec3(-1e9f);
+        const int vertCap = exactImport ? 2'500'000 : 800'000;
         try {
             int builtVerts = 0;
             for (const auto& g : keep) {
                 if (!g.mesh) continue;
-                if (builtVerts > 400000) {
-                    std::fprintf(stderr, "StaticMesh: troppo denso, stop early\n");
+                if (builtVerts > vertCap) {
+                    std::fprintf(stderr,
+                        "StaticMesh: tetto vertici %d raggiunto (%s), resto saltato\n",
+                        vertCap, file.c_str());
                     break;
                 }
                 size_t before = subs.size();
@@ -640,9 +725,9 @@ public:
         vbo = subs[0].vbo;
         path = file;
         loaded = true;
-        std::printf("[StaticMesh] OK '%s' subs=%d verts=%d textured=%d/%d mancanti=%d size=(%.2f,%.2f,%.2f)\n",
-                    file.c_str(), (int)subs.size(), vertexCount, withTex, (int)subs.size(),
-                    missingTextureCount(),
+        std::printf("[StaticMesh] OK '%s' exact=%d subs=%d verts=%d textured=%d/%d mancanti=%d size=(%.2f,%.2f,%.2f)\n",
+                    file.c_str(), exactImport ? 1 : 0, (int)subs.size(), vertexCount, withTex,
+                    (int)subs.size(), missingTextureCount(),
                     boundsMax.x - boundsMin.x, boundsMax.y - boundsMin.y, boundsMax.z - boundsMin.z);
         return true;
     }
@@ -671,24 +756,53 @@ public:
     }
 
     void drawTextured(GLuint prog, const glm::vec3& tintMul, float alpha = 1.f) const {
+        drawTexturedBudget(prog, tintMul, alpha, 0);
+    }
+
+    /** maxVerts<=0: tutti i submesh. Altrimenti ferma quando supera il tetto
+     *  (proxy lontano per modelli multi-submesh molto pesanti). */
+    void drawTexturedBudget(GLuint prog, const glm::vec3& tintMul, float alpha,
+                            int maxVerts) const {
         if (!loaded) return;
-        GLint locColor = glGetUniformLocation(prog, "uColor");
-        GLint locUseTex = glGetUniformLocation(prog, "uUseTex");
-        GLint locTex = glGetUniformLocation(prog, "uTex");
-        GLint locAlpha = glGetUniformLocation(prog, "uAlpha");
-        GLint locEmCol = glGetUniformLocation(prog, "uEmissiveCol");
-        GLint locEmTex = glGetUniformLocation(prog, "uEmissiveTex");
-        GLint locUseEm = glGetUniformLocation(prog, "uUseEmissiveTex");
-        GLint locSpec = glGetUniformLocation(prog, "uSpecular");
-        GLint locRough = glGetUniformLocation(prog, "uRoughness");
+        // Location risolte una volta per programma: questa draw gira per ogni
+        // modello a ogni frame (piu' il pass ombre), e glGetUniformLocation e'
+        // una ricerca per stringa nel driver.
+        struct Locs {
+            GLuint prog = 0;
+            GLint color = -1, useTex = -1, tex = -1, alpha = -1, emCol = -1;
+            GLint emTex = -1, useEm = -1, spec = -1, rough = -1;
+        };
+        static Locs cache[4];
+        static int cacheNext = 0;
+        Locs* Lp = nullptr;
+        for (Locs& c : cache) if (c.prog == prog) { Lp = &c; break; }
+        if (!Lp) {
+            Lp = &cache[cacheNext];
+            cacheNext = (cacheNext + 1) % 4;
+            Lp->prog = prog;
+            Lp->color = glGetUniformLocation(prog, "uColor");
+            Lp->useTex = glGetUniformLocation(prog, "uUseTex");
+            Lp->tex = glGetUniformLocation(prog, "uTex");
+            Lp->alpha = glGetUniformLocation(prog, "uAlpha");
+            Lp->emCol = glGetUniformLocation(prog, "uEmissiveCol");
+            Lp->emTex = glGetUniformLocation(prog, "uEmissiveTex");
+            Lp->useEm = glGetUniformLocation(prog, "uUseEmissiveTex");
+            Lp->spec = glGetUniformLocation(prog, "uSpecular");
+            Lp->rough = glGetUniformLocation(prog, "uRoughness");
+        }
+        const GLint locColor = Lp->color, locUseTex = Lp->useTex, locTex = Lp->tex;
+        const GLint locAlpha = Lp->alpha, locEmCol = Lp->emCol, locEmTex = Lp->emTex;
+        const GLint locUseEm = Lp->useEm, locSpec = Lp->spec, locRough = Lp->rough;
         if (locTex >= 0) glUniform1i(locTex, 0);
         if (locEmTex >= 0) glUniform1i(locEmTex, 1);
 
         const GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
         bool cullOff = false;
+        int vertsDrawn = 0;
 
         for (const auto& sm : subs) {
             if (!sm.vao || sm.vertexCount <= 0) continue;
+            if (maxVerts > 0 && vertsDrawn >= maxVerts) break;
 
             if (sm.twoSided && !cullOff) { glDisable(GL_CULL_FACE); cullOff = true; }
             else if (!sm.twoSided && cullOff) {
@@ -720,6 +834,7 @@ public:
 
             glBindVertexArray(sm.vao);
             glDrawArrays(GL_TRIANGLES, 0, sm.vertexCount);
+            vertsDrawn += sm.vertexCount;
         }
 
         if (cullOff && cullWas) glEnable(GL_CULL_FACE);

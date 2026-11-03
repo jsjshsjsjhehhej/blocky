@@ -1,9 +1,13 @@
-// Pipeline di rendering del mondo 3D: overlay del gizmo, handle di scale/
-// move/rotate, accessori avatar, shadow depth pass, frustum culling e
-// renderWorld3D (il disegno principale della scena). Non e' un header
-// riusabile: usa direttamente le globali di main.cpp (g_world, g_cam,
-// g_lighting, ecc.). Compila solo se incluso da main.cpp esattamente in
-// questo punto.
+// Pipeline di rendering del mondo 3D (pass 4–10 di render/RenderPipeline.h).
+// Non e' un header riusabile: usa le globali di main.cpp. Compila solo se
+// incluso da main.cpp nel punto previsto.
+//
+// Ordine in renderWorld3D:
+//   passPrepare → passShadows → passTerrain → passOpaqueParts →
+//   passStudioGizmos → passWorkspaceModels → passAvatars → friends
+
+#include "render/RenderCullLod.h"
+#include "render/RenderPipeline.h"
 
 static const glm::vec3 kGizmoRGB[3] = {
     {0.95f, 0.22f, 0.20f},
@@ -42,15 +46,23 @@ static void drawScaleHandles(GLuint vao, GLuint partP, const glm::mat4& view,
     const WorkspacePart* pt = gizmoPart();
     if (!pt) return;
     const auto& p = *pt;
+    if (!g_scaleDragging) {
+        double mx = 0, my = 0;
+        glfwGetCursorPos(glfwGetCurrentContext(), &mx, &my);
+        int ax = -1, sg = 0;
+        g_gizmoHoverAxis = pickScaleHandle((float)mx, (float)my, ax, sg) ? ax : -1;
+    }
+    float baseHs = scaleHandleDrawSize(p);
     for (int axis = 0; axis < 3; ++axis) {
         for (int s = -1; s <= 1; s += 2) {
             glm::vec3 hp = handleWorldPos(p, axis, s);
-            bool hot = (g_scaleDragging && g_scaleAxis == axis && g_scaleSign == s);
-            float hs = hot ? kHandleSize * 1.45f : kHandleSize;
+            bool hot = (g_scaleDragging && g_scaleAxis == axis && g_scaleSign == s)
+                    || (g_gizmoHoverAxis == axis && !g_scaleDragging);
+            float hs = hot ? baseHs * 1.35f : baseHs;
             glm::vec3 col = hot ? glm::mix(kGizmoRGB[axis], glm::vec3(1.f), 0.35f) : kGizmoRGB[axis];
             glm::mat4 m = glm::scale(glm::translate(glm::mat4(1.f), hp), glm::vec3(hs));
             drawCube(vao, partP, m, view, proj, col, sun, false, 0);
-            glm::mat4 m2 = glm::scale(glm::translate(glm::mat4(1.f), hp), glm::vec3(hs * 1.2f));
+            glm::mat4 m2 = glm::scale(glm::translate(glm::mat4(1.f), hp), glm::vec3(hs * 1.18f));
             drawCube(vao, partP, m2, view, proj, col * 0.45f, sun, false, 0);
         }
     }
@@ -242,7 +254,9 @@ static void drawCubeShadow(GLuint vao, GLuint prog, const glm::mat4& m, const gl
 
 static void renderShadowDepth(GLuint vao, GLuint meshP) {
     g_sunShadowOn = false;
-    if (!g_lighting.globalShadows || g_engine.quality.shadowOccluders <= 0) return;
+    bumpSceneUniforms();   // uSunShadow / uLightVP cambiano qui
+    // quality.shadows era impostato dai preset ma mai letto — ora conta.
+    if (!pipelineSunShadowsEnabled(g_engine.quality, g_lighting)) return;
     if (!g_shadowMap.ready) return;
 
     glm::vec3 focus = g_renderCamPos;
@@ -251,19 +265,20 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
 
     const float reach = g_shadowMap.extent + 24.f;
     const float reach2 = reach * reach;
+    const float shapeLow2Shadow =
+        lodDistancesFor(g_engine.quality).shapeLow * lodDistancesFor(g_engine.quality).shapeLow;
 
     for (const auto& p : g_world.parts) {
         if (p.isTransparent()) continue;
         glm::vec3 d = p.position - focus;
-        if (glm::dot(d, d) > reach2) continue;
+        float d2 = glm::dot(d, d);
+        if (d2 > reach2) continue;
         GLuint dv = vao;
         int vc = 36;
-        if (p.shape == PartShape::Ball && g_partMeshes.ball.vao) {
-            dv = g_partMeshes.ball.vao;
-            vc = g_partMeshes.ball.vertexCount;
-        } else if (p.shape == PartShape::Cylinder && g_partMeshes.cylinder.vao) {
-            dv = g_partMeshes.cylinder.vao;
-            vc = g_partMeshes.cylinder.vertexCount;
+        PartMeshLod shadowLod = (d2 > shapeLow2Shadow) ? PartMeshLod::Low : PartMeshLod::High;
+        if (ShapeMesh* sm = g_partMeshes.meshForLod(p.shape, shadowLod)) {
+            dv = sm->vao;
+            vc = sm->vertexCount;
         } else if (p.shape == PartShape::Wedge && g_partMeshes.wedge.vao) {
             dv = g_partMeshes.wedge.vao;
             vc = g_partMeshes.wedge.vertexCount;
@@ -272,7 +287,6 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
         glBindVertexArray(dv);
         glDrawArrays(GL_TRIANGLES, 0, vc);
     }
-
     for (int i = 0; i < (int)g_world.models.size(); ++i) {
         if (i >= (int)g_wsMeshes.size() || !g_wsMeshes[i].loaded) continue;
         const auto& m = g_world.models[i];
@@ -311,105 +325,382 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
     g_shadowMap.end(g_renderW, g_renderH, g_bloom.ready ? g_bloom.sceneFbo : 0);
 }
 
-struct FrustumPlanes { glm::vec4 p[6]; };
+// ---- Terrain: una VBO per chunk, una draw call per (chunk, materiale) ----
+// Vale per qualunque place che usa workspace.Terrain: le facce esposte
+// arrivano gia' pronte da Terrain::ChunkMesh (greedy 2D), qui si caricano in
+// GPU solo quando il chunk cambia (version) e si scartano i chunk fuori
+// frustum / oltre la distanza di disegno. Prima era un drawCube per box.
+struct TerrainGpuChunk {
+    GLuint vao = 0, vbo = 0;
+    uint32_t version = 0;
+    int vertCount = 0;
+    std::vector<Terrain::MeshRange> ranges;
+    glm::vec3 bmin{0}, bmax{0};
+    bool seen = false;
+};
+static std::unordered_map<Terrain::Coord, TerrainGpuChunk, Terrain::CoordHash> g_terrainGpu;
+static int g_terrainDrawCalls = 0;
+static int g_terrainChunksDrawn = 0;
 
-static FrustumPlanes extractFrustum(const glm::mat4& viewProj) {
-    FrustumPlanes f;
-    glm::vec4 r0{viewProj[0][0], viewProj[1][0], viewProj[2][0], viewProj[3][0]};
-    glm::vec4 r1{viewProj[0][1], viewProj[1][1], viewProj[2][1], viewProj[3][1]};
-    glm::vec4 r2{viewProj[0][2], viewProj[1][2], viewProj[2][2], viewProj[3][2]};
-    glm::vec4 r3{viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]};
-    f.p[0] = r3 + r0; f.p[1] = r3 - r0;
-    f.p[2] = r3 + r1; f.p[3] = r3 - r1;
-    f.p[4] = r3 + r2; f.p[5] = r3 - r2;
-    for (auto& pl : f.p) {
-        float len = glm::length(glm::vec3(pl));
-        if (len > 1e-6f) pl /= len;
+static void terrainGpuFree(TerrainGpuChunk& g) {
+    if (g.vbo) glDeleteBuffers(1, &g.vbo);
+    if (g.vao) glDeleteVertexArrays(1, &g.vao);
+    g.vbo = g.vao = 0;
+    g.vertCount = 0;
+}
+
+static void terrainGpuUpload(TerrainGpuChunk& g, const Terrain::ChunkMesh& m) {
+    g.version = m.version;
+    g.ranges = m.ranges;
+    g.bmin = m.bmin;
+    g.bmax = m.bmax;
+    g.vertCount = (int)(m.verts.size() / 6);
+    if (g.vertCount == 0) {
+        terrainGpuFree(g);
+        g.version = m.version;
+        return;
     }
-    return f;
+    if (!g.vao) {
+        glGenVertexArrays(1, &g.vao);
+        glGenBuffers(1, &g.vbo);
+        glBindVertexArray(g.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+    } else {
+        glBindVertexArray(g.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g.vbo);
+    }
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(m.verts.size() * sizeof(float)),
+                 m.verts.data(), GL_DYNAMIC_DRAW);
+    glBindVertexArray(0);
 }
 
-static bool sphereOutsideFrustum(const FrustumPlanes& f, glm::vec3 center, float radius) {
-    for (const auto& pl : f.p)
-        if (glm::dot(glm::vec3(pl), center) + pl.w < -radius) return true;
-    return false;
+// Materiale Part usato per ombreggiare/texturare un voxel: cosi' il terreno
+// riusa lo stesso shader delle Part (ombre, foschia, riflessi, texture).
+static PartMaterial terrainPartMaterial(uint8_t id) {
+    switch (id) {
+    case Terrain::Grass: case Terrain::Leaves: case Terrain::Moss:
+    case Terrain::Cactus: case Terrain::Sapling: case Terrain::Reed:
+    case Terrain::Wheat: case Terrain::Flower: case Terrain::Mushroom:
+        return PartMaterial::Grass;
+    case Terrain::Wood: case Terrain::Planks: case Terrain::Door:
+    case Terrain::DoorOpen: case Terrain::Ladder: case Terrain::ChestBlk:
+    case Terrain::Bed:
+        return PartMaterial::Wood;
+    case Terrain::Brick:
+        return PartMaterial::Brick;
+    case Terrain::Glass:
+        return PartMaterial::Glass;
+    case Terrain::Water:
+        return PartMaterial::Ice;        // alpha 0.55: si vede il fondale
+    case Terrain::IronBlock: case Terrain::GoldBlock: case Terrain::DiamondBlock:
+        return PartMaterial::Metal;
+    case Terrain::Torch: case Terrain::Lava:
+        return PartMaterial::Neon;
+    case Terrain::Snow: case Terrain::Wool: case Terrain::Sponge:
+        return PartMaterial::SmoothPlastic;
+    case Terrain::Stone: case Terrain::Cobble: case Terrain::Bedrock:
+    case Terrain::Coal: case Terrain::Iron: case Terrain::Gold:
+    case Terrain::Diamond: case Terrain::Gravel: case Terrain::Obsidian:
+    case Terrain::Dirt: case Terrain::Sand: case Terrain::Clay:
+    case Terrain::Farmland:
+        return PartMaterial::Concrete;
+    default:
+        return PartMaterial::Plastic;
+    }
 }
 
-static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
-                          GLuint skinP, GLuint meshP, AnimatedModel* avatarGlb, bool useGlb,
-                          const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+static bool terrainMaterialTransparent(uint8_t id) {
+    return id == Terrain::Water || id == Terrain::Glass;
+}
+
+static void drawTerrainVoxels(GLuint /*vao*/, GLuint partP, const glm::mat4& view,
+                              const glm::mat4& proj, const glm::vec3& sun) {
+    g_terrainDrawCalls = 0;
+    g_terrainChunksDrawn = 0;
+    if (g_terrain.empty()) {
+        if (!g_terrainGpu.empty()) {
+            for (auto& kv : g_terrainGpu) terrainGpuFree(kv.second);
+            g_terrainGpu.clear();
+        }
+        return;
+    }
+
+    // 1) sincronizza GPU <-> chunk (upload solo se la version e' cambiata)
+    for (auto& kv : g_terrainGpu) kv.second.seen = false;
+    g_terrain.forEachChunkMesh([&](const Terrain::Coord& c, const Terrain::ChunkMesh& m) {
+        TerrainGpuChunk& g = g_terrainGpu[c];
+        g.seen = true;
+        if (g.version != m.version) terrainGpuUpload(g, m);
+    });
+    for (auto it = g_terrainGpu.begin(); it != g_terrainGpu.end();) {
+        if (!it->second.seen) {
+            terrainGpuFree(it->second);
+            it = g_terrainGpu.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // 2) culling per chunk — distanza terrain dedicata (su mobile il
+    // maxDrawDistance da Part e' troppo alto: un mondo 50x50 resta tutto
+    // in vista e il telefono resta a ~30 fps).
+    const FrustumPlanes frustum = extractFrustum(proj * view);
+    const glm::vec3 origin = g_renderCamPos;
+    float maxD = g_engine.quality.maxDrawDistance;
+    if (g_engine.quality.mobile)
+        maxD = std::min(maxD, 56.f);
+    if (!g_engine.quality.studTextures)
+        maxD = std::min(maxD, 52.f);
+    maxD = std::max(40.f, maxD);
+    const float waterLim = g_engine.quality.mobile ? 42.f : 120.f;
+    const float waterMax2 = waterLim * waterLim;
+    struct Vis { TerrainGpuChunk* g; float d2; };
+    static std::vector<Vis> vis;
+    vis.clear();
+    for (auto& kv : g_terrainGpu) {
+        TerrainGpuChunk& g = kv.second;
+        if (!g.vao || g.vertCount == 0) continue;
+        const glm::vec3 center = (g.bmin + g.bmax) * 0.5f;
+        const float radius = glm::length(g.bmax - g.bmin) * 0.5f;
+        const glm::vec3 d = center - origin;
+        const float d2 = glm::dot(d, d);
+        const float lim = maxD + radius;
+        if (d2 > lim * lim) continue;
+        if (sphereOutsideFrustum(frustum, center, radius)) continue;
+        vis.push_back({&g, d2});
+    }
+    std::sort(vis.begin(), vis.end(), [](const Vis& a, const Vis& b) { return a.d2 < b.d2; });
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    // Lite solo con preset Low (stud off): colori flat. Su mobile Medium+ usa
+    // le texture materiale sui voxel come su PC.
+    const bool lite = !g_engine.quality.studTextures;
+    TerrainDrawPass tp = beginTerrainPass(partP, view, proj, sun, lite);
+
+    auto emitOf = [](uint8_t id) -> float {
+        if (id == Terrain::Torch || id == Terrain::Lava) return 1.f;
+        return 0.f;
+    };
+
+    // 3) opachi
+    for (const Vis& v : vis) {
+        bool any = false;
+        for (const Terrain::MeshRange& r : v.g->ranges) {
+            if (terrainMaterialTransparent(r.id)) continue;
+            PartMaterial mat = lite ? PartMaterial::Plastic : terrainPartMaterial(r.id);
+            drawTerrainRange(tp, v.g->vao, Terrain::colorOf(r.id), mat,
+                             emitOf(r.id), r.first, r.count);
+            ++g_terrainDrawCalls;
+            any = true;
+        }
+        if (any) ++g_terrainChunksDrawn;
+    }
+    // 4) trasparenti (acqua, vetro), dal piu' lontano — acqua lontana saltata su mobile
+    for (auto it = vis.rbegin(); it != vis.rend(); ++it) {
+        if (g_engine.quality.mobile && it->d2 > waterMax2) continue;
+        for (const Terrain::MeshRange& r : it->g->ranges) {
+            if (!terrainMaterialTransparent(r.id)) continue;
+            PartMaterial mat = (r.id == Terrain::Water) ? PartMaterial::Ice
+                               : (lite ? PartMaterial::Plastic : PartMaterial::Glass);
+            if (lite && r.id == Terrain::Water) mat = PartMaterial::Ice; // serve l'alpha
+            drawTerrainRange(tp, it->g->vao, Terrain::colorOf(r.id), mat,
+                             0.f, r.first, r.count);
+            ++g_terrainDrawCalls;
+        }
+    }
+}
+
+// ---- Pass nominati (stesso look di prima, ordine leggibile) ----------------
+
+static void passPrepare(const glm::mat4& view, const glm::mat4& proj) {
     g_lastView = view;
     g_lastProj = proj;
     g_renderCamPos = (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting)
         ? g_cam.pos : g_playerPos + glm::vec3(0, 5, 0);
     collectDynamicLights();
     collectShadowOccluders();
+}
+
+static void passShadows(GLuint vao, GLuint meshP) {
     renderShadowDepth(vao, meshP);
-    {
-        glm::vec3 origin = g_renderCamPos;
-        const float maxD = g_engine.quality.maxDrawDistance;
-        const int maxN = g_engine.quality.maxVisibleParts;
-        const FrustumPlanes frustum = extractFrustum(proj * view);
-        struct Cand { int i; float d2; bool transparent; };
-        // static: riusato ogni frame invece di allocare/liberare da capo —
-        // era l'unica allocazione per-frame rimasta nel percorso di
-        // rendering principale. reserve() qui sotto costa solo se la
-        // capacita' attuale non basta (in pratica: mai, dopo il primo frame).
-        static std::vector<Cand> cands;
-        cands.clear();
-        cands.reserve(g_world.parts.size());
-        for (int i = 0; i < (int)g_world.parts.size(); ++i) {
-            const auto& part = g_world.parts[i];
-            glm::vec3 d = part.position - origin;
-            float d2 = glm::dot(d, d);
-            if (d2 > maxD * maxD) continue;
-            float boundRadius = glm::length(part.size) * 0.5f;
-            if (sphereOutsideFrustum(frustum, part.position, boundRadius)) continue;
-            cands.push_back({i, d2, part.isTransparent()});
+}
+
+static void passTerrain(GLuint vao, GLuint partP, const glm::mat4& view,
+                        const glm::mat4& proj, const glm::vec3& sun) {
+    drawTerrainVoxels(vao, partP, view, proj, sun);
+}
+
+static void passOpaqueParts(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
+                            const glm::mat4& view, const glm::mat4& proj,
+                            const glm::vec3& sun) {
+    g_renderCullStats.reset();
+    g_renderCullStats.partsTotal = (int)g_world.parts.size();
+
+    glm::vec3 origin = g_renderCamPos;
+    const float maxD = g_engine.quality.maxDrawDistance;
+    const int maxN = g_engine.quality.maxVisibleParts;
+    const RenderLodDistances lodD = lodDistancesFor(g_engine.quality);
+    const float studOff2 = lodD.studOff * lodD.studOff;
+    const float shapeLow2 = lodD.shapeLow * lodD.shapeLow;
+    const float smallCull2 = lodD.smallCull * lodD.smallCull;
+
+    const bool useFrustum = g_engine.quality.autoLod || g_engine.quality.frustumCull;
+    const bool useOcclusion = g_engine.quality.autoLod || g_engine.quality.occlusionCull;
+    const FrustumPlanes frustum = extractFrustum(proj * view);
+    const glm::mat4 viewProj = proj * view;
+    struct Cand { int i; float d2; bool transparent; };
+    static std::vector<Cand> cands;
+    cands.clear();
+    cands.reserve(g_world.parts.size());
+    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+        const auto& part = g_world.parts[i];
+        if (part.transparency >= 0.99f) continue;
+        if (g_viewIsolate && g_isolatePart >= 0
+            && i != g_isolatePart && i != g_selectedPart)
+            continue;
+        glm::vec3 d = part.position - origin;
+        float d2 = glm::dot(d, d);
+        if (d2 > maxD * maxD) {
+            ++g_renderCullStats.partsDistCulled;
+            continue;
         }
-        if ((int)cands.size() > maxN) {
+        if (lodD.smallMaxSize > 0.f) {
+            float maxS = std::max(part.size.x, std::max(part.size.y, part.size.z));
+            if (maxS <= lodD.smallMaxSize && d2 > smallCull2) {
+                ++g_renderCullStats.partsSmallCulled;
+                continue;
+            }
+        }
+        float boundRadius = partBoundRadius(part.size);
+        if (useFrustum && sphereOutsideFrustum(frustum, part.position, boundRadius)) {
+            ++g_renderCullStats.partsFrustumCulled;
+            continue;
+        }
+        cands.push_back({i, d2, part.isTransparent() || part.transparency > 0.05f});
+    }
+    if (useOcclusion && !cands.empty()) {
+        static std::vector<uint8_t> occMask;
+        const float minOcc = g_engine.quality.mobile ? 2.5f : 2.f;
+        const int maxOcc = g_engine.quality.mobile ? 48 : 96;
+        buildAndTestOcclusion(g_world.parts, cands, viewProj, minOcc, maxOcc, occMask);
+        int w = 0;
+        for (int ci = 0; ci < (int)cands.size(); ++ci) {
+            const bool keepSelected = (g_screen == AppScreen::Studio && !g_studioTesting
+                && cands[ci].i == g_selectedPart);
+            if (occMask[ci] && !keepSelected) {
+                ++g_renderCullStats.partsOcclusionCulled;
+                continue;
+            }
+            cands[w++] = cands[ci];
+        }
+        cands.resize(w);
+    }
+    const int afterCull = (int)cands.size();
+    if (afterCull > maxN) {
+        if (g_engine.quality.priorityPartCull) {
+            struct Scored { int ci; float score; };
+            static std::vector<Scored> scored;
+            scored.clear();
+            scored.reserve(cands.size());
+            for (int ci = 0; ci < (int)cands.size(); ++ci) {
+                const auto& c = cands[ci];
+                float score = partKeepScore(c.d2, g_world.parts[c.i].size);
+                if (g_screen == AppScreen::Studio && !g_studioTesting
+                    && c.i == g_selectedPart)
+                    score *= 1.0e6f;
+                scored.push_back({ci, score});
+            }
+            std::nth_element(scored.begin(), scored.begin() + maxN, scored.end(),
+                [](const Scored& a, const Scored& b) { return a.score > b.score; });
+            static std::vector<Cand> kept;
+            kept.clear();
+            kept.reserve(maxN);
+            for (int k = 0; k < maxN; ++k)
+                kept.push_back(cands[scored[k].ci]);
+            cands.swap(kept);
+        } else {
             std::nth_element(cands.begin(), cands.begin() + maxN, cands.end(),
                 [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
             cands.resize(maxN);
         }
-        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-            if (a.transparent != b.transparent) return !a.transparent && b.transparent;
-            if (a.transparent) return a.d2 < b.d2;
-            return a.d2 > b.d2;
-        });
-        for (const auto& c : cands) {
-            auto& p = g_world.parts[c.i];
-            glm::mat4 m = partModelMatrix(p);
-            bool useStud = p.useStud && g_engine.quality.studTextures
-                && !p.isNeon() && p.material == PartMaterial::Plastic
-                && p.shape == PartShape::Block;
-            GLuint drawVao = vao;
-            int vertCount = 36;
-            if (p.shape == PartShape::Ball && g_partMeshes.ball.vao) {
-                drawVao = g_partMeshes.ball.vao;
-                vertCount = g_partMeshes.ball.vertexCount;
-            } else if (p.shape == PartShape::Cylinder && g_partMeshes.cylinder.vao) {
-                drawVao = g_partMeshes.cylinder.vao;
-                vertCount = g_partMeshes.cylinder.vertexCount;
-            } else if (p.shape == PartShape::Wedge && g_partMeshes.wedge.vao) {
-                drawVao = g_partMeshes.wedge.vao;
-                vertCount = g_partMeshes.wedge.vertexCount;
-            }
-            drawCube(drawVao, useStud ? studP : partP, m, view, proj, p.color, sun, useStud, studId,
-                     vertCount, p.effectiveEmissive(), p.material);
-        }
+        g_renderCullStats.partsBudgetCulled = afterCull - maxN;
     }
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        if (a.transparent != b.transparent) return !a.transparent && b.transparent;
+        if (a.transparent) return a.d2 < b.d2;
+        return a.d2 > b.d2;
+    });
+    for (const auto& c : cands) {
+        auto& p = g_world.parts[c.i];
+        glm::mat4 m = partModelMatrix(p);
+        const float dist2 = c.d2;
+        bool useStud = p.useStud && g_engine.quality.studTextures
+            && !p.isNeon() && p.material == PartMaterial::Plastic
+            && p.shape == PartShape::Block;
+        if (useStud && dist2 > studOff2) {
+            useStud = false;
+            ++g_renderCullStats.partsStudLod;
+        }
+        PartMeshLod meshLod = (dist2 > shapeLow2) ? PartMeshLod::Low : PartMeshLod::High;
+        GLuint drawVao = vao;
+        int vertCount = 36;
+        if (ShapeMesh* sm = g_partMeshes.meshForLod(p.shape, meshLod)) {
+            if (meshLod == PartMeshLod::Low)
+                ++g_renderCullStats.partsShapeLod;
+            drawVao = sm->vao;
+            vertCount = sm->vertexCount;
+        } else if (p.shape == PartShape::Wedge && g_partMeshes.wedge.vao) {
+            drawVao = g_partMeshes.wedge.vao;
+            vertCount = g_partMeshes.wedge.vertexCount;
+        }
+        PartMaterial drawMat = p.material;
+        if (p.transparency > 0.05f && drawMat != PartMaterial::ForceField
+            && drawMat != PartMaterial::Neon)
+            drawMat = PartMaterial::Glass;
+        glm::vec3 drawCol = p.color;
+        if (p.transparency > 0.05f)
+            drawCol = glm::mix(drawCol, glm::vec3(0.85f, 0.9f, 1.f), p.transparency * 0.35f);
+        if (g_viewCollision && !p.canCollide)
+            drawCol = glm::mix(drawCol, glm::vec3(1.f, 0.2f, 0.2f), 0.55f);
+        if (g_viewWireframe)
+            drawCol *= 0.55f;
+        drawCube(drawVao, useStud ? studP : partP, m, view, proj, drawCol, sun, useStud, studId,
+                 vertCount, p.effectiveEmissive(), drawMat);
+        ++g_renderCullStats.partsDrawn;
+    }
+}
+
+static void passStudioGizmos(GLuint vao, GLuint partP, const glm::mat4& view,
+                             const glm::mat4& proj, const glm::vec3& sun) {
     drawSelectedPartBlueOutline(vao, partP, view, proj);
     drawScaleHandles(vao, partP, view, proj, sun);
     drawMoveHandles(vao, partP, view, proj, sun);
     drawRotateHandles(vao, partP, view, proj, sun);
-    drawWorkspaceModels(meshP, skinP, view, proj, sun);
+}
 
+static void passWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& view,
+                                const glm::mat4& proj, const glm::vec3& sun) {
+    drawWorkspaceModels(meshP, skinP, view, proj, sun);
+}
+
+static void passAvatars(GLuint vao, GLuint partP, GLuint meshP, GLuint skinP,
+                        AnimatedModel* avatarGlb, bool useGlb,
+                        const glm::mat4& view, const glm::mat4& proj,
+                        const glm::vec3& sun) {
     bool drawGlb = useGlb && avatarGlb && avatarGlb->loaded
                 && g_player.humanoid.jumpArmBlend < 0.15f
                 && !g_walking
                 && !(g_firstPerson && (g_screen == AppScreen::Playing
                     || (g_screen == AppScreen::Studio && g_studioTesting)));
+    GLuint playerVao = g_bevelCube.vao ? g_bevelCube.vao : vao;
+    BlockDrawContext bctx{ playerVao, partP, view, proj, sun };
+
     if (drawGlb) {
         avatarGlb->update(0.f);
         glm::mat4 fm = avatarGlb->placement(5.5f, g_playerPos.y,
@@ -424,9 +715,15 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
         glUniformMatrix4fv(glGetUniformLocation(skinP,"uProj"),1,GL_FALSE,glm::value_ptr(proj));
         glUniform3fv(glGetUniformLocation(skinP,"uSun"),1,glm::value_ptr(sun));
         avatarGlb->draw(skinP);
+        // Remoti anche con avatar GLB locale (prima sparivano).
+        if (g_remoteBodies.size() < g_net.remotes.size())
+            g_remoteBodies.resize(g_net.remotes.size());
+        for (size_t i = 0; i < g_net.remotes.size(); ++i) {
+            const auto& r = g_net.remotes[i];
+            if (i < g_remoteBodies.size())
+                g_remoteBodies[i].draw(bctx, drawCubePlayer, r.displayPos, r.displayYaw);
+        }
     } else {
-        GLuint playerVao = g_bevelCube.vao ? g_bevelCube.vao : vao;
-        BlockDrawContext bctx{ playerVao, partP, view, proj, sun };
         const bool hideLocalFp = g_firstPerson
             && (g_screen == AppScreen::Playing
                 || (g_screen == AppScreen::Studio && g_studioTesting))
@@ -437,9 +734,23 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
             bool hideBody[(int)AvatarSlot::Count] = {};
             fillBodyHideMask(g_catalog, hideBody);
             float armHold = (effectiveHeldSlot() >= 0) ? kEquippedArmHoldDeg : 0.f;
-            g_player.draw(bctx, drawCubePlayer, g_playerPos, g_playerYaw, hideBody, armHold);
+            const BackpackItem* heldIt = nullptr;
+            {
+                const int hs = effectiveHeldSlot();
+                if (hs >= 0 && hs < (int)g_world.backpack.size())
+                    heldIt = &g_world.backpack[hs];
+            }
+            const std::vector<HoldPartPose>* holds =
+                (heldIt && !heldIt->holdPose.empty()) ? &heldIt->holdPose : nullptr;
+            if (holds && findHoldPose(*holds, "Right Arm"))
+                armHold = 0.f;
+            g_player.draw(bctx, drawCubePlayer, g_playerPos, g_playerYaw, hideBody, armHold, holds);
             drawAvatarAccessories(meshP, view, proj, sun,
                 g_playerPos, g_playerYaw, g_player.humanoid, vao, partP);
+            drawEquippedSword(vao, partP, view, proj, sun);
+            drawEquippedTorch(vao, partP, view, proj, sun);
+            drawEquippedItemMesh(vao, partP, meshP, view, proj, sun);
+        } else {
             drawEquippedSword(vao, partP, view, proj, sun);
             drawEquippedTorch(vao, partP, view, proj, sun);
             drawEquippedItemMesh(vao, partP, meshP, view, proj, sun);
@@ -453,4 +764,16 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
         }
     }
     drawFriendPlayers(vao, partP, view, proj, sun);
+}
+
+static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
+                          GLuint skinP, GLuint meshP, AnimatedModel* avatarGlb, bool useGlb,
+                          const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    passPrepare(view, proj);
+    passShadows(vao, meshP);
+    passTerrain(vao, partP, view, proj, sun);
+    passOpaqueParts(vao, studP, partP, studId, view, proj, sun);
+    passStudioGizmos(vao, partP, view, proj, sun);
+    passWorkspaceModels(meshP, skinP, view, proj, sun);
+    passAvatars(vao, partP, meshP, skinP, avatarGlb, useGlb, view, proj, sun);
 }

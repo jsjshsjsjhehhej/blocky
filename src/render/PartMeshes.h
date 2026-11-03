@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "engine/PartShape.h"
+#include "RenderCullLod.h"
 
 struct ShapeMesh {
     GLuint vao = 0;
@@ -38,11 +39,15 @@ struct PartMeshes {
     ShapeMesh ball;
     ShapeMesh cylinder;
     ShapeMesh wedge;
+    ShapeMesh ballLow;
+    ShapeMesh cylinderLow;
 
     void destroy() {
         ball.destroy();
         cylinder.destroy();
         wedge.destroy();
+        ballLow.destroy();
+        cylinderLow.destroy();
     }
 
     /**
@@ -67,13 +72,29 @@ struct PartMeshes {
         }
     }
 
+    /** LOD geometria: sfera/cilindro low-poly oltre una certa distanza. */
+    ShapeMesh* meshForLod(PartShape s, PartMeshLod lod) {
+        if (lod == PartMeshLod::Low) {
+            if (s == PartShape::Ball) return ballLow.vao ? &ballLow : &ball;
+            if (s == PartShape::Cylinder) return cylinderLow.vao ? &cylinderLow : &cylinder;
+        }
+        return meshFor(s);
+    }
+
     void buildAll() {
         buildBall(24, 16);
         buildCylinder(28);
         buildWedge();
+        buildBallLow();
+        buildCylinderLow();
     }
 
-    void buildBall(int slices, int stacks) {
+    void buildBallLow() { buildBallInto(ballLow, 12, 8); }
+    void buildCylinderLow() { buildCylinderInto(cylinderLow, 14); }
+
+    void buildBall(int slices, int stacks) { buildBallInto(ball, slices, stacks); }
+
+    void buildBallInto(ShapeMesh& out, int slices, int stacks) {
         std::vector<float> v;
         auto push = [&](float x, float y, float z, float nx, float ny, float nz) {
             v.push_back(x); v.push_back(y); v.push_back(z);
@@ -107,10 +128,12 @@ struct PartMeshes {
                 push(x01, R * y0, z01, r0 * c1, ny0, r0 * s1);
             }
         }
-        ball.upload(v);
+        out.upload(v);
     }
 
-    void buildCylinder(int slices) {
+    void buildCylinder(int slices) { buildCylinderInto(cylinder, slices); }
+
+    void buildCylinderInto(ShapeMesh& out, int slices) {
         std::vector<float> v;
         auto push = [&](float x, float y, float z, float nx, float ny, float nz) {
             v.push_back(x); v.push_back(y); v.push_back(z);
@@ -140,7 +163,7 @@ struct PartMeshes {
             push(x1, Y0, z1, 0.f, -1.f, 0.f);
             push(x0, Y0, z0, 0.f, -1.f, 0.f);
         }
-        cylinder.upload(v);
+        out.upload(v);
     }
 
     void buildWedge() {

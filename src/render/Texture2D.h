@@ -87,7 +87,15 @@ inline std::string findStudTexture() {
     return findAssetFile("assets/textures/stud.png");
 }
 
-// Texture reale per un materiale (es. "wood" -> assets/textures/materials/wood.jpg).
+// Texture reale per un materiale: preferisce .png (senza fondo), poi .jpg.
 inline std::string findMaterialTexture(const std::string& name) {
-    return findAssetFile("assets/textures/materials/" + name + ".jpg");
+    for (const char* ext : {".png", ".jpg", ".jpeg"}) {
+        const std::string rel = "assets/textures/materials/" + name + ext;
+        const std::string path = findAssetFile(rel);
+        if (FILE* f = std::fopen(path.c_str(), "rb")) {
+            std::fclose(f);
+            return path;
+        }
+    }
+    return findAssetFile("assets/textures/materials/" + name + ".png");
 }

@@ -48,6 +48,18 @@ struct State {
 
 inline State& state() { static State s; return s; }
 
+/** Hotbar inventario: zona extra (indice >= 2) cosi' il tocco non fa look. */
+inline float* inventoryUiRect() {
+    static float r[4] = {0, 0, 0, 0};
+    return r;
+}
+inline bool& inventoryUiValid() { static bool v = false; return v; }
+inline void setInventoryUiRect(float x0, float y0, float x1, float y1) {
+    float* r = inventoryUiRect();
+    r[0] = x0; r[1] = y0; r[2] = x1; r[3] = y1;
+    inventoryUiValid() = (x1 > x0 && y1 > y0);
+}
+
 // ---- Aspetto (stile Blocky: forme piene, bordi netti, niente sfumature) ----
 inline constexpr float kStickRadius = 96.f;
 inline constexpr float kKnobRadius  = 40.f;
@@ -87,8 +99,14 @@ inline void draw() {
 #ifdef __ANDROID__
     // L'ordine conta: la zona 0 e' il joystick, la 1 e' il salto. Lo strato
     // Android le identifica per indice, non per posizione sullo schermo.
+    // Indice >= 2 = HUD (inventario): click ImGui, niente look.
+    blkShimClearUiRects();
     blkShimAddUiRect(stickPos.x, stickPos.y, stickPos.x + stickSize.x, stickPos.y + stickSize.y);
     blkShimAddUiRect(jumpPos.x, jumpPos.y, jumpPos.x + jumpSize.x, jumpPos.y + jumpSize.y);
+    if (inventoryUiValid()) {
+        const float* r = inventoryUiRect();
+        blkShimAddUiRect(r[0], r[1], r[2], r[3]);
+    }
 
     st.x = blkShimStickX();
     st.y = blkShimStickY();

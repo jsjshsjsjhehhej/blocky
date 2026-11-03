@@ -50,6 +50,41 @@ struct HumanoidPartDef {
     int parent = -1;
 };
 
+// Posa di una parte R6 mentre un item del Backpack e tenuto.
+// rot = gradi XYZ; pos = scostamento in stud dalla posa di riposo.
+struct HoldPartPose {
+    std::string name;
+    glm::vec3 pos{0.f};
+    glm::vec3 rot{0.f};
+};
+
+inline const HoldPartPose* findHoldPose(const std::vector<HoldPartPose>& poses,
+                                        const std::string& name) {
+    for (const auto& h : poses)
+        if (h.name == name) return &h;
+    return nullptr;
+}
+
+inline HoldPartPose* findHoldPose(std::vector<HoldPartPose>& poses,
+                                  const std::string& name) {
+    for (auto& h : poses)
+        if (h.name == name) return &h;
+    return nullptr;
+}
+
+// Default braccio destro: -90 X (orizzontale in avanti), come kEquippedArmHoldDeg.
+inline HoldPartPose& ensureHoldPose(std::vector<HoldPartPose>& poses,
+                                    const std::string& name,
+                                    float defaultRightArmX = -90.f) {
+    if (HoldPartPose* h = findHoldPose(poses, name)) return *h;
+    HoldPartPose hp;
+    hp.name = name;
+    if (name == "Right Arm")
+        hp.rot = {defaultRightArmX, 0.f, 0.f};
+    poses.push_back(std::move(hp));
+    return poses.back();
+}
+
 struct Humanoid {
     float health = 100.f;
     float maxHealth = 100.f;
@@ -63,6 +98,10 @@ struct Humanoid {
 
     float velocityY = 0.f;
     bool  grounded  = true;
+    // Per eventi script: ultima salute nota / stato (Running, Jumping, Freefall, Dead).
+    float lastEmittedHealth = 100.f;
+    bool lastEmittedDead = false;
+    std::string lastEmittedState = "Running";
     float jumpArmBlend = 0.f;
     bool poseIsJump = false;
     float jumpAnimTime = 0.f;
@@ -99,6 +138,18 @@ struct Humanoid {
         health = maxHealth;
         velocityY = 0.f;
         grounded = true;
+        lastEmittedHealth = health;
+        lastEmittedDead = false;
+        lastEmittedState = "Running";
+    }
+
+    const char* getState() const {
+        if (dead) return "Dead";
+        if (!grounded) {
+            if (velocityY > 2.f) return "Jumping";
+            return "Freefall";
+        }
+        return "Running";
     }
 
     std::vector<HumanoidPartDef> parts;

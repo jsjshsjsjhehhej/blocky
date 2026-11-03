@@ -26,6 +26,15 @@ struct LightingService {
     float fogEnd = 800.f;
     bool globalShadows = true;
 
+    // Studio 2020-ish Atmosphere / SunRays (applicati a fog + look).
+    bool  atmosphereEnabled = false;
+    float atmosphereDensity = 0.35f;   // 0..1 → stringe fogEnd
+    float atmosphereHaze = 0.15f;      // tinge horizon/fog
+    float atmosphereOffset = 0.f;
+    bool  sunRaysEnabled = false;
+    float sunRaysIntensity = 0.25f;
+    float sunRaysSpread = 1.f;
+
     DayNightMode dayNight = DayNightMode::Cycle;
     float dayLengthMinutes = 8.f;
     float fixedDayClock = 14.f;
@@ -41,6 +50,22 @@ struct LightingService {
         dayLengthMinutes = std::clamp(dayLengthMinutes, 0.25f, 120.f);
         fixedDayClock = std::clamp(fixedDayClock, 7.f, 17.f);
         fixedNightClock = std::clamp(fixedNightClock, 0.f, 24.f);
+        atmosphereDensity = std::clamp(atmosphereDensity, 0.f, 1.f);
+        atmosphereHaze = std::clamp(atmosphereHaze, 0.f, 1.f);
+        sunRaysIntensity = std::clamp(sunRaysIntensity, 0.f, 2.f);
+        sunRaysSpread = std::clamp(sunRaysSpread, 0.1f, 4.f);
+    }
+
+    // Fog effettivo dopo Atmosphere (non modifica i campi salvati).
+    float effectiveFogEnd() const {
+        if (!atmosphereEnabled) return fogEnd;
+        float shrink = 1.f - atmosphereDensity * 0.65f;
+        return std::max(fogStart + 8.f, fogEnd * shrink);
+    }
+    glm::vec3 effectiveFogColor() const {
+        if (!atmosphereEnabled) return fogColor;
+        glm::vec3 haze{0.72f, 0.78f, 0.88f};
+        return glm::mix(fogColor, haze, atmosphereHaze);
     }
 
     void tick(float dt, bool advance = true) {

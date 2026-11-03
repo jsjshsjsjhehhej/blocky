@@ -7,6 +7,40 @@
 
 // Part non ancorate: vive solo mentre si gioca (Playing o Test in Studio).
 static bphys::World g_bphys;
+static partconstraints::AnchoredWeldFollow g_anchoredWelds;
+
+static void bindPhysBridgeToLua() {
+    using W = bphys::World;
+    g_lua.phys.world = &g_bphys;
+    g_lua.phys.applyImpulse = [](void* w, int part, float x, float y, float z) {
+        return w && static_cast<W*>(w)->applyImpulse(part, {x, y, z});
+    };
+    g_lua.phys.setLinVel = [](void* w, int part, float x, float y, float z) {
+        return w && static_cast<W*>(w)->setLinearVelocity(part, {x, y, z});
+    };
+    g_lua.phys.getLinVel = [](void* w, int part, float* x, float* y, float* z) {
+        if (!w || !x || !y || !z) return false;
+        glm::vec3 v;
+        if (!static_cast<W*>(w)->getLinearVelocity(part, v)) return false;
+        *x = v.x; *y = v.y; *z = v.z;
+        return true;
+    };
+    g_lua.phys.setAngVel = [](void* w, int part, float x, float y, float z) {
+        return w && static_cast<W*>(w)->setAngularVelocity(part, {x, y, z});
+    };
+    g_lua.phys.getMass = [](void* w, int part) {
+        return w ? static_cast<W*>(w)->getMass(part) : 0.f;
+    };
+    g_lua.phys.setGroupsCollidable = [](void* w, int a, int b, bool on) {
+        if (w) static_cast<W*>(w)->setGroupsCollidable(a, b, on);
+    };
+    g_lua.phys.groupsCollidable = [](void* w, int a, int b) {
+        return !w || static_cast<W*>(w)->groupsCollidable(a, b);
+    };
+    g_lua.phys.radialImpulse = [](void* w, float cx, float cy, float cz, float radius, float force) {
+        if (w) static_cast<W*>(w)->applyRadialImpulse({cx, cy, cz}, radius, force);
+    };
+}
 
 static std::string loadStaminaScriptSource() {
     std::string path = resolveScriptPath("scripts/stamina.lua");
@@ -220,13 +254,18 @@ static void removeScriptFromSelected() {
 }
 
 static bool scriptShouldRunHere(ScriptType t) {
-    if (t != ScriptType::Server) return true;
-    return g_net.role != NetRole::Client;
+    // ModuleScript: mai auto-run — solo require() da altri script.
+    if (t == ScriptType::ModuleScript) return false;
+    // Script (Server): solo host / non-client.
+    if (t == ScriptType::Server) return g_net.role != NetRole::Client;
+    // LocalScript + Legacy: ogni peer (PC Test e Android Hub).
+    return true;
 }
 
 static void runAllPartScripts(bool clearFirst = true) {
     CrashHandler::note("runAllPartScripts: inizio");
     if (!g_lua.ok) g_lua.init(&g_world);
+    bindPhysBridgeToLua();
     bindLuaServices();
     if (clearFirst)
         g_lua.clearHeartbeats();
@@ -264,6 +303,28 @@ static void runAllPartScripts(bool clearFirst = true) {
         else
             std::fprintf(stderr, "[Lua] Label '%s': %s\n", l.name.c_str(), g_lua.lastError.c_str());
     }
+    // ServerScriptService / shared Script + LocalScript (non ModuleScript).
+    for (int i = 0; i < (int)g_world.instances.size(); ++i) {
+        auto& s = g_world.instances[i];
+        if (s.source.empty()) continue;
+        if (s.className != "Script" && s.className != "LocalScript") continue;
+        if (!scriptShouldRunHere(s.scriptType)) continue;
+        char bc[192];
+        std::snprintf(bc, sizeof(bc), "runAllPartScripts: shared[%d] '%s'", i, s.name.c_str());
+        CrashHandler::note(bc);
+        if (g_lua.runSharedScript(s.source, i))
+            ++n;
+        else
+            std::fprintf(stderr, "[Lua] %s '%s': %s\n",
+                         s.className.c_str(), s.name.c_str(), g_lua.lastError.c_str());
+    }
+    // Registra RemoteEvent/Function presenti nel place.
+    for (const auto& s : g_world.instances) {
+        if (s.className == "RemoteEvent" || s.className == "RemoteFunction") {
+            scriptControls().remoteServer[s.name];
+            scriptControls().remoteClient[s.name];
+        }
+    }
     CrashHandler::note("runAllPartScripts: fine");
     if (n > 0)
         g_luaRunMsg = "Test: script avviati (" + std::to_string(n) + ")";
@@ -271,8 +332,15 @@ static void runAllPartScripts(bool clearFirst = true) {
 
 static void startTestScripts() {
     CrashHandler::note("startTestScripts: inizio");
-    if (!g_lua.ok) g_lua.init(&g_world);
+    // Sessione Luau pulita: gli script vedono il workspace C++ così com'è
+    // in Studio (Size/Position aggiornati), senza stato vecchio dal test prima.
+    g_lua.shutdown();
+    if (!g_lua.init(&g_world)) {
+        std::fprintf(stderr, "[Test] Lua init fallita: %s\n", g_lua.lastError.c_str());
+        return;
+    }
     CrashHandler::note("startTestScripts: g_lua.init ok");
+    bindPhysBridgeToLua();
     bindLuaServices();
     g_lua.clearHeartbeats();
     scriptControls().jumpEnabled = true;
@@ -293,6 +361,16 @@ static void startTestScripts() {
         bootPlaceScript("scripts/stamina.lua");
         g_luaRunMsg = "Stamina attiva — CTRL+WASD per correre";
     }
+    if (g_loadCartLontano) {
+        CrashHandler::note("startTestScripts: bootPlaceScript(cart_lontano)");
+        bootPlaceScript("scripts/cart_lontano.lua");
+        g_luaRunMsg = "Carrello VIA! — Test, poi clicca il bottone";
+    }
+    if (g_loadFucile) {
+        CrashHandler::note("startTestScripts: bootPlaceScript(logica_fucile)");
+        bootPlaceScript("scripts/logica_fucile.lua");
+        g_luaRunMsg = "Fucile pronto — tasto 1, poi spara sulle Part";
+    }
     runAllPartScripts(false);
 }
 
@@ -300,12 +378,12 @@ static void scaleSelected(float factor) {
     if (g_selectedPart < 0 || g_selectedPart >= (int)g_world.parts.size()) return;
     auto& s = g_world.parts[g_selectedPart].size;
     s *= factor;
-    s = glm::max(s, glm::vec3(0.5f));
-    s = glm::min(s, glm::vec3(80.f));
+    s = glm::max(s, glm::vec3(0.05f));
+    s = glm::min(s, glm::vec3(1.0e5f));
 }
 
 static void partWorldAabb(const WorkspacePart& p, glm::vec3& outMin, glm::vec3& outMax) {
-    glm::vec3 h = glm::max(p.size, glm::vec3(0.05f)) * 0.5f;
+    glm::vec3 h = partHitboxSize(p) * 0.5f;
 
     // Una palla e un cilindro NON diventano piu' grandi ruotando: gli otto
     // angoli del cubo che li contiene invece si', e di parecchio quando la
@@ -336,7 +414,7 @@ static void partWorldAabb(const WorkspacePart& p, glm::vec3& outMin, glm::vec3& 
         return;
     }
 
-    glm::mat4 m = partModelMatrix(p);
+    glm::mat4 m = partHitboxMatrix(p);
     outMin = glm::vec3(1e9f);
     outMax = glm::vec3(-1e9f);
     for (int ix = 0; ix < 2; ++ix)
@@ -364,6 +442,9 @@ static void playerAabb(glm::vec3& outMin, glm::vec3& outMax) {
 
 static void doBoomAt(glm::vec3 boomPos, float radius = 14.f, float maxDmg = 55.f, int fx = 24) {
     g_particles.spawnExplosion(boomPos, radius, fx);
+    // Casse / debris volano via (stile Explosion Roblox).
+    if (g_bphys.ready())
+        g_bphys.applyRadialImpulse(boomPos, radius, maxDmg * 18.f);
     if (g_lua.playerHumanoid && g_lua.playerPos)
         g_lua.applyExplosionPlayerDamage(boomPos, radius, maxDmg);
     else if (!g_player.humanoid.dead) {
@@ -403,8 +484,16 @@ static void pollBackpackEquipChanged() {
         if (now_.meshPath.empty() && now_.tool == BackpackTool::None) {
             g_exportMsg = "\"" + now_.name + "\" non ha un modello: Explorer > Backpack > "
                           + now_.name + " > \"Scegli modello (mesh in mano)...\"";
-        } else if (!now_.meshPath.empty() && !fileExistsPath(now_.meshPath)) {
-            g_exportMsg = "Modello di \"" + now_.name + "\" non trovato: " + now_.meshPath;
+        } else if (!now_.meshPath.empty()) {
+            const std::string resolved =
+                resolvePackageAssetPath(g_activeGame.placePath, now_.meshPath);
+            if (!fileExistsPath(resolved)) {
+                g_exportMsg = "Modello di \"" + now_.name + "\" non trovato: " + now_.meshPath
+                    + " (cerca in " + resolved + ")";
+            } else if (resolved != now_.meshPath) {
+                // Aggiorna subito: drawEquippedItemMesh e Assimp usano il path vero.
+                g_world.backpack[cur].meshPath = resolved;
+            }
         }
         g_lua.fireItemEquipped(now_.id, now_.name);
     }
@@ -415,6 +504,7 @@ static void pollPartTouched() {
     if (g_screen != AppScreen::Playing
         && !(g_screen == AppScreen::Studio && g_studioTesting))
         return;
+    g_lua.clearPartPartTouchDedup();
     glm::vec3 pmin, pmax;
     playerAabb(pmin, pmax);
     glm::vec3 playerCenter = (pmin + pmax) * 0.5f;
@@ -426,12 +516,16 @@ static void pollPartTouched() {
     static std::vector<uint8_t> exactTouch;
     // Se uno script ha tolto part dopo l'allineamento della fisica, gli indici
     // non corrispondono piu': meglio la scatola per un frame che la part sbagliata.
-    const bool exact = g_bphys.touching(g_playerPos, exactTouch)
+    const bool exact = g_bphys.touching(g_playerPos, g_world.parts, exactTouch)
                     && exactTouch.size() <= g_world.parts.size();
 
     std::vector<int> boomIdx;
     for (int i = 0; i < (int)g_world.parts.size(); ++i) {
         auto& part = g_world.parts[i];
+        if (!part.canTouch && !part.boomOnTouch) {
+            if (i < (int)g_touching.size()) g_touching[i] = 0;
+            continue;
+        }
         bool aabbHit;
         if (exact && i < (int)exactTouch.size()) {
             aabbHit = exactTouch[i] != 0;
@@ -457,6 +551,17 @@ static void pollPartTouched() {
                 g_lua.firePartTouched(i);
             if (i < (int)g_touching.size())
                 g_touching[i] = now ? 1 : 0;
+        }
+    }
+
+    // Part↔Part Touched (casse che si urtano, pad che toccano altre part).
+    if (g_lua.ok && g_bphys.ready()) {
+        for (const bphys::TouchPair& tp : g_bphys.lastContactPairs()) {
+            if (tp.a < 0 || tp.b < 0) continue;
+            if (tp.a >= (int)g_world.parts.size() || tp.b >= (int)g_world.parts.size()) continue;
+            if (!g_world.parts[tp.a].canTouch || !g_world.parts[tp.b].canTouch) continue;
+            g_lua.firePartTouchedOther(tp.a, tp.b);
+            g_lua.firePartTouchedOther(tp.b, tp.a);
         }
     }
 
@@ -582,6 +687,13 @@ static void resolvePlayerAxis(int axis) {
         }
     }
 
+    if (!g_terrain.empty()) {
+        std::vector<glm::vec3> tMins, tMaxs;
+        g_terrain.collideAabbs(pmin, pmax, tMins, tMaxs);
+        for (size_t ti = 0; ti < tMins.size(); ++ti)
+            pushOut(tMins[ti], tMaxs[ti]);
+    }
+
     // I modelli importati non hanno ancora una forma fisica: scatola.
     for (int i = 0; i < (int)g_world.models.size(); ++i) {
         if (!g_world.models[i].canCollide) continue;
@@ -611,6 +723,7 @@ static void respawnPlayerAtSpawn() {
     g_shiftLock = false;
     g_playMenuOpen = false;
     acOnLegitimateRespawn();
+    g_lua.fireCharacterAdded();
 }
 
 static void stepPlayerPhysicsWithCollision(float dt) {
@@ -635,10 +748,16 @@ static void stepPlayerPhysicsWithCollision(float dt) {
     if (g_ragdoll.active)
         g_ragdoll.clear();
 
+    // Alla guida la posizione la decide l'auto (syncVeicoli in main.cpp).
+    if (g_veicoli.seated()) {
+        h.velocityY = 0.f;
+        h.grounded = true;
+        return;
+    }
+
     const float gravity = bphys::kGravity;
     float prevVy = h.velocityY;
     h.velocityY -= gravity * dt;
-
     if (g_bphys.ready()) {
         const bphys::CharacterStep r = g_bphys.moveCharacter(g_playerPos, h.velocityY, dt);
         g_playerPos = r.feet;
@@ -663,7 +782,7 @@ static void stepPlayerPhysicsWithCollision(float dt) {
     }
 
     const float killY = -12.f;
-    const float mapHalfExtent = 144.f; // baseplate 120x120 + margine di caduta
+    const float mapHalfExtent = 144.f;
     bool fellOffMap = g_playerPos.y < killY
         || std::fabs(g_playerPos.x) > mapHalfExtent
         || std::fabs(g_playerPos.z) > mapHalfExtent

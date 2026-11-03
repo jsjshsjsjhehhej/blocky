@@ -27,6 +27,13 @@ static int blockyLuaError(lua_State* ls, const char* fmt, Args... args) {
     return 0;
 }
 
+// Senza argomenti il testo e' un messaggio, non un formato: un '%' dentro
+// non deve essere interpretato (e clang su Android lo rifiuta come insicuro).
+static int blockyLuaError(lua_State* ls, const char* msg) {
+    luaL_error(ls, "%s", msg);
+    return 0;
+}
+
 namespace LuaScriptSecurity {
 
 inline constexpr int kMaxHeartbeat = 64;
@@ -47,7 +54,8 @@ inline constexpr int kScriptHardTimeoutMs = 50;
 inline bool isLockedGlobal(const char* k) {
     if (!k) return false;
     static const char* locked[] = {
-        "game", "workspace", "Workspace", "Vector3", "Color3", "Instance",
+        "game", "workspace", "Workspace", "Vector3", "Color3", "CFrame", "Region3",
+        "Instance", "time",
         "Humanoid", "Events", "UserInputService", "task", "wait",
         "print", "AnimateFrame", "script", "_G",
         "dofile", "loadfile", "load", "require", "collectgarbage",
@@ -99,7 +107,8 @@ inline void protectGlobal(lua_State* L, const char* name) {
 inline void lockApiSurface(lua_State* L) {
     if (!L) return;
     const char* names[] = {
-        "game", "workspace", "Workspace", "Vector3", "Color3", "Instance",
+        "game", "workspace", "Workspace", "Vector3", "Color3", "CFrame", "Region3",
+        "Instance",
         "Humanoid", "Events", "UserInputService", "task", nullptr
     };
     for (int i = 0; names[i]; ++i)

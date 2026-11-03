@@ -9,6 +9,8 @@
 
 #include "DataModel.h"
 #include "GameHub.h"
+#include "PartConstraints.h"
+#include "PartGroups.h"
 #include "Humanoid.h"
 #include "LightingService.h"
 
@@ -40,8 +42,8 @@ public:
         j << std::fixed << std::setprecision(3);
         j << "{\n";
         j << "  \"format\": \"BlockyPlace\",\n";
-        j << "  \"version\": 1,\n";
-        j << "  \"placeName\": \"" << dm.placeName << "\",\n";
+        j << "  \"version\": 2,\n";
+        j << "  \"placeName\": \"" << escapeScript(dm.placeName) << "\",\n";
         if (lighting) {
             j << "  \"lighting\": {\"dayNight\":" << (int)lighting->dayNight
               << ",\"dayLengthMinutes\":" << lighting->dayLengthMinutes
@@ -61,16 +63,17 @@ public:
           << ",\"z\":" << playerPos.z << ",\"yaw\":" << playerYaw << "},\n";
         j << "  \"humanoid\": {\"health\":" << humanoid.health << ",\"maxHealth\":" << humanoid.maxHealth
           << ",\"walkSpeed\":" << humanoid.walkSpeed << ",\"jumpPower\":" << humanoid.jumpPower << "},\n";
+        partgroups::writeJson(j, dm);
+        partconstraints::writeJson(j, dm);
         j << "  \"parts\": [\n";
         for (size_t i = 0; i < dm.parts.size(); ++i) {
             const auto& p = dm.parts[i];
             j << "    {\"name\":\"" << p.name << "\",\"pos\":[" << p.position.x << "," << p.position.y << "," << p.position.z
               << "],\"size\":[" << p.size.x << "," << p.size.y << "," << p.size.z
               << "],\"rot\":[" << p.rotation.x << "," << p.rotation.y << "," << p.rotation.z
-              << "],\"color\":[" << p.color.r << "," << p.color.g << "," << p.color.b
-              << "],\"anchored\":" << (p.anchored ? "true" : "false")
-              << ",\"canCollide\":" << (p.canCollide ? "true" : "false")
-              << ",\"shape\":\"" << partShapeName(p.shape) << "\""
+              << "],\"color\":[" << p.color.r << "," << p.color.g << "," << p.color.b << "]";
+            partprops::writeAll(j, p);
+            j << ",\"shape\":\"" << partShapeName(p.shape) << "\""
               << ",\"material\":\"" << partMaterialName(p.material) << "\""
               << ",\"emissive\":" << p.emissive
               << ",\"pointLight\":" << (p.pointLight ? "true" : "false")
@@ -79,6 +82,8 @@ public:
               << ",\"canDestroy\":" << (p.canDestroy ? "true" : "false")
               << ",\"health\":" << p.health
               << ",\"maxHealth\":" << p.maxHealth
+              << ",\"parentIndex\":" << p.parentIndex
+              << ",\"groupId\":" << p.groupId
               << ",\"hasScript\":" << (p.script.empty() ? "false" : "true")
               << ",\"script\":\"" << escapeScript(p.script) << "\""
               << ",\"scriptType\":" << (int)p.scriptType << "}";
@@ -103,19 +108,44 @@ public:
             j << "\n";
         }
         j << "  ],\n";
+        // Shared instances (ReplicatedStorage / ServerStorage / SSS) — ModuleScript, RemoteEvent, Folder.
+        j << "  \"instances\": [\n";
+        for (size_t i = 0; i < dm.instances.size(); ++i) {
+            const auto& s = dm.instances[i];
+            j << "    {\"name\":\"" << escapeScript(s.name)
+              << "\",\"className\":\"" << escapeScript(s.className)
+              << "\",\"service\":" << (int)s.service
+              << ",\"parentIndex\":" << s.parentIndex
+              << ",\"scriptType\":" << (int)s.scriptType
+              << ",\"source\":\"" << escapeScript(s.source) << "\"}";
+            if (i + 1 < dm.instances.size()) j << ",";
+            j << "\n";
+        }
+        j << "  ],\n";
         j << "  \"backpack\": [\n";
         for (size_t i = 0; i < dm.backpack.size(); ++i) {
             const auto& b = dm.backpack[i];
-            j << "    {\"id\":\"" << b.id << "\",\"name\":\"" << b.name
+            // meshPath DEVE essere escaped: altrimenti C:\Users\... rompe il JSON
+            // e sul telefono l'inventario arriva vuoto / senza mesh.
+            j << "    {\"id\":\"" << escapeScript(b.id) << "\",\"name\":\"" << escapeScript(b.name)
               << "\",\"iconHue\":" << b.iconHue
               << ",\"tool\":" << (int)b.tool
-              << ",\"meshPath\":\"" << b.meshPath << "\""
-              << ",\"animId\":\"" << b.animId << "\""
+              << ",\"meshPath\":\"" << escapeScript(b.meshPath) << "\""
+              << ",\"animId\":\"" << escapeScript(b.animId) << "\""
               << ",\"gripOffset\":[" << b.gripOffset.x << "," << b.gripOffset.y
               << "," << b.gripOffset.z << "]"
               << ",\"gripRotation\":[" << b.gripRotation.x << "," << b.gripRotation.y
               << "," << b.gripRotation.z << "]"
-              << ",\"gripScale\":" << b.gripScale << "}";
+              << ",\"gripScale\":" << b.gripScale
+              << ",\"holdPose\":[";
+            for (size_t hi = 0; hi < b.holdPose.size(); ++hi) {
+                const auto& hp = b.holdPose[hi];
+                j << "{\"name\":\"" << escapeScript(hp.name) << "\""
+                  << ",\"pos\":[" << hp.pos.x << "," << hp.pos.y << "," << hp.pos.z << "]"
+                  << ",\"rot\":[" << hp.rot.x << "," << hp.rot.y << "," << hp.rot.z << "]}";
+                if (hi + 1 < b.holdPose.size()) j << ",";
+            }
+            j << "]}";
             if (i + 1 < dm.backpack.size()) j << ",";
             j << "\n";
         }

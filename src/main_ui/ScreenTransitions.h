@@ -5,6 +5,14 @@
 // direttamente le globali di main.cpp (g_screen, g_world, g_menu, ecc.).
 // Compila solo se incluso da main.cpp esattamente in questo punto.
 
+#include "platform/Resilience.h"
+
+// Test multiplayer di Studio (StudioMultiplayerTest.h): questa finestra e' un
+// giocatore di prova. Nome solo per la partita (l'account non si tocca) e,
+// per l'host, la porta di test al posto della ricerca automatica.
+static std::string g_mpTestName;
+static int g_mpTestHostPort = 0;
+
 static void startLoadingGame(int idx) {
     if (idx < 0 || idx >= (int)g_games.size()) return;
     g_activeGame = g_games[idx];
@@ -46,7 +54,8 @@ static void finishLoading() {
     applyGamePlace(g_activeGame, g_world, &g_lighting);
     syncFriendsFromWorld();
 
-    const char* uname = g_menu.username[0] ? g_menu.username : "Player";
+    const char* uname = !g_mpTestName.empty() ? g_mpTestName.c_str()
+                      : (g_menu.username[0] ? g_menu.username : "Player");
     int gi = 0;
     for (int i = 0; i < (int)g_games.size(); ++i)
         if (g_games[i].id == g_activeGame.id) { gi = i; break; }
@@ -73,6 +82,10 @@ static void finishLoading() {
             std::snprintf(g_menu.netStatus, sizeof(g_menu.netStatus),
                           "Codice \"%s\" non valido o pool irraggiungibile", code.c_str());
         }
+    } else if (g_mpTestHostPort > 0) {
+        // Host del test: porta fissa e solo in locale (niente UPnP sul router).
+        std::snprintf(g_net.localName, sizeof(g_net.localName), "%.23s", uname);
+        g_net.startHost(g_mpTestHostPort, gi, uname, maxP);
     } else {
         g_net.startAutoMatch(27015, gi, uname, maxP);
         if (g_net.role == NetRole::Host)
@@ -84,6 +97,7 @@ static void finishLoading() {
         g_playerPos.z = 0.f;
     std::snprintf(g_menu.netStatus, sizeof(g_menu.netStatus), "%s", g_net.status);
 
+    resetGeneratedSystems();   // prima degli script: possono gia' usarli all'avvio
     g_lua.requireSealedScripts = true;
     if (scriptShouldRunHere(g_activeGame.scriptType))
         bootPlaceScript(g_activeGame.script);
@@ -114,6 +128,7 @@ static void finishLoading() {
 
     glfwSetWindowTitle(glfwGetCurrentContext(), ("Blocky — " + g_activeGame.title).c_str());
     setPlayCursor(glfwGetCurrentContext(), true);
+    requestWeakDeviceAdvice();
 }
 
 static void enterStudio() {
@@ -159,6 +174,9 @@ static void stopStudioTest(GLFWwindow* win);
 static void startStudioTest(GLFWwindow* win) {
     if (g_screen != AppScreen::Studio) return;
     CrashHandler::note("Start Studio Test");
+    commitActiveStudioGizmo();
+    blk::resilience::resetSession();
+    blk::resilience::syncQualityBaseline(g_engine.quality);
     g_worldTestBackup = g_world;
     g_hasTestBackup = true;
     g_friendsTestBackup = g_friends;
@@ -171,7 +189,6 @@ static void startStudioTest(GLFWwindow* win) {
     g_studioCamBackup = g_cam.pos;
     g_studioYawBackup = g_cam.yaw;
     g_studioPitchBackup = g_cam.pitch;
-    g_scaleDragging = g_moveDragging = g_rotateDragging = false;
     g_studioTesting = true;
     g_mode = CamMode::Play;
     g_modelAnimClock = 0.f;
@@ -201,6 +218,7 @@ static void startStudioTest(GLFWwindow* win) {
             p.canCollide = false;
         }
     }
+    resetGeneratedSystems();
     std::string crashReason;
     bool okBoot = TestSessionGuard::runGuarded([&]() {
         startTestScripts();
@@ -217,7 +235,9 @@ static void startStudioTest(GLFWwindow* win) {
         g_luaRunMsg = "Test non avviato — crash in uno script: " + crashReason;
         return;
     }
-    setPlayCursor(win, true);
+    // Studio Test: cursore libero all'avvio cosi' Stop/UI restano cliccabili.
+    // Prima persona (menu) puo' ancora lockare dopo. Esc/F1 = stop.
+    setPlayCursor(win, false);
     char t[192];
     std::snprintf(t, sizeof(t), "%s — Test: %s", kAppBrand, g_world.placeName.c_str());
     glfwSetWindowTitle(win, t);
@@ -227,6 +247,11 @@ static void stopStudioTest(GLFWwindow* win) {
     if (!g_studioTesting) return;
     g_studioTesting = false;
     g_mode = CamMode::Studio;
+
+    if (blk::resilience::state().emergencyLevel > 0 && blk::resilience::state().baselineValid)
+        g_engine.quality = blk::resilience::state().qualityBaseline;
+    blk::resilience::resetSession();
+    updateRenderResolution();
 
     g_lua.clearHeartbeats();
     scriptControls().jumpEnabled = true;
@@ -245,8 +270,39 @@ static void stopStudioTest(GLFWwindow* win) {
     g_swordCooldown = 0.f;
 
     if (g_hasTestBackup) {
+        struct PartStudioXform {
+            glm::vec3 position, size, rotation;
+            bool anchored = true;
+        };
+        struct ModelStudioXform {
+            glm::vec3 position, rotation, scale;
+        };
+        std::vector<PartStudioXform> liveParts;
+        liveParts.reserve(g_world.parts.size());
+        for (const auto& p : g_world.parts)
+            liveParts.push_back({p.position, p.size, p.rotation, p.anchored});
+        std::vector<ModelStudioXform> liveModels;
+        liveModels.reserve(g_world.models.size());
+        for (const auto& m : g_world.models)
+            liveModels.push_back({m.position, m.rotation, m.scale});
+
         g_world = std::move(g_worldTestBackup);
         g_hasTestBackup = false;
+
+        const int np = std::min((int)g_world.parts.size(), (int)liveParts.size());
+        for (int i = 0; i < np; ++i) {
+            if (!liveParts[(size_t)i].anchored) continue;
+            g_world.parts[i].position = liveParts[(size_t)i].position;
+            g_world.parts[i].size = liveParts[(size_t)i].size;
+            g_world.parts[i].rotation = liveParts[(size_t)i].rotation;
+        }
+        const int nm = std::min((int)g_world.models.size(), (int)liveModels.size());
+        for (int i = 0; i < nm; ++i) {
+            g_world.models[i].position = liveModels[(size_t)i].position;
+            g_world.models[i].rotation = liveModels[(size_t)i].rotation;
+            g_world.models[i].scale = liveModels[(size_t)i].scale;
+        }
+
         g_friends = std::move(g_friendsTestBackup);
         g_playerPos = g_playerPosTestBackup;
         g_playerYaw = g_playerYawTestBackup;
@@ -273,7 +329,8 @@ static void stopStudioTest(GLFWwindow* win) {
     g_cam.pos = g_studioCamBackup;
     g_cam.yaw = g_studioYawBackup;
     g_cam.pitch = g_studioPitchBackup;
-    g_luaRunMsg = "Test fermato — place e player ripristinati";
+    g_luaRunMsg = "Test fermato — script/part runtime annullati; le Part ancorate "
+                  "restano come in edit";
     setPlayCursor(win, false);
     applyStudioTheme();
     glfwSetWindowTitle(win, kAppBrand);

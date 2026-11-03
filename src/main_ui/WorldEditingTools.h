@@ -5,6 +5,8 @@
 // g_wsRigged, g_undo, ecc.). Compila solo se incluso da main.cpp
 // esattamente in questo punto.
 
+#include "render/RenderCullLod.h"
+
 static glm::vec3 insertPositionInFront() {
     if (g_mode == CamMode::Studio) {
         glm::vec3 p = g_cam.pos + g_cam.front() * 12.f;
@@ -197,6 +199,9 @@ static void applyMapTemplate(int kind) {
     case 3: g_world.loadArenaPlace(); break;
     case 4: g_world.loadParkPlace(); break;
     case 5: g_world.loadCityPlace(); break;
+    case 6: g_world.loadFpsKitPlace(); break;
+    case 7: g_world.loadTycoonKitPlace(); break;
+    case 8: g_world.loadSurvivalKitPlace(); break;
     default: g_world.loadBaseplatePlace(); break;
     }
     std::snprintf(g_gameNameBuf, sizeof(g_gameNameBuf), "%s", g_world.placeName.c_str());
@@ -303,14 +308,40 @@ static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& vie
     const float animDt = std::min((float)(nowAnim - lastAnimTime), 0.05f);
     lastAnimTime = nowAnim;
 
-    for (int i = 0; i < (int)g_world.models.size(); ++i) {
+    static std::vector<int> visibleModels;
+    selectVisibleModels(g_world.models, g_renderCamPos, view, proj, g_engine.quality,
+                        visibleModels, g_selectedModel);
+
+    const int vertBudget = g_engine.quality.maxModelVerts;
+    int vertsUsed = 0;
+    int modelsSkippedBudget = 0;
+
+    for (int vi = 0; vi < (int)visibleModels.size(); ++vi) {
+        const int i = visibleModels[vi];
         if (i >= (int)g_wsMeshes.size() || !g_wsMeshes[i].loaded) continue;
         auto& m = g_world.models[i];
+        const int meshVerts = std::max(1, g_wsMeshes[i].vertexCount);
+        const bool keepSelected = (i == g_selectedModel);
+        // Overload modelli pesanti: salta i lontani quando il budget vertici e' pieno.
+        if (!keepSelected && vertBudget > 0 && vertsUsed >= vertBudget) {
+            ++modelsSkippedBudget;
+            continue;
+        }
+        if (!keepSelected && vertBudget > 0 && vertsUsed + meshVerts > vertBudget
+            && vertsUsed > vertBudget / 4) {
+            // Ancora spazio piccolo: accetta solo mesh leggere.
+            if (meshVerts > vertBudget / 8) {
+                ++modelsSkippedBudget;
+                continue;
+            }
+        }
+        vertsUsed += meshVerts;
+
         glm::mat4 model = glm::translate(glm::mat4(1.f), m.position)
                         * partRotationMatrix(m.rotation)
                         * glm::scale(glm::mat4(1.f), m.scale);
         glm::vec3 tint = m.tint;
-        if (i == g_selectedModel)
+        if (keepSelected)
             tint = glm::mix(tint, glm::vec3(1.f, 0.85f, 0.2f), 0.3f);
 
         const int track = m.animator.dominant();
@@ -322,7 +353,11 @@ static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& vie
                 rig.setClip(t->clipName);
 
             m.animator.advance(animDt);
-            rig.update(animDt * (t ? std::max(0.f, t->speed) : 1.f));
+            // Lontano: anima meno spesso (costa CPU su scene dense).
+            const float dist2 = glm::dot(m.position - g_renderCamPos, m.position - g_renderCamPos);
+            const float farAnim2 = g_engine.quality.maxDrawDistance * 0.45f;
+            const float animScale = (dist2 > farAnim2 * farAnim2) ? 0.35f : 1.f;
+            rig.update(animDt * animScale * (t ? std::max(0.f, t->speed) : 1.f));
 
             const glm::mat4 skinModel = model * rig.correction;
 
@@ -349,8 +384,16 @@ static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& vie
         glUniform3fv(glGetUniformLocation(meshP,"uSun"),1,glm::value_ptr(sun));
         glUniform3fv(glGetUniformLocation(meshP,"uCamPos"),1,glm::value_ptr(g_renderCamPos));
         uploadDynamicLights(meshP);
-        g_wsMeshes[i].drawTextured(meshP, tint, 1.f);
+        // Mesh molto pesanti e lontane: disegna solo i primi submesh (proxy).
+        const float d2 = glm::dot(m.position - g_renderCamPos, m.position - g_renderCamPos);
+        const float heavyFar2 = g_engine.quality.maxDrawDistance * 0.40f;
+        if (meshVerts > 80'000 && d2 > heavyFar2 * heavyFar2)
+            g_wsMeshes[i].drawTexturedBudget(meshP, tint, 1.f, 24'000);
+        else
+            g_wsMeshes[i].drawTextured(meshP, tint, 1.f);
     }
+    if (modelsSkippedBudget > 0)
+        g_renderCullStats.modelsCulled += modelsSkippedBudget;
 }
 
 static void ensureDefaultBeepWav() {
@@ -481,6 +524,10 @@ static void duplicateSelected() {
     g_undo.recordInsert(g_selectedPart, g_world.parts[g_selectedPart]);
 }
 
+// StudioFeaturesUi.h (incluso dopo questo file).
+static size_t studioMultiSelectionSize();
+static void studioDeleteUnlockedSelection();
+
 static void deleteSelected() {
     if (g_selectedModel >= 0 && g_selectedModel < (int)g_world.models.size()) {
         if (g_animEditModel == g_selectedModel) {
@@ -509,8 +556,19 @@ static void deleteSelected() {
         return;
     }
     if (g_selectedPart < 0 || g_selectedPart >= (int)g_world.parts.size()) return;
+    if (g_world.parts[g_selectedPart].locked) {
+        g_exportMsg = "Part locked — Unlock prima di cancellare";
+        return;
+    }
+    // Selezione multipla (Ctrl+clic, un Model): si cancella tutta, non solo
+    // la part principale.
+    if (studioMultiSelectionSize() > 1) {
+        studioDeleteUnlockedSelection();
+        return;
+    }
     g_undo.recordDelete(g_selectedPart, g_world.parts[g_selectedPart]);
     g_world.parts.erase(g_world.parts.begin() + g_selectedPart);
+    partconstraints::onPartErased(g_world, g_selectedPart);
     g_editingPartScript = false;
     selectPart(-1);
     markPlaceDirty();

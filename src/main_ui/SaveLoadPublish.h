@@ -3,6 +3,8 @@
 // (g_world, g_menu, g_placeFilePath, ecc.). Compila solo se incluso da
 // main.cpp esattamente in questo punto, mai da altri translation unit.
 
+#include "engine/SceneIntegrity.h"
+
 static void doExport() {
     syncFriendsToWorld();
     std::string json = PlaceExporter::exportPlace(g_world, g_player.humanoid, g_playerPos, g_playerYaw, &g_lighting);
@@ -20,6 +22,9 @@ static void refreshGamesList() {
     for (const auto& g : packaged)
         extras.push_back(BlockyProject::toGameEntry(g));
     mergeGamePackages(g_games, extras);
+    // Giochi gia' scaricati dal PC (telefono): restano in menu e giocabili.
+    mergeGamePackages(g_games, blk::remotegames::listDownloadedEntries());
+    blk::remotegames::applyDownloadedToList(g_games);
 }
 
 static bool writeCurrentPlaceTo(const std::string& path) {
@@ -443,6 +448,7 @@ static bool openPlacePath(const std::string& path) {
         g_exportMsg = "Impossibile aprire: " + path;
         return false;
     }
+    int integrityFixes = SceneIntegrity::repair(g_world);
     g_placeFilePath = path;
     g_wsMeshes.clear();
     syncFriendsFromWorld();
@@ -456,7 +462,9 @@ static bool openPlacePath(const std::string& path) {
     if (!g_world.parts.empty())
         selectPart(0);
     g_exportMsg = "Aperto: " + path + " (" + std::to_string(g_world.parts.size()) + " parti"
-        + (g_friends.empty() ? "" : (", " + std::to_string(g_friends.size()) + " amici")) + ")";
+        + (g_friends.empty() ? "" : (", " + std::to_string(g_friends.size()) + " amici"))
+        + (integrityFixes > 0 ? (", " + std::to_string(integrityFixes) + " fix integrita'") : "")
+        + ")";
     glfwSetWindowTitle(glfwGetCurrentContext(),
         (std::string(kAppBrand) + " - " + g_world.placeName).c_str());
     return true;
@@ -617,11 +625,16 @@ static bool publishCurrentGame() {
         }
         savePublishedGamesList(g_games);
         refreshGamesList();
-        // Se e' configurato un server dei giochi, il gioco appena pubblicato
-        // gli viene spedito: da li' lo vedranno anche gli altri dispositivi,
-        // invece di restare chiuso dentro questo computer.
-        if (g_menu.gameServer[0])
-            blk::remotegames::uploadGame(g_menu.gameServer, id, pkgDir);
+        // Con GamesHost locale il pacchetto e' gia' su HTTP (cartella games/).
+        // PUT serve solo verso un host esterno (blocky_hostd su un altro PC).
+        {
+            const std::string gs = g_menu.gameServer;
+            const bool selfHost = gs.empty()
+                || gs.rfind("127.0.0.1", 0) == 0
+                || gs.rfind("localhost", 0) == 0;
+            if (!selfHost)
+                blk::remotegames::uploadGame(gs, id, pkgDir);
+        }
 
         if (fileExistsPath(bbc))
             g_publishMsg += " · Safe Bytecode (.bbc) sigillato";

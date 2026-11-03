@@ -256,7 +256,7 @@ static void drawModelAnimWindows() {
         {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p0 = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
+            float w = std::max(1.f, ImGui::GetContentRegionAvail().x);
             float h = 36.f;
             ImGui::InvisibleButton("##dope", {w, h});
             ImVec2 p1 = {p0.x + w, p0.y + h};
@@ -335,7 +335,7 @@ static void drawModelAnimWindows() {
                 m.position = k.position;
             if (ImGui::DragFloat3("Rotation", &k.rotation.x, 1.f))
                 m.rotation = k.rotation;
-            if (ImGui::DragFloat3("Scale", &k.scale.x, 0.05f, 0.05f, 80.f))
+            if (ImGui::DragFloat3("Scale", &k.scale.x, 0.05f, 0.01f, 100000.f))
                 m.scale = k.scale;
 
             if (ImGui::Button("Copia")) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AnimTrack.h"
+#include "Humanoid.h"
 #include "ModelAnim.h"
 #include "PartMaterial.h"
 #include "PartShape.h"
@@ -13,16 +14,35 @@
 #include <string>
 #include <vector>
 
-enum class ScriptType : int { Legacy = 0, Server = 1, Client = 2 };
+// Script = server/host · LocalScript = client · ModuleScript = solo require
+// Legacy = compat vecchi place (gira ovunque come prima).
+enum class ScriptType : int {
+    Legacy = 0,
+    Server = 1,       // Script
+    Client = 2,       // LocalScript
+    ModuleScript = 3
+};
+
+inline const char* scriptTypeLabel(ScriptType t) {
+    switch (t) {
+    case ScriptType::Server: return "Script (Server)";
+    case ScriptType::Client: return "LocalScript (Client)";
+    case ScriptType::ModuleScript: return "ModuleScript";
+    default: return "Legacy (compat)";
+    }
+}
 
 struct WorkspacePart {
     std::string name = "Part";
+    // ID stabile per replica rete (Host lo assegna). 0 = non ancora in rete.
+    uint32_t netId = 0;
     glm::vec3 position{0};
     glm::vec3 size{4, 1, 2};
     glm::vec3 rotation{0};
     glm::vec3 color{0.64f, 0.64f, 0.64f};
-    bool anchored = true;
-    bool canCollide = true;
+#define PART_PROP(T, field, luaName, jsonKey, def, mn, mx, help) T field = def;
+#include "PartProps.def"
+#undef PART_PROP
     bool useStud = true;
     PartShape shape = PartShape::Block;
     PartMaterial material = PartMaterial::Plastic;
@@ -35,6 +55,11 @@ struct WorkspacePart {
     float maxHealth = 100.f;
     bool boomOnTouch = false;
     float boomAutoSecs = 0.f;
+    // Hierarchy Workspace: -1 = figlio diretto di Workspace; altrimenti indice Part padre.
+    int parentIndex = -1;
+    // Model (Ctrl+G) di cui fa parte: id stabile di PartGroup, 0 = nessuno.
+    // Un id e non un indice: cancellare altre part non lo sposta.
+    int groupId = 0;
     std::string script;
     ScriptType scriptType = ScriptType::Legacy;
 
@@ -76,8 +101,79 @@ struct WorkspaceModel {
     std::map<std::string, std::string> clipAlias;
     bool rigged = false;
     bool canCollide = false;
+    // Studio 2020: PrimaryPart + Pivot (WorldPivot ≈ position + pivotOffset).
+    int primaryPart = -1;          // index in DataModel::parts, -1 = nessuno
+    glm::vec3 pivotOffset{0.f};
     std::string script;
     ScriptType scriptType = ScriptType::Legacy;
+};
+
+// Model di Roblox Studio (Ctrl+G): un contenitore di part, annidabile. Le
+// part vi appartengono tramite WorkspacePart::groupId; la logica e' in
+// PartGroups.h.
+struct PartGroup {
+    int id = 0;                 // >0, stabile per tutta la vita del place
+    std::string name = "Model";
+    int parent = 0;             // Model che lo contiene, 0 = Workspace
+};
+
+// Vincolo fra due Part. Il nome resta WeldConstraint (API e finestre gia'
+// esistenti), ma ora copre i vincoli principali di Roblox; li simula Blocky
+// Physics (Jolt), vedi BlockyPhysics::syncJoints.
+enum class ConstraintKind : int {
+    Weld = 0,    // fisse fra loro
+    Hinge,       // ruotano attorno a un asse (porte, pendoli, ruote)
+    Rope,        // stanno entro una distanza massima
+    Spring,      // tornano alla distanza di riposo (molla)
+    Rod,         // distanza fissa (asta rigida)
+    Count
+};
+
+inline const char* constraintKindName(ConstraintKind k) {
+    switch (k) {
+    case ConstraintKind::Weld:   return "WeldConstraint";
+    case ConstraintKind::Hinge:  return "HingeConstraint";
+    case ConstraintKind::Rope:   return "RopeConstraint";
+    case ConstraintKind::Spring: return "SpringConstraint";
+    case ConstraintKind::Rod:    return "RodConstraint";
+    case ConstraintKind::Count:  break;
+    }
+    return "WeldConstraint";
+}
+
+struct WeldConstraint {
+    std::string name = "WeldConstraint";
+    int part0 = -1;
+    int part1 = -1;
+    bool enabled = true;
+    // Offset di part1 rispetto a part0 (calcolato alla creazione).
+    glm::vec3 relPos{0.f};
+    glm::vec3 relRot{0.f};
+
+    ConstraintKind kind = ConstraintKind::Weld;
+    float length = 0.f;        // Rope/Rod/Spring, stud. 0 = la distanza all'avvio
+    float stiffness = 3.f;     // Spring: frequenza in Hz (piu' alta = piu' dura)
+    float damping = 0.3f;      // Spring: 0 = oscilla a lungo, 1 = si ferma subito
+    glm::vec3 pivot{0.f};      // Hinge: punto della cerniera, rispetto a part0 (suo spazio locale)
+    glm::vec3 axis{0, 1, 0};   // Hinge: asse, nello spazio locale di part0
+};
+
+// Instance condivisa (ReplicatedStorage / ServerStorage / SSS): Folder,
+// ModuleScript, RemoteEvent/Function, Script — hierarchy leggera con parentIndex.
+enum class SharedService : int {
+    ReplicatedStorage = 0,
+    ServerStorage = 1,
+    ServerScriptService = 2,
+};
+
+struct SharedInstance {
+    std::string name = "Instance";
+    // Folder | ModuleScript | RemoteEvent | RemoteFunction | Script | LocalScript
+    std::string className = "Folder";
+    SharedService service = SharedService::ReplicatedStorage;
+    int parentIndex = -1; // -1 = radice del service; altrimenti indice in DataModel::instances
+    std::string source;   // ModuleScript / Script source
+    ScriptType scriptType = ScriptType::ModuleScript;
 };
 
 struct WorkspaceLabel {
@@ -95,11 +191,32 @@ struct WorkspaceLabel {
     glm::vec3 bgColor{0.f, 0.f, 0.f};
     float bgTransparency = 0.35f;
     bool visible = true;
+    // UI hierarchy: -1 = ScreenGui root; altrimenti indice label padre (Frame).
+    int parentIndex = -1;
+    int layoutOrder = 0;
+    float scrollY = 0.f; // ScrollingFrame
+    // BillboardGui / SurfaceGui: part di ancoraggio (-1 = schermo/ancoraggio 2D).
+    int adorneePart = -1;
+    float studsOffsetY = 2.5f;
     std::string script;
     ScriptType scriptType = ScriptType::Legacy;
 
     bool isButton() const {
-        return className == "TextButton" || className == "Button";
+        return className == "TextButton" || className == "Button"
+            || className == "ImageButton";
+    }
+    bool isFrame() const {
+        return className == "Frame" || className == "ScrollingFrame";
+    }
+    bool isImage() const {
+        return className == "ImageLabel" || className == "ImageButton";
+    }
+    bool isLayout() const {
+        return className == "UIListLayout" || className == "UIGridLayout"
+            || className == "UIPadding";
+    }
+    bool isWorldGui() const {
+        return className == "BillboardGui" || className == "SurfaceGui";
     }
 };
 
@@ -156,6 +273,11 @@ struct BackpackItem {
     glm::vec3 gripOffset{0.f};
     glm::vec3 gripRotation{0.f};   // gradi, X Y Z
     float     gripScale = 1.f;
+
+    // Parti del corpo mentre l item e equipaggiato. Vuoto = solo il default
+    // del braccio destro (kEquippedArmHoldDeg). Pieno = quelle parti usano
+    // questa posa al posto della camminata / salto.
+    std::vector<HoldPartPose> holdPose;
 };
 
 inline glm::mat4 partRotationMatrix(const glm::vec3& rotDeg) {
@@ -166,10 +288,21 @@ inline glm::mat4 partRotationMatrix(const glm::vec3& rotDeg) {
     return r;
 }
 
+inline glm::vec3 partHitboxSize(const WorkspacePart& p) {
+    return glm::max(p.size * glm::vec3(p.hitboxScaleX, p.hitboxScaleY, p.hitboxScaleZ),
+                    glm::vec3(0.05f));
+}
+
 inline glm::mat4 partModelMatrix(const WorkspacePart& p) {
     return glm::translate(glm::mat4(1.f), p.position)
          * partRotationMatrix(p.rotation)
          * glm::scale(glm::mat4(1.f), p.size);
+}
+
+inline glm::mat4 partHitboxMatrix(const WorkspacePart& p) {
+    return glm::translate(glm::mat4(1.f), p.position)
+         * partRotationMatrix(p.rotation)
+         * glm::scale(glm::mat4(1.f), partHitboxSize(p));
 }
 
 class DataModel {
@@ -180,6 +313,10 @@ public:
     std::vector<WorkspaceLabel> labels;
     std::vector<WorkspaceFriend> friends;
     std::vector<BackpackItem> backpack;
+    std::vector<WeldConstraint> welds;
+    std::vector<SharedInstance> instances;
+    std::vector<PartGroup> groups;
+    int nextGroupId = 1;
     static constexpr int kHotbarSlots = 9;
     int equippedBackpack = -1;
     SpawnLocation spawn;
@@ -190,9 +327,60 @@ public:
         labels.clear();
         friends.clear();
         backpack.clear();
+        welds.clear();
+        instances.clear();
+        groups.clear();
+        nextGroupId = 1;
         equippedBackpack = -1;
         placeName = "Baseplate";
         spawn = SpawnLocation{};
+    }
+
+    int findSharedChild(SharedService svc, int parentIdx, const std::string& name) const {
+        for (int i = 0; i < (int)instances.size(); ++i) {
+            const auto& it = instances[i];
+            if (it.service == svc && it.parentIndex == parentIdx && it.name == name)
+                return i;
+        }
+        return -1;
+    }
+
+    SharedInstance& addShared(SharedService svc, const std::string& className,
+                              const std::string& name, int parentIdx = -1) {
+        SharedInstance s;
+        s.service = svc;
+        s.className = className.empty() ? "Folder" : className;
+        s.name = name.empty() ? s.className : name;
+        s.parentIndex = parentIdx;
+        if (s.className == "ModuleScript")
+            s.scriptType = ScriptType::ModuleScript;
+        else if (s.className == "LocalScript")
+            s.scriptType = ScriptType::Client;
+        else if (s.className == "Script")
+            s.scriptType = ScriptType::Server;
+        instances.push_back(std::move(s));
+        return instances.back();
+    }
+
+    int findPartChild(int parentIdx, const std::string& name) const {
+        for (int i = 0; i < (int)parts.size(); ++i) {
+            if (parts[i].parentIndex == parentIdx && parts[i].name == name)
+                return i;
+        }
+        return -1;
+    }
+
+    WeldConstraint& addWeld(int a, int b) {
+        WeldConstraint w;
+        w.name = "WeldConstraint" + std::to_string(welds.size() + 1);
+        w.part0 = a;
+        w.part1 = b;
+        if (a >= 0 && a < (int)parts.size() && b >= 0 && b < (int)parts.size()) {
+            w.relPos = parts[b].position - parts[a].position;
+            w.relRot = parts[b].rotation - parts[a].rotation;
+        }
+        welds.push_back(w);
+        return welds.back();
     }
 
     BackpackItem& addBackpackItem(const std::string& name, int hue = 0,
@@ -279,6 +467,127 @@ public:
         addPart("PadB", {12, 1, 0}, {10, 2, 10}, {0.9f, 0.35f, 0.2f});
         spawn.position = {0, 0, 16};
         addLabel("ArenaTitle", "ARENA", 0.5f, 0.08f, {1.f, 0.55f, 0.25f});
+    }
+
+    /** FPS kit: arena + hitscan pistol (CombatService) — no C++ edits needed. */
+    void loadFpsKitPlace() {
+        loadArenaPlace();
+        placeName = "FPS Kit";
+        addBackpackItem("Pistola", 4, BackpackTool::Pistol);
+        WorkspacePart& gun = addPart("GunScript", {0, 1, 14}, {2, 1, 2}, {0.15f, 0.15f, 0.18f});
+        gun.scriptType = ScriptType::Server;
+        gun.script =
+R"LUA(local Combat = game:GetService("CombatService")
+local UIS = game:GetService("UserInputService")
+local cd = 0
+print("FPS Kit: click sinistro per sparare (hitscan)")
+
+game.RunService.Heartbeat:Connect(function(dt)
+    cd = math.max(0, cd - dt)
+    if cd > 0 then return end
+    if not UIS.IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
+    cd = 0.18
+    local origin = Humanoid.GetPosition() + Vector3.new(0, 1.6, 0)
+    local look = Humanoid.GetLook()
+    local hit = workspace:Raycast(origin, look, 120)
+    if hit and hit.Instance then
+        Combat.Damage(hit.Instance.Name, 25)
+        game.Particles:Sparks(hit.Position, 5)
+        print("Hit " .. hit.Instance.Name)
+    else
+        Combat.Shoot("bullet", origin.x, origin.y, origin.z,
+            look.x * 80, look.y * 80, look.z * 80, 1.2, 0.2)
+    end
+    Camera.Shake(1.2, 0.06)
+end)
+)LUA";
+        WorkspacePart& dummy = addPart("TargetDummy", {0, 3, -10}, {3, 6, 3}, {0.9f, 0.25f, 0.25f});
+        dummy.canDestroy = true;
+        dummy.health = 100.f;
+        dummy.maxHealth = 100.f;
+        addLabel("FpsHint", "LMB = spara · TargetDummy = bersaglio", 0.5f, 0.14f, {1.f, 0.85f, 0.4f});
+    }
+
+    /** Tycoon: pads give Coins via CurrencyService. */
+    void loadTycoonKitPlace() {
+        clear();
+        placeName = "Tycoon Kit";
+        addBaseplate({100, 2, 100}, {0.22f, 0.55f, 0.28f});
+        spawn.position = {0, 0, 12};
+        addPart("Dropper", {0, 4, -8}, {6, 2, 6}, {0.35f, 0.55f, 0.95f});
+        WorkspacePart& pad = addPart("CoinPad", {0, 0.6f, 0}, {8, 1.2f, 8}, {1.f, 0.85f, 0.2f});
+        pad.scriptType = ScriptType::Server;
+        pad.script =
+R"LUA(local Currency = game:GetService("CurrencyService")
+local Inventory = game:GetService("InventoryService")
+local last = -10
+print("Tycoon Kit: resta sul pad dorato per guadagnare Coins")
+
+part.Touched:Connect(function()
+    local t = 0
+    if tick then t = tick() elseif os and os.clock then t = os.clock() end
+    if t - last < 0.6 then return end
+    last = t
+    local n = Currency.Add("Coins", 5)
+    Inventory.Add("coin", "Coin", 1)
+    game.Particles:Coins(part.Position, 4)
+    print("Coins: " .. tostring(n))
+end)
+)LUA";
+        WorkspacePart& shop = addPart("ShopPad", {12, 0.6f, 0}, {6, 1.2f, 6}, {0.55f, 0.35f, 0.95f});
+        shop.scriptType = ScriptType::Server;
+        shop.script =
+R"LUA(local Currency = game:GetService("CurrencyService")
+part.Touched:Connect(function()
+    if Currency.Spend("Coins", 25) then
+        Backpack.Give("Sword")
+        print("Comprato Sword per 25 Coins")
+    else
+        print("Servono 25 Coins")
+    end
+end)
+)LUA";
+        addLabel("TycoonTitle", "TYCOON — pad oro = Coins · viola = shop", 0.5f, 0.10f, {1.f, 0.92f, 0.4f});
+    }
+
+    /** Survival: spawn hostile NPC + hunger/inventory loop. */
+    void loadSurvivalKitPlace() {
+        clear();
+        placeName = "Survival Kit";
+        addBaseplate({120, 2, 120}, {0.28f, 0.48f, 0.30f});
+        spawn.position = {0, 0, 10};
+        for (int i = 0; i < 5; ++i)
+            addPart("Rock" + std::to_string(i),
+                {(float)(i * 7 - 14), 1.5f, -6.f}, {3, 3, 3}, {0.45f, 0.45f, 0.48f});
+        WorkspacePart& spawner = addPart("MobDirector", {0, 1, 8}, {2, 1, 2}, {0.2f, 0.7f, 0.3f});
+        spawner.scriptType = ScriptType::Server;
+        spawner.script =
+R"LUA(local Npc = game:GetService("NpcService")
+local Inventory = game:GetService("InventoryService")
+local Quests = game:GetService("QuestService")
+Quests.Start("survive1", "Sopravvivi e raccogli drop", 0)
+Quests.AddStep("survive1", "loot", "Raccogli un drop")
+Inventory.Add("wood", "Wood", 3)
+print("Survival Kit: zombie in arrivo — Mobs.Hurt / Pickup")
+
+task.spawn(function()
+    task.wait(1)
+    Npc.Spawn("zombie", 8, 1, -12)
+    Npc.Spawn("pig", -10, 1, -8)
+    print("NPC spawnati: " .. tostring(Npc.Count()))
+end)
+
+game.RunService.Heartbeat:Connect(function()
+    local pos = Humanoid.GetPosition()
+    local drop = Npc.Pickup(pos.x, pos.y, pos.z, 2.5)
+    if drop then
+        Inventory.Add(drop.id, drop.id, drop.count)
+        Quests.Advance("survive1", "loot")
+        print("Loot: " .. drop.id)
+    end
+end)
+)LUA";
+        addLabel("SurvTitle", "SURVIVAL — NPC + inventario + quest", 0.5f, 0.10f, {0.55f, 1.f, 0.55f});
     }
 
     void loadParkPlace() {

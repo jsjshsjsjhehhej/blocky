@@ -5,6 +5,9 @@
 // main.cpp (g_selectedPart, g_selectedModel, g_world, ecc.). Compila solo
 // se incluso da main.cpp esattamente in questo punto.
 
+#include "engine/BrickColor.h"
+#include <cmath>
+
 static bool rayHitAabb(const glm::vec3& o, const glm::vec3& d,
                        const glm::vec3& center, const glm::vec3& size, float& tOut) {
     glm::vec3 half = size * 0.5f;
@@ -116,39 +119,62 @@ static void selectSpawn() {
 }
 
 static void drawPartColorPicker(glm::vec3& color) {
-    ImGui::TextColored({0.15f, 0.55f, 0.95f, 1.f}, "Colore");
+    ImGui::TextColored({0.15f, 0.55f, 0.95f, 1.f}, "BrickColor");
+    const brickcolor::Entry* match = brickcolor::nearest(color);
+    ImGui::TextDisabled("Corrente ≈ %s  (#%d)", match ? match->name : "?", match ? match->number : 0);
+
     ImGui::ColorEdit3("##partcolor", &color.x,
         ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel
         | ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
-    ImGui::ColorEdit3("RGB", &color.x, ImGuiColorEditFlags_Float);
+    if (ImGui::ColorEdit3("RGB", &color.x, ImGuiColorEditFlags_Float))
+        markPlaceDirty();
 
-    ImGui::TextDisabled("Preset:");
-    struct Swatch { const char* name; glm::vec3 c; };
-    static const Swatch kSwatches[] = {
-        {"Bianco",  {0.95f, 0.95f, 0.97f}},
-        {"Grigio",  {0.64f, 0.64f, 0.64f}},
-        {"Nero",    {0.12f, 0.12f, 0.14f}},
-        {"Rosso",   {0.90f, 0.18f, 0.18f}},
-        {"Arancio", {0.95f, 0.50f, 0.12f}},
-        {"Giallo",  {0.95f, 0.85f, 0.15f}},
-        {"Verde",   {0.22f, 0.72f, 0.32f}},
-        {"Cyan",    {0.15f, 0.78f, 0.85f}},
-        {"Blu",     {0.18f, 0.45f, 0.92f}},
-        {"Viola",   {0.55f, 0.28f, 0.85f}},
-        {"Rosa",    {0.95f, 0.45f, 0.70f}},
-        {"Marrone", {0.55f, 0.32f, 0.18f}},
-    };
-    for (int i = 0; i < (int)(sizeof(kSwatches) / sizeof(kSwatches[0])); ++i) {
-        if (i % 6 != 0) ImGui::SameLine();
+    static char filter[64] = {};
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##bcfilter", "Cerca colore (Bright red, Lime…)", filter, sizeof(filter));
+
+    int n = 0;
+    const brickcolor::Entry* all = brickcolor::palette(&n);
+    const float cell = 22.f;
+    const int cols = 10;
+    ImGui::BeginChild("##brickpalette", {0.f, 168.f}, true,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    int shown = 0;
+    for (int i = 0; i < n; ++i) {
+        if (!brickcolor::nameContains(all[i].name, filter)) continue;
+        if (shown % cols != 0) ImGui::SameLine(0.f, 3.f);
         ImGui::PushID(i);
-        ImVec4 col{kSwatches[i].c.x, kSwatches[i].c.y, kSwatches[i].c.z, 1.f};
-        if (ImGui::ColorButton(kSwatches[i].name, col, ImGuiColorEditFlags_NoTooltip, {28, 22}))
-            color = kSwatches[i].c;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kSwatches[i].name);
+        glm::vec3 lin = brickcolor::toLinear(all[i]);
+        ImVec4 col{lin.x, lin.y, lin.z, 1.f};
+        const bool selected = match && match->number == all[i].number
+            && std::fabs(color.x - lin.x) < 0.02f
+            && std::fabs(color.y - lin.y) < 0.02f
+            && std::fabs(color.z - lin.z) < 0.02f;
+        ImGuiColorEditFlags flags = ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop;
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Border, {1.f, 1.f, 1.f, 1.f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.f);
+        }
+        if (ImGui::ColorButton(all[i].name, col, flags, {cell, cell})) {
+            color = lin;
+            markPlaceDirty();
+        }
+        if (selected) {
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\nRGB %d %d %d · #%d",
+                all[i].name, all[i].r, all[i].g, all[i].b, all[i].number);
         ImGui::PopID();
+        ++shown;
     }
+    if (shown == 0)
+        ImGui::TextDisabled("Nessun colore per \"%s\"", filter);
+    ImGui::EndChild();
+    ImGui::TextDisabled("%d colori · click = applica alla Part", n);
 }
 
 static void selectModel(int idx) {
@@ -280,7 +306,10 @@ static void confirmBackpackOffer(bool yes) {
     g_backpackOfferPath.clear();
 }
 
+static void bindPhysBridgeToLua(); // ScriptsAndPhysics.h
+
 static void bindLuaServices() {
+    bindPhysBridgeToLua();
     g_lua.soundService = &g_sounds;
     g_lua.lighting = &g_lighting;
     g_lua.animator = &g_animator;
@@ -292,6 +321,45 @@ static void bindLuaServices() {
     g_lua.cameraShake = &triggerCameraShake;
     g_lua.playerPos = &g_playerPos;
     g_lua.playerYaw = &g_playerYaw;
+    g_lua.tags = &g_tag;
+    g_lua.classifica = &g_classifica;
+    g_lua.proximity = &g_prossimita;
+    g_lua.cameraFov = &g_cam.fov;
+    g_lua.firstPersonFlag = &g_firstPerson;
+    const bool inPlay = (g_screen == AppScreen::Playing)
+        || (g_screen == AppScreen::Studio && g_studioTesting);
+    g_lua.runIsStudio = (g_screen == AppScreen::Studio && !g_studioTesting);
+    g_lua.runIsClient = inPlay;
+    g_lua.runIsServer = (g_net.role == NetRole::Host || g_net.role == NetRole::Offline);
+    g_lua.voxelRaycast = [](const glm::vec3& origin, const glm::vec3& dir, float maxDist,
+                            LuaRuntime::VoxelHit& out) -> bool {
+        if (g_terrain.empty()) return false;
+        Terrain::Hit h = g_terrain.raycast(origin, dir, maxDist);
+        if (!h.ok) return false;
+        out.ok = true;
+        out.pos = h.pos;
+        out.normal = glm::vec3((float)h.nx, (float)h.ny, (float)h.nz);
+        out.dist = h.t;
+        out.block = h.id;
+        out.material = Terrain::enumMaterialName(h.id);
+        return true;
+    };
+    g_lua.getAimRay = [](glm::vec3& o, glm::vec3& d) -> bool {
+        GLFWwindow* win = glfwGetCurrentContext();
+        if (!win) return false;
+        double mx = 0, my = 0;
+        if (g_playCursorLocked) {
+            mx = (double)g_w * 0.5;
+            my = (double)g_h * 0.5;
+        } else {
+            glfwGetCursorPos(win, &mx, &my);
+        }
+        screenToRay((float)mx, (float)my, g_lastView, g_lastProj, o, d);
+        if (!std::isfinite(o.x) || !std::isfinite(o.y) || !std::isfinite(o.z)
+            || !std::isfinite(d.x) || !std::isfinite(d.y) || !std::isfinite(d.z))
+            return false;
+        return glm::length(d) > 1e-6f;
+    };
 }
 
 static void applyModelAnimSample(WorkspaceModel& m, float t) {
@@ -403,11 +471,56 @@ static void updateModelAnimPlayback(float dt) {
     }
 }
 
+// Snap/grid early — GizmoSystem needs studioSnap*Step before PartPrefabs UI.
+static bool  g_studioSnapEnabled = true;
+static float g_studioSnapMove = 0.25f;
+static float g_studioSnapRotate = 5.f;
+static float g_studioSnapScale = 0.25f;
+static bool  g_studioLocalSpace = false;
+static bool  g_studioGridVisible = true;
+static float g_studioGridSize = 4.f;
+static bool  g_viewIsolate = false;
+static int   g_isolatePart = -1;
+static bool  g_viewWireframe = false;
+static bool  g_viewCollision = false;
+static bool  g_showCommandBar = true;
+// Terrain brush (Studio 2020) — state early; paint fn in Studio2020Ui.h
+static bool  g_terrainToolActive = false;
+static bool  g_terrainBrushErase = false;
+static int   g_terrainBrushMat = 1; // Terrain::Grass
+static int   g_terrainBrushRadius = 1;
+static void studioTerrainPaintAtMouse(float mx, float my, bool erase);
+
+static bool studioGizmoShiftKey() {
+    return glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS
+        || glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+}
+static float studioSnapMoveStep() {
+    if (!g_studioSnapEnabled) return 0.f;
+    if (studioGizmoShiftKey()) return std::max(0.05f, g_studioSnapMove * 0.2f);
+    return g_studioSnapMove;
+}
+static float studioSnapRotateStep() {
+    if (!g_studioSnapEnabled) return 0.f;
+    if (studioGizmoShiftKey()) return 1.f;
+    return g_studioSnapRotate;
+}
+static float studioSnapScaleStep() {
+    if (!g_studioSnapEnabled) return 0.f;
+    if (studioGizmoShiftKey()) return std::max(0.05f, g_studioSnapScale * 0.4f);
+    return g_studioSnapScale;
+}
+
 #include "main_ui/GizmoSystem.h"
 #include "main_ui/WorldEditingTools.h"
 #include "main_ui/PartPrefabs.h"
+#include "main_ui/UserToolbox.h"
 
 #include "main_ui/ScriptsAndPhysics.h"
+// StudioFeaturesUi.h / StudioSelectionUi.h (inclusi dopo questo file).
+static void studioMultiClear();
+static void studioBeginMarquee(float mx, float my);
+
 static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
 #ifdef __ANDROID__
     // Ogni volta che un dito si appoggia, il punto di partenza dello sguardo
@@ -471,11 +584,14 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
             glfwGetCursorPos(win, &mx, &my);
             int axis = 0, sign = 0;
             if (g_tool == StudioTool::Scale && pickScaleHandle((float)mx, (float)my, axis, sign)) {
-                beginScaleDrag(axis, sign);
+                beginScaleDrag(axis, sign, (float)mx, (float)my);
             } else if (g_tool == StudioTool::Move && pickMoveHandle((float)mx, (float)my, axis)) {
                 beginMoveDrag(axis, (float)mx, (float)my);
             } else if (g_tool == StudioTool::Rotate && pickRotateHandle((float)mx, (float)my, axis)) {
                 beginRotateDrag(axis, (float)mx, (float)my);
+            } else if (g_terrainToolActive) {
+                studioTerrainPaintAtMouse((float)mx, (float)my, g_terrainBrushErase
+                    || (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS));
             } else {
                 int labHit = pickScreenLabelAt((float)mx, (float)my);
                 if (labHit >= 0) {
@@ -483,7 +599,17 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
                     beginLabelDrag(labHit, (float)mx, (float)my);
                 } else {
                     ScenePick hit = pickSceneAtMouse((float)mx, (float)my);
-                    applyScenePick(hit);
+                    if (hit.kind == PickKind::None) {
+                        // Clic sul vuoto: deseleziona tutto (Ctrl tiene la
+                        // selezione) e parte la selezione a riquadro.
+                        if (!ImGui::GetIO().KeyCtrl) {
+                            applyScenePick(hit);
+                            studioMultiClear();
+                        }
+                        studioBeginMarquee((float)mx, (float)my);
+                    } else {
+                        applyScenePick(hit);
+                    }
                 }
             }
         }

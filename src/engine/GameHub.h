@@ -9,6 +9,9 @@
 #include <vector>
 
 #include "DataModel.h"
+#include "PartConstraints.h"
+#include "PartGroups.h"
+#include "PartProps.h"
 #include "Humanoid.h"
 #include "LightingService.h"
 
@@ -301,8 +304,12 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         jsonFindVec3(json, "size", pos, p.size);
         jsonFindVec3(json, "rot", pos, p.rotation);
         jsonFindVec3(json, "color", pos, p.color);
-        p.anchored = jsonFindBool(json, "anchored", pos, true);
-        p.canCollide = jsonFindBool(json, "canCollide", pos, true);
+        {
+            // Fine dell'oggetto di questa part = inizio della successiva (lo
+            // script puo' contenere '}', quindi non si usa quella).
+            size_t next = json.find("{\"name\"", pos + 1);
+            partprops::readAll(json, pos, std::min(next, arrEnd), p);
+        }
         {
             std::string sh = jsonFindStr(json, "shape", pos);
             if (!sh.empty())
@@ -327,11 +334,25 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
             int st = jsonFindInt(json, "scriptType", pos);
             p.scriptType = (st == 1) ? ScriptType::Server
                           : (st == 2) ? ScriptType::Client
+                          : (st == 3) ? ScriptType::ModuleScript
                           : ScriptType::Legacy;
+        }
+        {
+            auto pk = json.find("\"parentIndex\"", pos);
+            if (pk != std::string::npos && pk < end) {
+                p.parentIndex = jsonFindInt(json, "parentIndex", pos);
+                if (p.parentIndex < -1) p.parentIndex = -1;
+            }
+            auto gk = json.find("\"groupId\"", pos);
+            if (gk != std::string::npos && gk < end)
+                p.groupId = std::max(0, jsonFindInt(json, "groupId", pos));
         }
         dm.parts.push_back(std::move(p));
         pos = end + 1;
     }
+    // Model e vincoli dopo le part: cosi' si possono riparare i riferimenti rotti.
+    partgroups::readJson(json, dm);
+    partconstraints::readJson(json, dm);
 
     size_t labKey = json.find("\"labels\"");
     if (labKey != std::string::npos) {
@@ -390,6 +411,45 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
+    size_t instKey = json.find("\"instances\"");
+    if (instKey != std::string::npos) {
+        size_t iarr = json.find('[', instKey);
+        if (iarr != std::string::npos) {
+            int depth = 0;
+            size_t iarrEnd = iarr;
+            for (size_t i = iarr; i < json.size(); ++i) {
+                if (json[i] == '[') ++depth;
+                else if (json[i] == ']') {
+                    --depth;
+                    if (depth == 0) { iarrEnd = i; break; }
+                }
+            }
+            size_t ipos = iarr;
+            while ((ipos = json.find('{', ipos)) != std::string::npos && ipos < iarrEnd) {
+                size_t end = json.find('}', ipos);
+                if (end == std::string::npos || end > iarrEnd) break;
+                SharedInstance s;
+                s.name = jsonFindStr(json, "name", ipos);
+                s.className = jsonFindStr(json, "className", ipos);
+                if (s.name.empty()) s.name = "Instance";
+                if (s.className.empty()) s.className = "Folder";
+                int svc = jsonFindInt(json, "service", ipos);
+                if (svc < 0 || svc > 2) svc = 0;
+                s.service = (SharedService)svc;
+                s.parentIndex = jsonFindInt(json, "parentIndex", ipos);
+                if (s.parentIndex < -1) s.parentIndex = -1;
+                s.source = jsonFindEscapedStr(json, "source", ipos);
+                int st = jsonFindInt(json, "scriptType", ipos);
+                s.scriptType = (st == 1) ? ScriptType::Server
+                              : (st == 2) ? ScriptType::Client
+                              : (st == 3) ? ScriptType::ModuleScript
+                              : ScriptType::ModuleScript;
+                dm.instances.push_back(std::move(s));
+                ipos = end + 1;
+            }
+        }
+    }
+
     size_t bpKey = json.find("\"backpack\"");
     if (bpKey != std::string::npos) {
         size_t barr = json.find('[', bpKey);
@@ -405,18 +465,63 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
             }
             size_t bpos = barr;
             while ((bpos = json.find('{', bpos)) != std::string::npos && bpos < barrEnd) {
-                size_t end = json.find('}', bpos);
-                if (end == std::string::npos || end > barrEnd) break;
+                // Depth sulle graffe: holdPose ha oggetti annidati, un
+                // find('}') grezzo taglierebbe a meta' l'item.
+                size_t end = bpos;
+                int brace = 0;
+                for (size_t i = bpos; i < barrEnd && i < json.size(); ++i) {
+                    if (json[i] == '{') ++brace;
+                    else if (json[i] == '}') {
+                        --brace;
+                        if (brace == 0) { end = i; break; }
+                    }
+                }
+                if (end <= bpos) break;
                 BackpackItem it;
                 it.id = jsonFindStr(json, "id", bpos);
                 it.name = jsonFindStr(json, "name", bpos);
                 it.iconHue = jsonFindInt(json, "iconHue", bpos);
                 it.tool = (BackpackTool)jsonFindInt(json, "tool", bpos);
-                it.meshPath = jsonFindStr(json, "meshPath", bpos);
-                it.animId = jsonFindStr(json, "animId", bpos);
+                it.meshPath = jsonFindEscapedStr(json, "meshPath", bpos);
+                if (it.meshPath.empty())
+                    it.meshPath = jsonFindStr(json, "meshPath", bpos);
+                it.animId = jsonFindEscapedStr(json, "animId", bpos);
+                if (it.animId.empty())
+                    it.animId = jsonFindStr(json, "animId", bpos);
                 jsonFindVec3(json, "gripOffset", bpos, it.gripOffset);
                 jsonFindVec3(json, "gripRotation", bpos, it.gripRotation);
                 jsonFindFloat(json, "gripScale", bpos, it.gripScale);
+                // holdPose: array di {name,pos,rot} dentro l'item
+                {
+                    size_t hpKey = json.find("\"holdPose\"", bpos);
+                    if (hpKey != std::string::npos && hpKey < end) {
+                        size_t harr = json.find('[', hpKey);
+                        if (harr != std::string::npos && harr < end) {
+                            size_t harrEnd = harr;
+                            int hd = 0;
+                            for (size_t i = harr; i <= end; ++i) {
+                                if (json[i] == '[') ++hd;
+                                else if (json[i] == ']') {
+                                    --hd;
+                                    if (hd == 0) { harrEnd = i; break; }
+                                }
+                            }
+                            size_t hpos = harr;
+                            while ((hpos = json.find('{', hpos)) != std::string::npos
+                                   && hpos < harrEnd) {
+                                size_t hend = json.find('}', hpos);
+                                if (hend == std::string::npos || hend > harrEnd) break;
+                                HoldPartPose hp;
+                                hp.name = jsonFindStr(json, "name", hpos);
+                                jsonFindVec3(json, "pos", hpos, hp.pos);
+                                jsonFindVec3(json, "rot", hpos, hp.rot);
+                                if (!hp.name.empty())
+                                    it.holdPose.push_back(std::move(hp));
+                                hpos = hend + 1;
+                            }
+                        }
+                    }
+                }
                 if (it.name.empty()) it.name = "Item";
                 if (it.id.empty()) it.id = "bp_" + std::to_string(dm.backpack.size());
                 if (it.tool == BackpackTool::None) {
@@ -607,6 +712,7 @@ inline std::vector<GameEntry> loadGameManifest() {
                 int st = jsonFindInt(json, "scriptType", pos);
                 e.scriptType = (st == 1) ? ScriptType::Server
                               : (st == 2) ? ScriptType::Client
+                              : (st == 3) ? ScriptType::ModuleScript
                               : ScriptType::Legacy;
             }
             e.iconPath = jsonFindStr(json, "iconPath", pos);
@@ -665,11 +771,52 @@ inline void mergeGamePackages(std::vector<GameEntry>& games,
     }
 }
 
+/** Risolve un path mesh rispetto alla cartella del place (downloaded/ o games/). */
+inline std::string resolvePackageAssetPath(const std::string& placePath,
+                                           const std::string& assetPath) {
+    if (assetPath.empty()) return {};
+    if (fileExistsPath(assetPath)) return assetPath;
+    if (placePath.empty()) return assetPath;
+
+    size_t slash = placePath.find_last_of("/\\");
+    if (slash == std::string::npos) return assetPath;
+    std::string pkgDir = placePath.substr(0, slash);
+
+    auto tryPath = [](std::string cand) -> std::string {
+        for (char& c : cand) if (c == '\\') c = '/';
+        return fileExistsPath(cand) ? cand : std::string{};
+    };
+
+    // 1) relativo al pacchetto: assets/meshes/foo.glb
+    if (auto hit = tryPath(pkgDir + "/" + assetPath); !hit.empty()) return hit;
+
+    // 2) basename (anche se il place ha ancora C:\Users\...\foo.glb del PC)
+    size_t b = assetPath.find_last_of("/\\");
+    const std::string base = (b == std::string::npos) ? assetPath : assetPath.substr(b + 1);
+    if (!base.empty()) {
+        if (auto hit = tryPath(pkgDir + "/assets/meshes/" + base); !hit.empty()) return hit;
+        if (auto hit = tryPath(pkgDir + "/assets/textures/" + base); !hit.empty()) return hit;
+        if (auto hit = tryPath(pkgDir + "/assets/audio/" + base); !hit.empty()) return hit;
+        if (auto hit = tryPath(pkgDir + "/assets/" + base); !hit.empty()) return hit;
+        if (auto hit = tryPath(pkgDir + "/" + base); !hit.empty()) return hit;
+    }
+    return assetPath;
+}
+
+/** Path relativi del pacchetto (assets/...) → assoluti accanto al place. */
+inline void resolvePackageRelativePaths(DataModel& dm, const std::string& placePath) {
+    for (auto& it : dm.backpack)
+        it.meshPath = resolvePackageAssetPath(placePath, it.meshPath);
+}
+
 inline void applyGamePlace(const GameEntry& game, DataModel& dm,
                            LightingService* lighting = nullptr) {
-    if (game.isPublished && !game.placePath.empty()) {
+    // Basta un placePath (anche da downloaded/): prima si richiedeva
+    // isPublished e sul telefono l'inventario restava vuoto (baseplate).
+    if (!game.placePath.empty()) {
         if (loadPlaceFromJson(game.placePath, dm, lighting)) {
-            dm.placeName = game.title;
+            resolvePackageRelativePaths(dm, game.placePath);
+            if (!game.title.empty()) dm.placeName = game.title;
             return;
         }
     }

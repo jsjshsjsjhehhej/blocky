@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 struct QualityProfile {
@@ -38,6 +39,25 @@ struct QualityProfile {
 
     int   textureBudgetMb = 512;
     bool  aggressiveGc    = false;
+
+    // Auto: LOD distanza + frustum + occlusion (soft-Z) + part piccole.
+    // I flag singoli restano per debug; con autoLod=true sono tutti forzati.
+    bool  autoLod         = true;
+    bool  partLod         = true;
+    bool  frustumCull     = true;
+    bool  occlusionCull   = true;
+    bool  cullSmallParts  = true;
+    int   maxVisibleModels = 96;
+    // Tetto vertici workspace models per frame (GLB/FBX pesanti). Oltre:
+    // i piu' lontani/piccoli saltano. 0 = illimitato.
+    int   maxModelVerts    = 2'500'000;
+    // Preferisci part grandi/vicine quando si sfora maxVisibleParts.
+    bool  priorityPartCull = true;
+
+    /** Lag intenso: abbassa qualita' automaticamente (poi recupera). */
+    bool  autoLagDefense   = true;
+    /** NaN / coordinate assurde / fisica esplosa: riparazione a runtime. */
+    bool  runtimeWorldGuard = true;
 };
 
 inline QualityProfile profileFor(TargetPlatform p) {
@@ -47,66 +67,86 @@ inline QualityProfile profileFor(TargetPlatform p) {
         q.name = "PC High";
         q.msaaSamples = 4;
         q.renderScale = 1.f;
-        q.maxDrawDistance = 900.f;
-        q.maxVisibleParts = 10000;
+        q.maxDrawDistance = 1400.f;
+        q.maxVisibleParts = 28000;
         q.vsync = true;
         q.targetFps = 0; // PC: niente tetto, solo vsync — l'utente ha gia' il controllo
         q.studTextures = true;
-        q.shadows = false;
+        // Ombre sole: flag + occluders (prima solo occluders contava).
+        q.shadows = true;
         q.shadowMapSize = 2048;
         q.shadowOccluders = 8;
         q.postFx = false;
         q.physicsHz = 72.f;
-        q.luaBudgetUs = 5000;
+        q.luaBudgetUs = 8000;
         q.touchUi = false;
         q.uiScale = 1.f;
-        q.textureBudgetMb = 1536;
+        q.textureBudgetMb = 2048;
+        q.maxVisibleModels = 320;
+        q.maxModelVerts = 6'000'000;
+        q.priorityPartCull = true;
+        q.autoLod = true;
+        q.frustumCull = true;
+        q.occlusionCull = true;
+        q.autoLagDefense = true;
+        q.runtimeWorldGuard = true;
         break;
 
     case TargetPlatform::MobileAndroid:
         q.name = "Android Balanced";
         q.mobile = true;
         q.msaaSamples = 0;
-        q.renderScale = 0.85f;
-        q.maxDrawDistance = 220.f;
-        q.maxVisibleParts = 1500;
-        q.vsync = true;
-        q.targetFps = 45; // compromesso caldo/fluido — vedi commento sul campo
+        // Scale un filo piu' basso per sostenere 60 fps su GPU mid-range.
+        q.renderScale = 0.72f;
+        q.maxDrawDistance = 260.f;
+        q.maxVisibleParts = 2800;
+        q.vsync = false; // evita incastri 120Hz→40fps; il cap e' targetFps
+        q.targetFps = 60;
         q.studTextures = true;
+        q.postFx = false;
         q.shadows = false;
         q.shadowOccluders = 0;
         q.skinningGpu = true;
-        q.physicsHz = 30.f;
-        q.luaBudgetUs = 1200;
+        q.physicsHz = 60.f;
+        q.luaBudgetUs = 1800;
         q.touchUi = true;
         q.uiScale = 1.25f;
-        q.textureBudgetMb = 256;
+        q.textureBudgetMb = 384;
         q.aggressiveGc = true;
+        q.maxVisibleModels = 72;
+        q.maxModelVerts = 1'200'000;
+        q.priorityPartCull = true;
+        q.autoLagDefense = true;
+        q.runtimeWorldGuard = true;
         break;
 
     case TargetPlatform::MobileIOS:
         q.name = "iOS Balanced";
+        q.mobile = true;
         q.msaaSamples = 2;
-        q.renderScale = 0.9f;
-        q.maxDrawDistance = 280.f;
-        q.maxVisibleParts = 2000;
+        q.renderScale = 0.85f;
+        q.maxDrawDistance = 320.f;
+        q.maxVisibleParts = 3600;
         q.vsync = true;
-        q.targetFps = 45;
+        q.targetFps = 60;
         q.studTextures = true;
         q.shadowOccluders = 4;
         q.physicsHz = 60.f;
-        q.luaBudgetUs = 1500;
+        q.luaBudgetUs = 2200;
         q.touchUi = true;
         q.uiScale = 1.15f;
-        q.textureBudgetMb = 384;
+        q.textureBudgetMb = 512;
+        q.maxVisibleModels = 96;
+        q.maxModelVerts = 1'800'000;
+        q.priorityPartCull = true;
         break;
 
     case TargetPlatform::PlayStation5:
         q.name = "PS5 Performance";
         q.msaaSamples = 4;
         q.renderScale = 1.f;
-        q.maxDrawDistance = 1000.f;
-        q.maxVisibleParts = 12000;
+        q.maxDrawDistance = 1600.f;
+        q.maxVisibleParts = 36000;
         q.vsync = true;
         q.targetFps = 0;
         q.studTextures = true;
@@ -115,20 +155,24 @@ inline QualityProfile profileFor(TargetPlatform p) {
         q.shadowOccluders = 8;
         q.postFx = true;
         q.physicsHz = 60.f;
-        q.luaBudgetUs = 3000;
+        q.luaBudgetUs = 5000;
         q.touchUi = false;
         q.uiScale = 1.f;
-        q.textureBudgetMb = 2048;
+        q.textureBudgetMb = 3072;
+        q.maxVisibleModels = 400;
+        q.maxModelVerts = 8'000'000;
         break;
 
     default:
         q.name = "Safe Fallback";
         q.msaaSamples = 0;
         q.renderScale = 0.75f;
-        q.maxDrawDistance = 150.f;
-        q.maxVisibleParts = 800;
+        q.maxDrawDistance = 180.f;
+        q.maxVisibleParts = 1200;
         q.shadowOccluders = 0;
         q.targetFps = 30;
+        q.maxVisibleModels = 40;
+        q.maxModelVerts = 600'000;
         break;
     }
     return q;
@@ -143,24 +187,35 @@ inline QualityProfile applyPreset(QualityProfile base, QualityPreset preset) {
     case QualityPreset::Low:
         q.name = "Low";
         q.msaaSamples = 0;
-        q.renderScale = std::min(q.renderScale, 0.7f);
+        q.renderScale = std::min(q.renderScale, 0.65f);
         q.maxDrawDistance *= 0.5f;
-        q.maxVisibleParts = std::min(q.maxVisibleParts, 600);
+        q.maxVisibleParts = std::min(q.maxVisibleParts, q.mobile ? 900 : 2500);
         q.studTextures = false;
         q.shadows = false;
         q.shadowOccluders = 0;
         q.postFx = false;
         q.physicsHz = 30.f;
-        q.targetFps = q.targetFps > 0 ? std::min(q.targetFps, 30) : 30;
+        // Low resta a 30 solo come scudo termico / lag defense.
+        q.targetFps = q.mobile ? 30 : (q.targetFps > 0 ? std::min(q.targetFps, 30) : 30);
+        q.autoLod = true;
+        q.partLod = true;
+        q.frustumCull = true;
+        q.occlusionCull = true;
+        q.cullSmallParts = true;
+        q.priorityPartCull = true;
+        q.maxVisibleModels = std::min(q.maxVisibleModels, q.mobile ? 36 : 96);
+        q.maxModelVerts = std::min(q.maxModelVerts, q.mobile ? 400'000 : 1'500'000);
         break;
     case QualityPreset::Medium:
         q.name = "Medium";
         q.msaaSamples = std::min(q.msaaSamples, 2);
-        q.renderScale = std::min(q.renderScale, 0.9f);
+        q.renderScale = std::min(q.renderScale, q.mobile ? 0.8f : 0.9f);
         q.maxDrawDistance *= 0.75f;
-        q.shadows = false;
-        q.shadowOccluders = std::min(q.shadowOccluders, 4);
-        q.targetFps = q.targetFps > 0 ? std::min(q.targetFps, 45) : 0;
+        q.shadowOccluders = std::min(std::max(q.shadowOccluders, 1), 4);
+        q.shadows = q.shadowOccluders > 0;
+        // Medium su mobile: 60 fps (non piu' tetto a 45).
+        if (q.mobile) q.targetFps = 60;
+        else if (q.targetFps > 0) q.targetFps = std::min(q.targetFps, 60);
         break;
     case QualityPreset::High:
         q.name = "High";
@@ -169,8 +224,18 @@ inline QualityProfile applyPreset(QualityProfile base, QualityPreset preset) {
         if (!q.mobile) {
             q.msaaSamples = std::max(q.msaaSamples, 4);
             q.renderScale = 1.f;
+            q.maxVisibleParts = std::max(q.maxVisibleParts, 32000);
+            q.maxVisibleModels = std::max(q.maxVisibleModels, 360);
+            q.maxModelVerts = std::max(q.maxModelVerts, 7'000'000);
+            q.maxDrawDistance = std::max(q.maxDrawDistance, 1500.f);
+        } else {
+            q.targetFps = 60;
+            q.renderScale = std::min(q.renderScale, 0.9f);
+            q.maxVisibleParts = std::max(q.maxVisibleParts, 3200);
+            q.maxVisibleModels = std::max(q.maxVisibleModels, 88);
         }
         q.shadowOccluders = 8;
+        q.shadows = true;
         break;
     case QualityPreset::Ultra:
         q.name = "Ultra";
@@ -178,13 +243,16 @@ inline QualityProfile applyPreset(QualityProfile base, QualityPreset preset) {
             q.msaaSamples = 8;
             q.renderScale = 1.f;
         }
-        q.maxDrawDistance = std::max(q.maxDrawDistance, 1000.f);
-        q.maxVisibleParts = std::max(q.maxVisibleParts, 10000);
+        q.maxDrawDistance = std::max(q.maxDrawDistance, 2000.f);
+        q.maxVisibleParts = std::max(q.maxVisibleParts, 48000);
+        q.maxVisibleModels = std::max(q.maxVisibleModels, 512);
+        q.maxModelVerts = std::max(q.maxModelVerts, 12'000'000);
         q.shadows = true;
         q.shadowMapSize = std::max(q.shadowMapSize, 4096);
         q.shadowOccluders = 8;
         q.postFx = true;
         q.targetFps = 0;
+        q.luaBudgetUs = std::max(q.luaBudgetUs, 10000);
         break;
     default: break;
     }

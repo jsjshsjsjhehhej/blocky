@@ -4,6 +4,9 @@
 // main.cpp (g_world, g_selectedLabel, g_labelDrag*, ecc.). Compila solo se
 // incluso da main.cpp esattamente in questo punto.
 
+#include <algorithm>
+#include <vector>
+
 static bool worldToScreen(const glm::vec3& world, float& outX, float& outY) {
     glm::vec4 clip = g_lastProj * g_lastView * glm::vec4(world, 1.f);
     if (clip.w <= 0.001f) return false;
@@ -271,9 +274,68 @@ static void updateGuiButtonHover(float mx, float my) {
         g_uiHoverLabel = hit;
 }
 
+/** UIListLayout: impila i figli di ogni Frame (parentIndex) in verticale. */
+static void applyUiListLayouts() {
+    for (int fi = 0; fi < (int)g_world.labels.size(); ++fi) {
+        const auto& frame = g_world.labels[fi];
+        if (!frame.isFrame() || !frame.visible) continue;
+        bool hasList = false;
+        for (const auto& l : g_world.labels) {
+            if (l.parentIndex == fi && l.className == "UIListLayout") {
+                hasList = true;
+                break;
+            }
+        }
+        if (!hasList) continue;
+        ImVec2 fmn, fmx;
+        if (!screenLabelRect(frame, fmn, fmx)) continue;
+        std::vector<int> kids;
+        for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+            const auto& c = g_world.labels[i];
+            if (c.parentIndex != fi || c.isLayout() || !c.visible) continue;
+            kids.push_back(i);
+        }
+        std::sort(kids.begin(), kids.end(), [](int a, int b) {
+            return g_world.labels[a].layoutOrder < g_world.labels[b].layoutOrder;
+        });
+        float y = fmn.y + 4.f - (frame.className == "ScrollingFrame" ? frame.scrollY : 0.f);
+        const float pad = 4.f;
+        for (int idx : kids) {
+            auto& c = g_world.labels[idx];
+            float cw = 0.f, ch = 0.f;
+            labelBoxSize(c, cw, ch);
+            if (cw < 1.f) cw = (fmx.x - fmn.x) - 8.f;
+            if (ch < 1.f) ch = 28.f;
+            c.sizeW = cw;
+            c.sizeH = ch;
+            c.anchorX = 0.f;
+            c.anchorY = 0.f;
+            // offset = centro schermo (labelCenter = anchor*res + offset)
+            c.offsetX = fmn.x + 4.f + cw * 0.5f;
+            c.offsetY = y + ch * 0.5f;
+            y += ch + pad;
+        }
+    }
+}
+
 static void drawWorldLabels() {
-    for (int i = 0; i < (int)g_world.labels.size(); ++i)
-        drawScreenUiLabel(g_world.labels[i], i == g_selectedLabel && !g_studioTesting);
+    applyUiListLayouts();
+    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+        auto& l = g_world.labels[i];
+        if (l.isLayout()) continue;
+        if (l.isWorldGui() && l.adorneePart >= 0
+            && l.adorneePart < (int)g_world.parts.size() && l.visible) {
+            const auto& p = g_world.parts[l.adorneePart];
+            glm::vec3 top = p.position;
+            glm::vec3 upLocal(0, p.size.y * 0.5f + l.studsOffsetY, 0);
+            top += glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(upLocal, 0.f));
+            drawBillboardText(top, l.text.c_str(), l.color, l.fontScale,
+                              l.bgTransparency < 0.99f,
+                              i == g_selectedLabel && !g_studioTesting);
+            continue;
+        }
+        drawScreenUiLabel(l, i == g_selectedLabel && !g_studioTesting);
+    }
 }
 
 static void drawSelectedPartLabel() {

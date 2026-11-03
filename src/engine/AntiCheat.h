@@ -346,6 +346,13 @@ inline void acAllowTeleport() {
     antiCheat().hasLast = false;
 }
 
+// Spostamento istantaneo voluto dal motore (salire/scendere da un'auto): il
+// prossimo controllo riparte da qui invece di vederlo come teletrasporto.
+// A differenza del respawn non toglie strike ne' mute.
+inline void acOnLegitimateMove() {
+    antiCheat().hasLast = false;
+}
+
 inline void acOnLegitimateRespawn() {
     auto& ac = antiCheat();
     ac.hasLast = false;

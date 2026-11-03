@@ -34,18 +34,14 @@ static float rayDistToPoint(const glm::vec3& o, const glm::vec3& d, const glm::v
 }
 
 static glm::vec3 partAxisDir(const WorkspacePart& p, int axis) {
-    // partRotationMatrix compone R = Ry * Rx * Rz (Y piu' esterna, Z piu'
-    // interna). L'asse "vero" attorno a cui gira ciascun componente Euler
-    // e' quello ottenuto applicando SOLO le rotazioni piu' esterne di lui
-    // nella composizione — non l'intera R, altrimenti appena un altro asse
-    // e' gia' ruotato la maniglia punta (e trascina) nel verso sbagliato.
-    if (axis == 1) return {0.f, 1.f, 0.f}; // Y: piu' esterna, sempre fissa
-    if (axis == 0) { // X: solo Y le sta "fuori"
-        glm::mat4 ry = glm::rotate(glm::mat4(1.f), glm::radians(p.rotation.y), {0, 1, 0});
-        return glm::normalize(glm::vec3(ry * glm::vec4(1, 0, 0, 0)));
-    }
-    // Z: piu' interna — l'intera R va bene (Rz sul proprio asse locale e' identita').
-    return glm::normalize(glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(0, 0, 1, 0)));
+    // Asse locale X/Y/Z portato in mondo con la stessa R del rendering (Ry*Rx*Rz).
+    // Prima Y restava sempre (0,1,0): con rotazione X/Z la scala misurava sul
+    // mondo sbagliato e tirando per ingrandire la Part si rimpiccioliva.
+    glm::vec3 local(0.f);
+    local[axis] = 1.f;
+    glm::vec3 w = glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(local, 0.f));
+    float len = glm::length(w);
+    return len > 1e-6f ? w / len : local;
 }
 
 static float gizmoRingRadius(const WorkspacePart& p) {
@@ -71,10 +67,26 @@ static glm::mat4 orientAlongZ(glm::vec3 origin, glm::vec3 dir, glm::vec3 scl) {
     return m;
 }
 
+static float scaleHandleDrawSize(const WorkspacePart& p) {
+    float m = std::max(p.size.x, std::max(p.size.y, p.size.z));
+    return std::clamp(m * 0.12f + 0.55f, 0.7f, 2.2f);
+}
+
 static glm::vec3 handleWorldPos(const WorkspacePart& p, int axis, int sign) {
+    float hs = scaleHandleDrawSize(p);
     glm::vec3 local(0);
-    local[axis] = sign * (p.size[axis] * 0.5f + kHandleSize * 0.65f);
+    local[axis] = sign * (p.size[axis] * 0.5f + hs * 0.75f);
     return p.position + glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(local, 0.f));
+}
+
+static bool gizmoWorldToScreen(const glm::vec3& world, float& outX, float& outY) {
+    glm::vec4 clip = g_lastProj * g_lastView * glm::vec4(world, 1.f);
+    if (clip.w <= 0.001f) return false;
+    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    if (ndc.z < -1.f || ndc.z > 1.f) return false;
+    outX = (ndc.x * 0.5f + 0.5f) * (float)g_w;
+    outY = (1.f - (ndc.y * 0.5f + 0.5f)) * (float)g_h;
+    return true;
 }
 
 static glm::vec3 moveHandleTip(const WorkspacePart& p, int axis) {
@@ -97,8 +109,10 @@ static glm::vec3 modelBaseExtent(int idx) {
 }
 
 static WorkspacePart* gizmoPart() {
-    if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size())
+    if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size()) {
+        if (g_world.parts[g_selectedPart].locked) return nullptr;
         return &g_world.parts[g_selectedPart];
+    }
     if (!gizmoOnModel()) return nullptr;
     const auto& m = g_world.models[g_selectedModel];
     g_modelGizmoProxy.position = m.position;
@@ -107,7 +121,9 @@ static WorkspacePart* gizmoPart() {
     return &g_modelGizmoProxy;
 }
 
-static float gizmoMinSize() { return gizmoOnModel() ? 0.02f : 0.5f; }
+static float gizmoMinSize() { return gizmoOnModel() ? 0.02f : 0.05f; }
+/** Nessun tetto pratico: si puo' arrivare a migliaia di stud (anti NaN). */
+static float gizmoMaxSize() { return gizmoOnModel() ? 1.0e5f : 1.0e5f; }
 static bool gizmoSnapSize() { return !gizmoOnModel(); }
 
 static void gizmoCommitToModel() {
@@ -423,16 +439,19 @@ static bool pickScaleHandle(float mx, float my, int& outAxis, int& outSign) {
     const WorkspacePart* pt = gizmoPart();
     if (!pt) return false;
     const auto& p = *pt;
-    glm::vec3 o, d;
-    screenToRay(mx, my, g_lastView, g_lastProj, o, d);
-    float bestT = 1e9f;
+    // Pick in pixel space: i cubetti world da 0.5 stud sono impossibili da
+    // prendere con la camera Studio lontana; 22 px di raggio e' comodo.
+    const float pickR = 22.f;
+    float bestD2 = pickR * pickR;
     bool hit = false;
     for (int axis = 0; axis < 3; ++axis) {
         for (int s = -1; s <= 1; s += 2) {
-            float t = 0.f;
-            glm::vec3 hp = handleWorldPos(p, axis, s);
-            if (rayHitAabb(o, d, hp, glm::vec3(kHandleSize * 1.15f), t) && t < bestT) {
-                bestT = t;
+            float sx = 0.f, sy = 0.f;
+            if (!gizmoWorldToScreen(handleWorldPos(p, axis, s), sx, sy)) continue;
+            float dx = mx - sx, dy = my - sy;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) {
+                bestD2 = d2;
                 outAxis = axis;
                 outSign = s;
                 hit = true;
@@ -499,7 +518,7 @@ static bool pickRotateHandle(float mx, float my, int& outAxis) {
     return hit;
 }
 
-static void beginScaleDrag(int axis, int sign) {
+static void beginScaleDrag(int axis, int sign, float mx, float my) {
     const WorkspacePart* pt = gizmoPart();
     if (!pt) return;
     const auto& p = *pt;
@@ -512,7 +531,10 @@ static void beginScaleDrag(int axis, int sign) {
     g_scaleSign = sign;
     g_scaleStartPos = p.position;
     g_scaleStartSize = p.size;
-    g_scaleStartFace = p.position[axis] + sign * p.size[axis] * 0.5f;
+    g_scaleStartRotMat = partRotationMatrix(p.rotation);
+    g_scaleStartFace = (float)sign * p.size[axis] * 0.5f;
+    g_scaleStartMx = mx;
+    g_scaleStartMy = my;
     g_scaleLiveSize = p.size[axis];
 }
 
@@ -520,37 +542,40 @@ static void updateScaleDrag(float mx, float my) {
     WorkspacePart* pt = g_scaleDragging ? gizmoPart() : nullptr;
     if (!pt) return;
     auto& p = *pt;
-    glm::vec3 o, d;
-    screenToRay(mx, my, g_lastView, g_lastProj, o, d);
 
-    glm::vec3 axisV = partAxisDir(p, g_scaleAxis);
-    glm::vec3 camF = g_cam.front();
-    glm::vec3 side = glm::cross(axisV, camF);
-    if (glm::length(side) < 1e-4f) side = glm::cross(axisV, glm::vec3(0, 1, 0));
-    side = glm::normalize(side);
-    glm::vec3 planeN = glm::normalize(glm::cross(axisV, side));
+    // Delta mouse proiettato sull'asse locale in pixel → studs mondiali.
+    // Evita il piano ray (invertiva la Size con Part ruotate / camera di taglio).
+    glm::vec3 axisLocal(0.f);
+    axisLocal[g_scaleAxis] = 1.f;
+    glm::vec3 axisV = glm::normalize(glm::vec3(g_scaleStartRotMat * glm::vec4(axisLocal, 0.f)));
+    float ax0 = 0.f, ay0 = 0.f, ax1 = 0.f, ay1 = 0.f;
+    if (!gizmoWorldToScreen(g_scaleStartPos, ax0, ay0)
+        || !gizmoWorldToScreen(g_scaleStartPos + axisV, ax1, ay1))
+        return;
+    glm::vec2 axisPx(ax1 - ax0, ay1 - ay0);
+    float axisPxLen = glm::length(axisPx);
+    if (axisPxLen < 2.f) return;
+    axisPx /= axisPxLen;
+    float worldAlong = glm::dot(glm::vec2(mx - g_scaleStartMx, my - g_scaleStartMy), axisPx)
+                     / axisPxLen;
+    // Sensibilita' bassa: gigantesco si, ma non in un colpo di mouse.
+    float sens = gizmoShift() ? 0.55f : 0.28f;
+    float expand = worldAlong * (float)g_scaleSign * sens;
 
-    glm::vec3 faceLocal(0);
-    faceLocal[g_scaleAxis] = (float)g_scaleSign * g_scaleStartSize[g_scaleAxis] * 0.5f;
-    glm::vec3 planeP = g_scaleStartPos + glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(faceLocal, 0.f));
-    float t = 0.f;
-    if (!rayPlane(o, d, planeP, planeN, t)) return;
-    glm::vec3 hit = o + d * t;
-    float newFace = glm::dot(hit - g_scaleStartPos, axisV);
-    float startFace = (float)g_scaleSign * g_scaleStartSize[g_scaleAxis] * 0.5f;
-    float expand = (newFace - startFace) * (float)g_scaleSign;
     const float minSize = gizmoMinSize();
-    float newSize = std::clamp(g_scaleStartSize[g_scaleAxis] + expand, minSize, 80.f);
+    const float maxSize = gizmoMaxSize();
+    float newSize = std::clamp(g_scaleStartSize[g_scaleAxis] + expand, minSize, maxSize);
     if (!gizmoCtrl() && gizmoSnapSize()) {
-        float step = gizmoShift() ? 0.1f : 0.25f;
-        newSize = std::clamp(snapValue(newSize, step), minSize, 80.f);
+        float step = studioSnapScaleStep();
+        if (step <= 0.f) step = gizmoShift() ? 0.1f : 0.25f;
+        newSize = std::clamp(snapValue(newSize, step), minSize, maxSize);
     }
     float applied = newSize - g_scaleStartSize[g_scaleAxis];
     p.size = g_scaleStartSize;
     p.size[g_scaleAxis] = newSize;
     glm::vec3 offsetLocal(0);
     offsetLocal[g_scaleAxis] = (float)g_scaleSign * applied * 0.5f;
-    p.position = g_scaleStartPos + glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(offsetLocal, 0.f));
+    p.position = g_scaleStartPos + glm::vec3(g_scaleStartRotMat * glm::vec4(offsetLocal, 0.f));
     g_scaleLiveSize = newSize;
     gizmoCommitToModel();
 }
@@ -560,17 +585,19 @@ static void endScaleDrag() {
     if (pt) {
         auto& p = *pt;
         if (!gizmoCtrl()) {
-            float step = gizmoShift() ? 0.1f : 0.25f;
-            if (gizmoSnapSize())
-                p.size = glm::vec3(snapValue(p.size.x, step), snapValue(p.size.y, step),
-                                   snapValue(p.size.z, step));
-            p.position = glm::vec3(snapValue(p.position.x, step), snapValue(p.position.y, step),
-                                   snapValue(p.position.z, step));
+            float step = studioSnapScaleStep();
+            if (step <= 0.f) step = gizmoShift() ? 0.1f : 0.25f;
+            if (gizmoSnapSize()) {
+                p.size[g_scaleAxis] = snapValue(p.size[g_scaleAxis], step);
+                p.size[g_scaleAxis] = std::clamp(p.size[g_scaleAxis], gizmoMinSize(), gizmoMaxSize());
+            }
         }
-        p.size = glm::clamp(p.size, glm::vec3(gizmoMinSize()), glm::vec3(80.f));
+        p.size = glm::clamp(p.size, glm::vec3(gizmoMinSize()), glm::vec3(gizmoMaxSize()));
         if (g_xformTrack && g_selectedPart >= 0)
             g_undo.recordTransform(g_selectedPart, g_xformBefore, p);
         gizmoCommitToModel();
+        if (g_xformTrack)
+            markPlaceDirty();
     }
     g_scaleDragging = false;
     g_xformTrack = false;
@@ -623,7 +650,8 @@ static void updateMoveDrag(float mx, float my) {
         glm::vec3 hit = o + d * t;
         float delta = glm::dot(hit - g_moveStartHit, axisV);
         if (!gizmoCtrl()) {
-            float step = gizmoShift() ? 0.05f : 0.25f;
+            float step = studioSnapMoveStep();
+            if (step <= 0.f) step = gizmoShift() ? 0.05f : 0.25f;
             delta = snapValue(delta, step);
         }
         p.position = g_moveStartPos + axisV * delta;
@@ -637,7 +665,8 @@ static void endMoveDrag() {
     if (pt) {
         auto& p = *pt;
         if (!gizmoCtrl()) {
-            float step = gizmoShift() ? 0.05f : 0.25f;
+            float step = studioSnapMoveStep();
+            if (step <= 0.f) step = gizmoShift() ? 0.05f : 0.25f;
             p.position = glm::vec3(snapValue(p.position.x, step),
                                    snapValue(p.position.y, step),
                                    snapValue(p.position.z, step));
@@ -645,6 +674,8 @@ static void endMoveDrag() {
         if (g_xformTrack && g_selectedPart >= 0)
             g_undo.recordTransform(g_selectedPart, g_xformBefore, p);
         gizmoCommitToModel();
+        if (g_xformTrack)
+            markPlaceDirty();
     }
     g_moveDragging = false;
     g_moveLiveDelta = 0.f;
@@ -685,7 +716,8 @@ static void updateRotateDrag(float mx, float my) {
     float ang = angleAroundAxis(p.position, axisV, o + d * t);
     float deltaDeg = glm::degrees(ang - g_rotateStartAngle);
     if (!gizmoCtrl()) {
-        float step = gizmoShift() ? 1.f : 5.f;
+        float step = studioSnapRotateStep();
+        if (step <= 0.f) step = gizmoShift() ? 1.f : 5.f;
         deltaDeg = snapValue(deltaDeg, step);
     }
     p.rotation = g_rotateStartRot;
@@ -702,17 +734,27 @@ static void endRotateDrag() {
             while (p.rotation[i] > 180.f) p.rotation[i] -= 360.f;
             while (p.rotation[i] < -180.f) p.rotation[i] += 360.f;
             if (!gizmoCtrl()) {
-                float step = gizmoShift() ? 1.f : 5.f;
+                float step = studioSnapRotateStep();
+                if (step <= 0.f) step = gizmoShift() ? 1.f : 5.f;
                 p.rotation[i] = snapValue(p.rotation[i], step);
             }
         }
         if (g_xformTrack && g_selectedPart >= 0)
             g_undo.recordTransform(g_selectedPart, g_xformBefore, p);
         gizmoCommitToModel();
+        if (g_xformTrack)
+            markPlaceDirty();
     }
     g_rotateDragging = false;
     g_rotateLiveDelta = 0.f;
     g_xformTrack = false;
+}
+
+/** Chiude move/scale/rotate aperti — va chiamato prima dello snapshot del Test. */
+static void commitActiveStudioGizmo() {
+    endScaleDrag();
+    endMoveDrag();
+    endRotateDrag();
 }
 
 static bool rayHitPart(const glm::vec3& o, const glm::vec3& d, const WorkspacePart& p, float& tOut) {
@@ -817,9 +859,13 @@ static ScenePick pickSceneAtMouse(float mx, float my) {
     return best;
 }
 
+// StudioGroupsUi.h: clic su una part di un Model seleziona il Model, Ctrl
+// aggiunge/toglie, Alt prende solo la part.
+static void studioPickPart(int partIndex);
+
 static void applyScenePick(const ScenePick& hit) {
     switch (hit.kind) {
-    case PickKind::Part: selectPart(hit.index); break;
+    case PickKind::Part: studioPickPart(hit.index); break;
     case PickKind::Model: selectModel(hit.index); break;
     case PickKind::Label: selectLabel(hit.index); break;
     case PickKind::Spawn: selectSpawn(); break;

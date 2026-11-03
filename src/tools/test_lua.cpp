@@ -1,6 +1,11 @@
 #include "engine/DataModel.h"
 #include "engine/LuaRuntime.h"
 #include "engine/GameHub.h"
+#include "systems/ClassificaLua.h"
+#include "engine/PartGroupsLua.h"
+#include "engine/PartConstraintsLua.h"
+
+#include <cmath>
 
 #include <chrono>
 #include <cstdio>
@@ -151,6 +156,114 @@ int main() {
         lua.fireItemUnequipped("bp_1_Torcia", "Torcia");
         sawEquip = sawUnequip = true; // se arriva fin qui senza crash/errore, il dispatcher regge
         std::fprintf(stderr, "[items] ALL ITEM EVENT TESTS DONE ok=%d\n", (int)(sawEquip && sawUnequip));
+    }
+
+    // Proprieta' generate da PartProps.def: prima Anchored non esisteva da
+    // Lua e CanCollide si poteva scrivere ma leggendolo tornava nil.
+    {
+        dm.clear();
+        dm.loadBaseplatePlace();
+        lua.init(&dm);
+        WorkspacePart p;
+        p.name = "Props";
+        dm.parts.push_back(p);
+        const int idx = (int)dm.parts.size() - 1;
+        const bool ok = lua.runPartScript(
+            "local p = script.Parent\n"
+            "assert(p.Anchored == true, 'Anchored non leggibile')\n"
+            "assert(p.CanCollide == true, 'CanCollide legge nil')\n"
+            "assert(math.abs(p.Density - 0.7) < 1e-4, 'Density default')\n"
+            "p.Anchored = false\n"
+            "p.CanCollide = false\n"
+            "p.Friction = 5\n"            // oltre il massimo (2): va limitato
+            "p.Elasticity = 'ciao'\n"     // tipo sbagliato: resta com'era
+            "assert(p.Anchored == false and p.CanCollide == false, 'scrittura bool')\n"
+            "assert(p.Friction == 2, 'Friction limitata a 2')\n"
+            "assert(math.abs(p.Elasticity - 0.1) < 1e-4, 'tipo sbagliato ignorato')\n"
+            "local n = Workspace:Add({Name = 'Nuova', Anchored = false, Density = 3})\n",
+            idx);
+        const WorkspacePart& q = dm.parts[(size_t)idx];
+        const WorkspacePart& added = dm.parts.back();
+        const bool pass = ok && !q.anchored && !q.canCollide && q.friction == 2.f
+                       && added.name == "Nuova" && !added.anchored && added.density == 3.f;
+        std::fprintf(stderr, "[props] %s %s\n", pass ? "OK" : "FAIL", lua.lastError.c_str());
+        if (!pass) return 3;
+    }
+
+    // Sistemi generati: la tabella Lua arriva dalle estensioni di LuaRuntime.
+    {
+        Classifica cls;
+        cls.reset();
+        cls.setLocalPlayer("Walter");
+        lua.extensions.push_back({"Classifica", &classificalua::registerLua, &cls});
+        dm.clear();
+        dm.loadBaseplatePlace();
+        lua.init(&dm);
+        const bool ok = lua.runString(
+            "Classifica.Set('Monete', 5)\n"
+            "assert(Classifica.Add('Monete', 2) == 7, 'Add')\n"
+            "assert(Classifica.Get('Monete') == 7, 'Get')\n"
+            "assert(Classifica.Get('Monete', 'Nessuno') == 0, 'Get di un altro')\n"
+            "assert(not pcall(Classifica.Set, 'a=b', 1), 'nome non valido deve dare errore')\n"
+            "assert(not pcall(function() Classifica.Set = nil end), 'tabella protetta')\n");
+        const bool pass = ok && cls.get("Monete") == 7;
+        std::fprintf(stderr, "[classifica] %s %s\n", pass ? "OK" : "FAIL", lua.lastError.c_str());
+        lua.extensions.clear();
+        lua.init(&dm);
+        if (!pass) return 4;
+    }
+
+    // Model (Ctrl+G) dagli script.
+    {
+        dm.clear();
+        dm.loadBaseplatePlace();
+        dm.addPart("Ruota", {0, 1, 0}, {2, 2, 2}, {0.5f, 0.5f, 0.5f});
+        dm.addPart("Telaio", {4, 1, 0}, {2, 2, 2}, {0.5f, 0.5f, 0.5f});
+        const int n = (int)dm.parts.size();
+        partgroups::find(dm, partgroups::group(dm, {n - 2, n - 1}))->name = "Auto";
+        lua.extensions.push_back({"Models", &partgroupslua::registerLua, &dm});
+        lua.init(&dm);
+        const bool ok = lua.runString(
+            "assert(Models.Exists('Auto') and not Models.Exists('Nessuno'), 'Exists')\n"
+            "assert(Models.Count('Auto') == 2, 'Count')\n"
+            "Models.MoveTo('Auto', Vector3.new(0, 10, 0))\n"
+            "local p = Models.GetPivot('Auto')\n"
+            "assert(math.abs(p.Y - 10) < 1e-3 and math.abs(p.X) < 1e-3, 'MoveTo/GetPivot')\n"
+            "Models.SetAnchored('Auto', false)\n"
+            "assert(not pcall(Models.MoveTo, 'Nessuno', Vector3.new(0,0,0)), 'Model inesistente: errore')\n"
+            "assert(not pcall(function() Models.MoveTo = nil end), 'tabella protetta')\n");
+        const bool pass = ok && !dm.parts[(size_t)n - 1].anchored
+                       && std::fabs(dm.parts[(size_t)n - 1].position.y - 10.f) < 1e-3f;
+        std::fprintf(stderr, "[models] %s %s\n", pass ? "OK" : "FAIL", lua.lastError.c_str());
+        lua.extensions.clear();
+        lua.init(&dm);
+        if (!pass) return 5;
+    }
+
+    // Vincoli dagli script (part per oggetto o per nome).
+    {
+        dm.clear();
+        dm.loadBaseplatePlace();
+        dm.addPart("Soffitto", {0, 20, 0}, {2, 1, 2}, {0.5f, 0.5f, 0.5f});
+        dm.addPart("Lampada", {0, 15, 0}, {1, 1, 1}, {0.5f, 0.5f, 0.5f});
+        const size_t before = dm.welds.size();
+        lua.extensions.push_back({"Constraints", &partconstraintslua::registerLua, &dm});
+        lua.init(&dm);
+        const bool ok = lua.runString(
+            "local r = Constraints.Rope('Soffitto', 'Lampada', 8)\n"
+            "assert(type(r) == 'string', 'ritorna il nome')\n"
+            "local h = Constraints.Hinge('Soffitto', 'Lampada', Vector3.new(1, 0, 0))\n"
+            "Constraints.SetEnabled(h, false)\n"
+            "assert(Constraints.Count() == 2, 'Count')\n"
+            "assert(Constraints.Remove(h) and not Constraints.Remove(h), 'Remove')\n"
+            "assert(not pcall(Constraints.Rope, 'Soffitto', 'Nessuna'), 'part inesistente: errore')\n"
+            "assert(not pcall(Constraints.Weld, 'Soffitto', 'Soffitto'), 'stessa part: errore')\n");
+        const bool pass = ok && dm.welds.size() == before + 1 && dm.welds.back().kind == ConstraintKind::Rope
+                       && std::fabs(dm.welds.back().length - 8.f) < 1e-4f;
+        std::fprintf(stderr, "[constraints] %s %s\n", pass ? "OK" : "FAIL", lua.lastError.c_str());
+        lua.extensions.clear();
+        lua.init(&dm);
+        if (!pass) return 6;
     }
 
     return 0;

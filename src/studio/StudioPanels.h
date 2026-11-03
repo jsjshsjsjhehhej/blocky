@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#include "engine/PartPropsUi.h"
 #include "studio/StudioIcons.h"
 #include "studio/StudioState.h"
 
@@ -428,8 +429,12 @@ inline void drawProperties(StudioState& s) {
             if (show("Material")) {
                 propRow("Material");
                 int material = (int)p->material;
-                const char* materials[] = {"Plastic", "SmoothPlastic", "Neon", "Metal", "Wood",
-                                           "Concrete", "Grass", "Glass", "Ice", "Brick", "ForceField"};
+                const char* materials[] = {
+                    "Plastic", "SmoothPlastic", "Neon", "Metal", "Wood",
+                    "Concrete", "Grass", "Glass", "Ice", "Brick", "ForceField",
+                    "Fabric", "Marble", "Sand", "Slate", "DiamondPlate",
+                    "CorrodedMetal", "Granite", "Asphalt"
+                };
                 if (ImGui::Combo("##mat", &material, materials, IM_ARRAYSIZE(materials))) {
                     p->setMaterial((PartMaterial)material);
                     s.dirty = true;
@@ -446,16 +451,21 @@ inline void drawProperties(StudioState& s) {
             ImGui::TreePop();
         }
 
-        const bool anyBehavior = show("Anchored") || show("CanCollide") || show("CanDestroy") || show("Health");
+        bool anyGenerated = false;
+#define PART_PROP(T, field, luaName, jsonKey, def, mn, mx, help) anyGenerated = anyGenerated || show(luaName);
+#include "engine/PartProps.def"
+#undef PART_PROP
+        const bool anyBehavior = anyGenerated || show("CanDestroy") || show("Health");
         if (anyBehavior && propCategory("Behavior")) {
-            if (show("Anchored")) {
-                propRow("Anchored");
-                if (ImGui::Checkbox("##anch", &p->anchored)) s.dirty = true;
+#define PART_PROP(T, field, luaName, jsonKey, def, mn, mx, help)       \
+            if (show(luaName)) {                                        \
+                propRow(luaName);                                       \
+                partprops::helpTooltip(help);                           \
+                if (partprops::editUi("##" luaName, p->field, mn, mx))  \
+                    s.dirty = true;                                     \
             }
-            if (show("CanCollide")) {
-                propRow("CanCollide");
-                if (ImGui::Checkbox("##coll", &p->canCollide)) s.dirty = true;
-            }
+#include "engine/PartProps.def"
+#undef PART_PROP
             if (show("CanDestroy")) {
                 propRow("CanDestroy");
                 if (ImGui::Checkbox("##dest", &p->canDestroy)) s.dirty = true;

@@ -13,9 +13,12 @@
  * game_index.json in voci della lista giochi.
  */
 
+#include <algorithm>
 #include <atomic>
-#include <map>
+#include <cctype>
 #include <ctime>
+#include <filesystem>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -315,12 +318,135 @@ inline bool isDownloaded(const std::string& id) {
     return !localPlacePath(id).empty();
 }
 
+/** Place c'e' ma mancano mesh/asset referenziati (download vecchio incompleto). */
+inline bool packageLooksIncomplete(const std::string& id) {
+    if (!isDownloaded(id)) return true;
+    const std::string place = localPlacePath(id);
+    const std::string dir = localGameDir(id);
+    const std::string json = readTextFile(place);
+    if (json.empty()) return true;
+    size_t pos = 0;
+    while ((pos = json.find("\"meshPath\"", pos)) != std::string::npos) {
+        const std::string mp = jsonFindStr(json, "meshPath", pos);
+        pos += 10;
+        if (mp.empty()) continue;
+        // Path assoluti del PC: sul telefono non esistono → va ri-scaricato
+        // dopo che il server ha fatto ensurePackageAssets.
+        if (mp.size() >= 2 && std::isalpha((unsigned char)mp[0]) && mp[1] == ':')
+            return true;
+        if (mp.rfind("assets/", 0) == 0 || mp.rfind("assets\\", 0) == 0) {
+            std::string local = dir + "/" + mp;
+            for (char& c : local) if (c == '\\') c = '/';
+            if (!plat::fileExists(local)) return true;
+        }
+    }
+    return false;
+}
+
+/** Collega una card ai file gia' scaricati: titolo dal server, mondo locale. */
+inline void bindLocalPlayable(GameEntry& e) {
+    if (e.id.empty() || !isDownloaded(e.id)) return;
+    const std::string dir = localGameDir(e.id);
+    e.remote = false;
+    e.isPublished = true;
+    e.placePath = localPlacePath(e.id);
+    const std::string thumb = thumbnailPath(e.id);
+    if (plat::fileExists(thumb) && plat::fileSize(thumb) > 0)
+        e.iconPath = thumb;
+    const std::string bbc = dir + "/scripts/main.bbc";
+    const std::string lua = dir + "/scripts/main.lua";
+    if (plat::fileExists(bbc)) e.script = bbc;
+    else if (plat::fileExists(lua)) e.script = lua;
+    // Titolo/descrizione da info.json locale se la card e' ancora grezza.
+    if (e.title.empty() || e.title == e.id) {
+        const std::string info = readTextFile(dir + "/info.json");
+        if (!info.empty()) {
+            const std::string t = jsonFindStr(info, "title");
+            if (!t.empty()) e.title = t;
+            else {
+                const std::string n = jsonFindStr(info, "name");
+                if (!n.empty()) e.title = n;
+            }
+            const std::string d = jsonFindStr(info, "description");
+            if (!d.empty() && e.subtitle.empty()) e.subtitle = d;
+        }
+    }
+    if (e.title.empty()) e.title = e.id;
+    if (e.subtitle.empty()) e.subtitle = "Scaricato";
+    e.accent = glm::vec3(0.18f, 0.45f, 0.78f);
+}
+
+/**
+ * Tutti i mondi gia' in downloaded/ — restano nel menu anche offline.
+ */
+inline std::vector<GameEntry> listDownloadedEntries() {
+    std::vector<GameEntry> out;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path root = blockyDataDir() + "/downloaded";
+    if (!fs::exists(root, ec)) return out;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory(ec)) continue;
+        const std::string id = entry.path().filename().string();
+        if (id.empty() || id[0] == '.') continue;
+        if (!isDownloaded(id)) continue;
+        GameEntry e;
+        e.id = id;
+        bindLocalPlayable(e);
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+/** Dopo un fetch: se un remoto e' gia' in cache, diventa giocabile subito. */
+inline void applyDownloadedToList(std::vector<GameEntry>& games) {
+    for (GameEntry& e : games) {
+        if (isDownloaded(e.id))
+            bindLocalPlayable(e);
+    }
+    // Aggiungi scaricati che il server non ha (piu') in elenco.
+    for (GameEntry& d : listDownloadedEntries()) {
+        bool found = false;
+        for (const GameEntry& g : games) {
+            if (g.id == d.id) { found = true; break; }
+        }
+        if (!found) games.push_back(std::move(d));
+    }
+}
+
 inline std::mutex& dlMutex() { static std::mutex m; return m; }
 inline std::string& dlDoneSlot() { static std::string s; return s; }
-inline std::string& dlStatusSlot() { static std::string s; return s; }
+inline std::string& dlToastSlot() { static std::string s; return s; }   // one-shot chat
+inline std::string& dlLiveSlot() { static std::string s; return s; }    // barra UI
+inline std::string& dlCurrentIdSlot() { static std::string s; return s; }
 inline std::atomic<bool>& dlBusy() { static std::atomic<bool> b{false}; return b; }
+inline std::atomic<float>& dlProgressAtom() { static std::atomic<float> p{0.f}; return p; }
 
 inline bool isDownloading() { return dlBusy().load(); }
+inline float downloadProgress() { return dlProgressAtom().load(); }
+
+inline std::string downloadingId() {
+    std::lock_guard<std::mutex> lock(dlMutex());
+    return dlCurrentIdSlot();
+}
+
+/** Stato attuale (non consuma): per barra progresso UI. */
+inline std::string peekDownloadStatus() {
+    std::lock_guard<std::mutex> lock(dlMutex());
+    return dlLiveSlot();
+}
+
+inline void setDownloadProgress(float t01, const std::string& status) {
+    dlProgressAtom().store(std::max(0.f, std::min(1.f, t01)));
+    std::lock_guard<std::mutex> lock(dlMutex());
+    dlLiveSlot() = status;
+}
+
+inline void setDownloadToast(const std::string& s) {
+    std::lock_guard<std::mutex> lock(dlMutex());
+    dlToastSlot() = s;
+    dlLiveSlot() = s;
+}
 
 /** Id del gioco appena scaricato, una volta sola. Vuoto se non e' pronto. */
 inline std::string takeDownloadedId() {
@@ -332,26 +458,143 @@ inline std::string takeDownloadedId() {
 
 inline std::string takeDownloadStatus() {
     std::lock_guard<std::mutex> lock(dlMutex());
-    std::string s = std::move(dlStatusSlot());
-    dlStatusSlot().clear();
+    std::string s = std::move(dlToastSlot());
+    dlToastSlot().clear();
     return s;
 }
 
 /**
  * Scarica dal server i file di un gioco e li mette in una cartella locale.
  *
- * Fino a ieri le card dei giochi del server si vedevano ma non si aprivano:
- * c'era l'elenco, non il contenuto. blocky_hostd serve gia' ogni file del
- * gioco su "GET /games/<id>/<file>", quindi bastava chiederglieli.
- *
- * I file sono pochi e noti (il posto, il pacchetto, lo script): si chiedono per
- * nome invece di leggere l'indice, perche' e' una richiesta in meno e l'elenco
- * di cosa contiene un pacchetto lo decide comunque publishGamePackage.
+ * Ordine tipo Roblox: prima il place (mondo giocabile), poi asset secondari.
+ * Cache: se Content-Length del server coincide col file locale si salta il corpo.
+ * Retry su rete domestica instabile. Progresso esposto ad atom + status.
  */
-inline void downloadGame(const std::string& hostPort, const std::string& gameId) {
+inline void downloadGame(const std::string& hostPort, const std::string& gameId, bool launchWhenDone);
+
+inline std::mutex& dlQueueMutex() { static std::mutex m; return m; }
+inline std::vector<std::pair<std::string, std::string>>& dlQueue() {
+    static std::vector<std::pair<std::string, std::string>> q;
+    return q;
+}
+inline std::atomic<bool>& dlLaunchWhenDone() { static std::atomic<bool> b{false}; return b; }
+inline std::atomic<bool>& dlLastFinishedLaunch() { static std::atomic<bool> b{false}; return b; }
+
+inline void pumpDownloadQueue() {
+    if (dlBusy().load()) return;
+    std::string hostPort, gameId;
+    {
+        std::lock_guard<std::mutex> lock(dlQueueMutex());
+        if (dlQueue().empty()) return;
+        hostPort = dlQueue().front().first;
+        gameId = dlQueue().front().second;
+        dlQueue().erase(dlQueue().begin());
+    }
+    dlLaunchWhenDone().store(false);
+    downloadGame(hostPort, gameId, false);
+}
+
+/** Accoda i giochi remoti non ancora presenti in locale (es. Android appena connesso al PC). */
+inline void enqueueMissingDownloads(const std::string& hostPort,
+                                    const std::vector<GameEntry>& games) {
+    if (hostPort.empty()) return;
+    int added = 0;
+    {
+        std::lock_guard<std::mutex> lock(dlQueueMutex());
+        for (const GameEntry& e : games) {
+            if (e.id.empty()) continue;
+            // Remoti nuovi, oppure locali incompleti (place senza .glb).
+            const bool need = (e.remote && !isDownloaded(e.id))
+                || packageLooksIncomplete(e.id);
+            if (!need) continue;
+            bool dup = false;
+            for (const auto& p : dlQueue())
+                if (p.second == e.id) { dup = true; break; }
+            if (dup) continue;
+            dlQueue().push_back({hostPort, e.id});
+            ++added;
+        }
+    }
+    if (added > 0) {
+        LOG_INFO("games", "accodati %d download da %s", added, hostPort.c_str());
+        if (!dlBusy().load()) pumpDownloadQueue();
+    }
+}
+
+/** Scrive un file scaricato; crea sottocartelle se serve (scripts/). */
+inline bool writeDownloadedFile(const std::string& dir, const std::string& rel,
+                                const std::string& body) {
+    if (body.empty()) return false;
+    const size_t slash = rel.rfind('/');
+    if (slash != std::string::npos)
+        plat::makeDirs(dir + "/" + rel.substr(0, slash));
+    std::ofstream f(dir + "/" + rel, std::ios::binary);
+    if (!f) return false;
+    f.write(body.data(), (std::streamsize)body.size());
+    return (bool)f;
+}
+
+/**
+ * Scarica un singolo path relativo con cache Content-Length + retry.
+ * Ritorna: 1 = scritto/nuovo, 0 = cache skip, -1 = assente/fallito.
+ */
+inline int fetchGameFile(const std::string& host, int port, const std::string& gameId,
+                         const std::string& dir, const std::string& rel) {
+    const std::string local = dir + "/" + rel;
+    long long localBytes = -1;
+    if (plat::fileExists(local)) {
+        const long long sz = plat::fileSize(local);
+        if (sz > 0) localBytes = sz;
+    }
+    blk::http::GetResult r = blk::http::getRetryEx(
+        host, port, "/games/" + gameId + "/" + rel, 12000, 3, localBytes);
+    if (!r.ok) return -1;
+    if (r.skipped) return 0;
+    if (r.body.empty()) return -1;
+    return writeDownloadedFile(dir, rel, r.body) ? 1 : -1;
+}
+
+inline void downloadGame(const std::string& hostPort, const std::string& gameId,
+                         bool launchWhenDone = true) {
     if (hostPort.empty() || gameId.empty()) return;
+
+    // Cache completa (place + asset): niente rete, avvia subito.
+    if (isDownloaded(gameId) && !packageLooksIncomplete(gameId) && launchWhenDone) {
+        {
+            std::lock_guard<std::mutex> lock(dlMutex());
+            dlDoneSlot() = gameId;
+        }
+        setDownloadToast("In cache: \"" + gameId + "\"");
+        dlLastFinishedLaunch().store(true);
+        dlProgressAtom().store(1.f);
+        return;
+    }
+
     bool expected = false;
-    if (!dlBusy().compare_exchange_strong(expected, true)) return;
+    if (!dlBusy().compare_exchange_strong(expected, true)) {
+        if (!launchWhenDone) {
+            std::lock_guard<std::mutex> lock(dlQueueMutex());
+            bool dup = false;
+            for (const auto& p : dlQueue())
+                if (p.second == gameId) { dup = true; break; }
+            if (!dup) dlQueue().push_back({hostPort, gameId});
+        } else if (isDownloaded(gameId)) {
+            // Busy su altro gioco ma questo e' gia' locale → avvia comunque.
+            {
+                std::lock_guard<std::mutex> lock(dlMutex());
+                dlDoneSlot() = gameId;
+            }
+            dlLastFinishedLaunch().store(true);
+            setDownloadToast("In cache: \"" + gameId + "\"");
+        }
+        return;
+    }
+    dlLaunchWhenDone().store(launchWhenDone);
+    {
+        std::lock_guard<std::mutex> lock(dlMutex());
+        dlCurrentIdSlot() = gameId;
+    }
+    setDownloadProgress(0.02f, "Connessione...");
 
     std::thread([hostPort, gameId]() {
         std::string host;
@@ -362,47 +605,158 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId)
         plat::makeDirs(dir);
         plat::makeDirs(dir + "/scripts");
 
-        // place.json e' obbligatorio; gli altri sono utili ma un gioco senza
-        // script resta comunque visitabile, quindi non fanno fallire tutto.
-        // Il nome del file del mondo lo dice il catalogo: puo' essere
-        // place.blockyplace, place.blocky o place.json a seconda di come il
-        // gioco e' stato pubblicato. Se il server non l'ha detto si provano
-        // comunque tutti, cosi' un gioco vecchio resta scaricabile.
-        std::vector<std::string> files;
         const RemoteFiles known = filesFor(gameId);
-        if (!known.place.empty()) files.push_back(known.place);
-        for (const char* n : {"place.blockyplace", "place.blocky", "place.json"})
-            if (known.place != n) files.push_back(n);
-        for (const char* n : {"info.json", "game.blocky.json", "game_index.json",
-                              "scripts/main.bbc", "scripts/main.lua"})
-            files.push_back(n);
-        if (!known.thumbnail.empty()) files.push_back(known.thumbnail);
 
-        int got = 0;
-        for (const std::string& rel : files) {
-            std::string body;
-            if (!blk::http::get(host, port, "/games/" + gameId + "/" + rel, body, 8000))
-                continue;
-            if (body.empty()) continue;
-            std::ofstream f(dir + "/" + rel, std::ios::binary);
-            if (!f) continue;
-            f.write(body.data(), (std::streamsize)body.size());
-            ++got;
+        // 1) PLACE FIRST — senza mondo non si gioca; tutto il resto e' optional.
+        std::vector<std::string> placeCandidates;
+        if (!known.place.empty()) placeCandidates.push_back(known.place);
+        for (const char* n : {"place.blockyplace", "place.blocky", "place.json"}) {
+            bool dup = false;
+            for (const auto& c : placeCandidates) if (c == n) { dup = true; break; }
+            if (!dup) placeCandidates.push_back(n);
         }
 
-        {
-            std::lock_guard<std::mutex> lock(dlMutex());
-            if (isDownloaded(gameId)) {
-                dlDoneSlot() = gameId;
-                dlStatusSlot() = "Scaricato \"" + gameId + "\" (" + std::to_string(got) + " file)";
-            } else {
-                dlStatusSlot() = "Download di \"" + gameId + "\" fallito";
+        setDownloadProgress(0.08f, "Scarico il mondo...");
+        const bool incomplete = packageLooksIncomplete(gameId);
+        bool gotPlace = isDownloaded(gameId);
+        // Place incompleto (path Windows / mesh mancanti): forza riscarico
+        // ignorando la cache Content-Length.
+        if (!gotPlace || incomplete) {
+            for (const std::string& rel : placeCandidates) {
+                // Cancella place locale obsoleto cosi' getCached non lo salta.
+                if (incomplete) {
+                    const std::string local = dir + "/" + rel;
+                    if (plat::fileExists(local))
+                        std::remove(local.c_str());
+                }
+                const int r = fetchGameFile(host, port, gameId, dir, rel);
+                if (r >= 0 && isDownloaded(gameId)) {
+                    gotPlace = true;
+                    if (!incomplete) break;
+                    // Con incomplete continua: prende il place aggiornato e basta.
+                    break;
+                }
+            }
+        } else {
+            const std::string existing = localPlacePath(gameId);
+            if (!existing.empty()) {
+                const std::string rel = existing.substr(dir.size() + 1);
+                fetchGameFile(host, port, gameId, dir, rel);
             }
         }
-        LOG_INFO("games", "download %s: %d file", gameId.c_str(), got);
+
+        if (!gotPlace) {
+            setDownloadToast("Download di \"" + gameId + "\" fallito (manca il mondo)");
+            {
+                std::lock_guard<std::mutex> lock(dlMutex());
+                dlCurrentIdSlot().clear();
+            }
+            dlProgressAtom().store(0.f);
+            LOG_INFO("games", "download %s: place mancante", gameId.c_str());
+            dlBusy().store(false);
+            pumpDownloadQueue();
+            return;
+        }
+
+        // 2) Elenco completo del pacchetto (mesh/texture/audio/script).
+        std::vector<std::string> extras;
+        {
+            std::string listBody;
+            if (blk::http::getRetry(host, port, "/games/" + gameId + "/files", listBody, 12000, 3)
+                && !listBody.empty()) {
+                size_t q = 0;
+                while ((q = listBody.find('"', q)) != std::string::npos) {
+                    size_t e = listBody.find('"', q + 1);
+                    if (e == std::string::npos) break;
+                    std::string rel = listBody.substr(q + 1, e - q - 1);
+                    q = e + 1;
+                    if (rel.empty() || rel == "files" || rel == "files.json") continue;
+                    // Evita escape JSON grezzi
+                    if (rel.find('\\') != std::string::npos) {
+                        std::string clean;
+                        for (size_t i = 0; i < rel.size(); ++i) {
+                            if (rel[i] == '\\' && i + 1 < rel.size()) {
+                                clean += rel[++i];
+                                continue;
+                            }
+                            clean += rel[i];
+                        }
+                        rel = clean;
+                    }
+                    bool dup = false;
+                    for (const auto& x : extras) if (x == rel) { dup = true; break; }
+                    if (!dup) extras.push_back(rel);
+                }
+            }
+        }
+        // Fallback se il server e' vecchio senza /files.
+        if (extras.empty()) {
+            for (const char* n : {"info.json", "game.blocky.json", "game_index.json",
+                                  "files.json", "scripts/main.bbc", "scripts/main.lua"})
+                extras.push_back(n);
+            if (!known.thumbnail.empty()) extras.push_back(known.thumbnail);
+        }
+
+        // Dal place: qualunque meshPath → prova assets/meshes/<basename>
+        // (anche se il JSON ha ancora C:\Users\...\foo.glb del PC).
+        {
+            const std::string place = localPlacePath(gameId);
+            const std::string pj = place.empty() ? std::string{} : readTextFile(place);
+            size_t pos = 0;
+            while (!pj.empty() && (pos = pj.find("\"meshPath\"", pos)) != std::string::npos) {
+                std::string mp = jsonFindEscapedStr(pj, "meshPath", pos);
+                if (mp.empty()) mp = jsonFindStr(pj, "meshPath", pos);
+                pos += 10;
+                if (mp.empty()) continue;
+                size_t b = mp.find_last_of("/\\");
+                const std::string base = (b == std::string::npos) ? mp : mp.substr(b + 1);
+                if (base.empty() || base.find('.') == std::string::npos) continue;
+                const std::string rel = "assets/meshes/" + base;
+                bool dup = false;
+                for (const auto& x : extras) if (x == rel) { dup = true; break; }
+                if (!dup) extras.push_back(rel);
+            }
+        }
+
+        int got = 1; // place gia' ok
+        int cached = 0;
+        for (size_t i = 0; i < extras.size(); ++i) {
+            const float t = 0.35f + 0.60f * ((float)(i + 1) / (float)std::max<size_t>(1, extras.size()));
+            setDownloadProgress(t, "Asset " + std::to_string(i + 1) + "/"
+                                   + std::to_string(extras.size()) + "...");
+            // Non riscaricare il place gia' preso.
+            bool isPlace = false;
+            for (const auto& p : placeCandidates) if (p == extras[i]) { isPlace = true; break; }
+            if (isPlace) { ++cached; continue; }
+            const int r = fetchGameFile(host, port, gameId, dir, extras[i]);
+            if (r > 0) ++got;
+            else if (r == 0) { ++got; ++cached; }
+        }
+
+        if (isDownloaded(gameId)) {
+            {
+                std::lock_guard<std::mutex> lock(dlMutex());
+                dlDoneSlot() = gameId;
+                dlCurrentIdSlot().clear();
+            }
+            dlLastFinishedLaunch().store(dlLaunchWhenDone().load());
+            setDownloadToast(std::string("Pronto \"") + gameId + "\" ("
+                + std::to_string(got) + " file"
+                + (cached > 0 ? (", " + std::to_string(cached) + " cache") : "")
+                + ")");
+        } else {
+            setDownloadToast("Download di \"" + gameId + "\" fallito");
+            std::lock_guard<std::mutex> lock(dlMutex());
+            dlCurrentIdSlot().clear();
+        }
+        dlProgressAtom().store(1.f);
+        LOG_INFO("games", "download %s: %d file (%d cache)", gameId.c_str(), got, cached);
         dlBusy().store(false);
+        pumpDownloadQueue();
     }).detach();
 }
+
+inline bool takeLastDownloadLaunch() { return dlLastFinishedLaunch().exchange(false); }
 
 
 // ---- Contatto col server ----------------------------------------------

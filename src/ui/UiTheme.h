@@ -26,41 +26,42 @@ struct UiThemeColorDef {
 
 // Stessi 26 colori e stessi valori che applyStudioTheme() scriveva a mano
 // prima — il default di ogni riga E' l'aspetto attuale di Studio.
+// Default = Roblox Studio dark (grigi + blu selezione), non blu navy “AI”.
 inline const UiThemeColorDef kUiThemeColors[] = {
-    { ImGuiCol_WindowBg,         "WindowBg",         {0.08f, 0.11f, 0.18f, 1.f} },
-    { ImGuiCol_ChildBg,          "ChildBg",          {0.10f, 0.14f, 0.22f, 1.f} },
-    { ImGuiCol_PopupBg,          "PopupBg",          {0.09f, 0.13f, 0.21f, 1.f} },
-    { ImGuiCol_Border,           "Border",           {0.20f, 0.32f, 0.52f, 1.f} },
-    { ImGuiCol_FrameBg,          "FrameBg",          {0.12f, 0.18f, 0.30f, 1.f} },
-    { ImGuiCol_FrameBgHovered,   "FrameBgHovered",   {0.16f, 0.26f, 0.42f, 1.f} },
-    { ImGuiCol_FrameBgActive,    "FrameBgActive",    {0.20f, 0.34f, 0.54f, 1.f} },
-    { ImGuiCol_TitleBg,          "TitleBg",          {0.05f, 0.08f, 0.14f, 1.f} },
-    { ImGuiCol_TitleBgActive,    "TitleBgActive",    {0.10f, 0.28f, 0.58f, 1.f} },
-    { ImGuiCol_MenuBarBg,        "MenuBarBg",        {0.06f, 0.10f, 0.18f, 1.f} },
-    { ImGuiCol_Header,           "Header",           {0.12f, 0.36f, 0.70f, 0.65f} },
-    { ImGuiCol_HeaderHovered,    "HeaderHovered",    {0.16f, 0.46f, 0.86f, 0.88f} },
-    { ImGuiCol_HeaderActive,     "HeaderActive",     {0.20f, 0.54f, 0.94f, 1.f} },
-    { ImGuiCol_Button,           "Button",           {0.14f, 0.26f, 0.46f, 1.f} },
-    { ImGuiCol_ButtonHovered,    "ButtonHovered",    {0.20f, 0.40f, 0.70f, 1.f} },
-    { ImGuiCol_ButtonActive,     "ButtonActive",     {0.10f, 0.46f, 0.86f, 1.f} },
-    { ImGuiCol_Text,             "Text",             {0.93f, 0.96f, 1.00f, 1.f} },
-    { ImGuiCol_TextDisabled,     "TextDisabled",     {0.48f, 0.58f, 0.72f, 1.f} },
-    { ImGuiCol_Separator,        "Separator",        {0.20f, 0.30f, 0.46f, 1.f} },
-    { ImGuiCol_CheckMark,        "CheckMark",        {0.42f, 0.80f, 1.00f, 1.f} },
-    { ImGuiCol_SliderGrab,       "SliderGrab",       {0.28f, 0.60f, 0.98f, 1.f} },
-    { ImGuiCol_SliderGrabActive, "SliderGrabActive", {0.48f, 0.76f, 1.00f, 1.f} },
-    { ImGuiCol_Tab,              "Tab",              {0.10f, 0.16f, 0.28f, 1.f} },
-    { ImGuiCol_TabHovered,       "TabHovered",       {0.18f, 0.44f, 0.80f, 1.f} },
-    { ImGuiCol_TabActive,        "TabActive",        {0.12f, 0.38f, 0.72f, 1.f} },
+    { ImGuiCol_WindowBg,         "WindowBg",         {0.20f, 0.20f, 0.21f, 1.f} },
+    { ImGuiCol_ChildBg,          "ChildBg",          {0.14f, 0.14f, 0.15f, 1.f} },
+    { ImGuiCol_PopupBg,          "PopupBg",          {0.18f, 0.18f, 0.19f, 1.f} },
+    { ImGuiCol_Border,           "Border",           {0.10f, 0.10f, 0.11f, 1.f} },
+    { ImGuiCol_FrameBg,          "FrameBg",          {0.24f, 0.24f, 0.26f, 1.f} },
+    { ImGuiCol_FrameBgHovered,   "FrameBgHovered",   {0.30f, 0.30f, 0.32f, 1.f} },
+    { ImGuiCol_FrameBgActive,    "FrameBgActive",    {0.34f, 0.34f, 0.36f, 1.f} },
+    { ImGuiCol_TitleBg,          "TitleBg",          {0.14f, 0.14f, 0.15f, 1.f} },
+    { ImGuiCol_TitleBgActive,    "TitleBgActive",    {0.14f, 0.14f, 0.15f, 1.f} },
+    { ImGuiCol_MenuBarBg,        "MenuBarBg",        {0.14f, 0.14f, 0.15f, 1.f} },
+    { ImGuiCol_Header,           "Header",           {0.00f, 0.47f, 0.83f, 0.45f} },
+    { ImGuiCol_HeaderHovered,    "HeaderHovered",    {0.00f, 0.47f, 0.83f, 0.65f} },
+    { ImGuiCol_HeaderActive,     "HeaderActive",     {0.00f, 0.47f, 0.83f, 1.f} },
+    { ImGuiCol_Button,           "Button",           {0.28f, 0.28f, 0.30f, 1.f} },
+    { ImGuiCol_ButtonHovered,    "ButtonHovered",    {0.36f, 0.36f, 0.38f, 1.f} },
+    { ImGuiCol_ButtonActive,     "ButtonActive",     {0.00f, 0.47f, 0.83f, 1.f} },
+    { ImGuiCol_Text,             "Text",             {0.95f, 0.95f, 0.96f, 1.f} },
+    { ImGuiCol_TextDisabled,     "TextDisabled",     {0.62f, 0.62f, 0.65f, 1.f} },
+    { ImGuiCol_Separator,        "Separator",        {0.28f, 0.28f, 0.30f, 1.f} },
+    { ImGuiCol_CheckMark,        "CheckMark",        {0.00f, 0.60f, 1.00f, 1.f} },
+    { ImGuiCol_SliderGrab,       "SliderGrab",       {0.00f, 0.47f, 0.83f, 1.f} },
+    { ImGuiCol_SliderGrabActive, "SliderGrabActive", {0.20f, 0.62f, 1.00f, 1.f} },
+    { ImGuiCol_Tab,              "Tab",              {0.18f, 0.18f, 0.19f, 1.f} },
+    { ImGuiCol_TabHovered,       "TabHovered",       {0.00f, 0.47f, 0.83f, 0.75f} },
+    { ImGuiCol_TabActive,        "TabActive",        {0.24f, 0.24f, 0.26f, 1.f} },
     { ImGuiCol_NavHighlight,             "NavHighlight",             {0.f, 0.f, 0.f, 0.f} },
     { ImGuiCol_NavWindowingHighlight,    "NavWindowingHighlight",    {0.f, 0.f, 0.f, 0.f} },
 };
 
 struct UiThemeRounding {
-    float window = 12.f, child = 10.f, frame = 8.f, grab = 6.f, popup = 10.f, scrollbar = 8.f;
-    float itemSpacingX = 10.f, itemSpacingY = 8.f;
-    float windowPadX = 14.f, windowPadY = 12.f;
-    float framePadX = 11.f, framePadY = 7.f;
+    float window = 0.f, child = 2.f, frame = 2.f, grab = 2.f, popup = 2.f, scrollbar = 2.f;
+    float itemSpacingX = 6.f, itemSpacingY = 4.f;
+    float windowPadX = 10.f, windowPadY = 8.f;
+    float framePadX = 8.f, framePadY = 5.f;
 };
 
 // Stessi 24 colori e stessi valori che applyClassicRobloxTheme() (ClassicMenu.h)

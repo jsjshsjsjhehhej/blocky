@@ -1,0 +1,48 @@
+// Proprieta' delle part generate automaticamente. Una riga = una proprieta'
+// completa: campo in WorkspacePart, salvataggio e caricamento .blocky,
+// lettura/scrittura da Lua (part.X e Instance.new), controllo in entrambi i
+// pannelli Proprieta' di Studio.
+//
+// PART_PROP(tipo C++, campo, "Nome Lua/Studio", "chiave json", default, min, max, "aiuto")
+//   tipo: bool o float. min/max valgono solo per float (Lua e Studio li rispettano).
+//   La chiave json non va MAI cambiata: e' quella dentro i .blocky gia' salvati.
+//
+// Proprieta' con logica speciale (Material, Shape, Color, Emissive, Health...)
+// restano scritte a mano: qui solo quelle che sono "un valore e basta".
+
+PART_PROP(bool,  anchored,   "Anchored",   "anchored",   true, 0.f, 0.f,
+          "Ferma in Play. Se spenta la part cade, rotola e si puo' spingere.")
+PART_PROP(bool,  canCollide, "CanCollide", "canCollide", true, 0.f, 0.f,
+          "Se spenta il giocatore e le altre part ci passano attraverso (Touched funziona lo stesso).")
+PART_PROP(bool,  canTouch,   "CanTouch",   "canTouch",   true, 0.f, 0.f,
+          "Se spenta Touched non scatta. Utile per decorazioni.")
+PART_PROP(bool,  canQuery,   "CanQuery",   "canQuery",   true, 0.f, 0.f,
+          "Se spenta Raycast / Region3 la ignorano.")
+PART_PROP(bool,  castShadow, "CastShadow", "castShadow", true, 0.f, 0.f,
+          "Proietta ombra dal sole/luna.")
+PART_PROP(bool,  locked,     "Locked",     "locked",     false, 0.f, 0.f,
+          "Bloccata in Studio: non si muove/scala/cancella finche' non la sblocchi.")
+PART_PROP(float, transparency, "Transparency", "transparency", 0.f, 0.f, 1.f,
+          "0 = opaca, 1 = invisibile (stile Roblox Studio).")
+PART_PROP(float, reflectance, "Reflectance", "reflectance", 0.f, 0.f, 1.f,
+          "Riflesso metallico semplice (0–1).")
+PART_PROP(float, density,    "Density",    "density",    0.7f, 0.01f, 100.f,
+          "Peso per stud cubo. 0.7 = plastica. Piu' alta = piu' difficile da spingere.")
+PART_PROP(float, friction,   "Friction",   "friction",   0.5f, 0.f, 2.f,
+          "Attrito. 0 = ghiaccio, 1 = gomma. Conta solo in Play.")
+PART_PROP(float, elasticity, "Elasticity", "elasticity", 0.1f, 0.f, 1.f,
+          "Rimbalzo. 0 = non rimbalza, 1 = rimbalza quasi alla stessa altezza.")
+PART_PROP(float, linearDamping, "LinearDamping", "linearDamping", 0.05f, 0.f, 2.f,
+          "Frena la velocita' lineare (aria). 0 = scivola forever, 0.5+ = si ferma presto.")
+PART_PROP(float, angularDamping, "AngularDamping", "angularDamping", 0.05f, 0.f, 2.f,
+          "Frena lo spin. Alto = le casse smettono di rotolare subito.")
+PART_PROP(float, collisionGroup, "CollisionGroup", "collisionGroup", 0.f, 0.f, 31.f,
+          "Gruppo collisione 0–31 (stile PhysicsService). Parti in gruppi che non collidono si attraversano.")
+PART_PROP(bool,  vehicleSeat, "VehicleSeat", "vehicleSeat", false, 0.f, 0.f,
+          "Con Anchored spento la part diventa un'auto con 4 ruote. In Play: F per salire, W/A/S/D per guidare.")
+PART_PROP(float, hitboxScaleX, "HitboxScaleX", "hitboxScaleX", 1.f, 0.05f, 4.f,
+          "Larghezza della collisione rispetto al modello. 0.5 = hitbox piu' stretta, 2 = piu' larga. Il disegno non cambia.")
+PART_PROP(float, hitboxScaleY, "HitboxScaleY", "hitboxScaleY", 1.f, 0.05f, 4.f,
+          "Altezza della collisione rispetto al modello. Utile per personaggi e armi.")
+PART_PROP(float, hitboxScaleZ, "HitboxScaleZ", "hitboxScaleZ", 1.f, 0.05f, 4.f,
+          "Profondita' della collisione rispetto al modello.")

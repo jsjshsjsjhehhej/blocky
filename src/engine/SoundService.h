@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@ struct SoundInstance {
     float volume = 1.f;
     bool looped = false;
     bool playing = false;
+    int voice = 0;   // voce del mixer, se c'e'
 };
 
 class SoundService {
@@ -26,6 +28,13 @@ public:
     std::vector<SoundInstance> sounds;
     std::string lastError;
     int nextIndex = 1;
+
+    // Se impostati (main.cpp li collega all'AudioMixer) i suoni si SOMMANO.
+    // Senza, resta il vecchio backend a voce singola di plat::sys.
+    std::function<int(const std::string& path, float volume, bool looped)> mixPlay;
+    std::function<void(int voice)> mixStop;
+    std::function<void()> mixStopAll;
+    std::function<std::string()> mixError;
 
     SoundInstance& createSound(const std::string& name = {}) {
         SoundInstance s;
@@ -44,6 +53,13 @@ public:
         if (s.soundId.empty()) {
             lastError = "SoundId vuoto";
             return false;
+        }
+        if (mixPlay) {
+            if (s.voice && mixStop) mixStop(s.voice);   // stesso Sound ripartito: niente doppione
+            s.voice = mixPlay(s.soundId, s.volume, s.looped);
+            s.playing = s.voice > 0;
+            lastError = s.playing ? std::string() : (mixError ? mixError() : "Riproduzione fallita");
+            return s.playing;
         }
         stopAll();
 
@@ -73,12 +89,18 @@ public:
     }
 
     void stopAll() {
-        plat::sys::stopSound();
-        for (auto& s : sounds) s.playing = false;
+        if (mixStopAll) mixStopAll();
+        else plat::sys::stopSound();
+        for (auto& s : sounds) { s.playing = false; s.voice = 0; }
     }
 
     void stop(SoundInstance& s) {
-        stopAll();
+        if (mixStop) {
+            if (s.voice) mixStop(s.voice);
+        } else {
+            stopAll();
+        }
         s.playing = false;
+        s.voice = 0;
     }
 };

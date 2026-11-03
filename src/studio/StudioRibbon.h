@@ -23,8 +23,9 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
     const float width = ImGui::GetContentRegionAvail().x;
     bool changed = false;
 
+    // Tab strip grigio Studio (#242426 / #2E2E30) + underline blu #0078D4
     dl->AddRectFilled(start, {start.x + width, start.y + kRibbonTabHeight},
-                      IM_COL32(28, 32, 39, 255));
+                      IM_COL32(36, 36, 38, 255));
 
     float x = start.x + 6.f;
     for (int i = 0; i < count; ++i) {
@@ -40,24 +41,26 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
 
         const bool active = (i == current);
         if (active) {
-            dl->AddRectFilled(min, max, IM_COL32(42, 48, 58, 255));
-            dl->AddRectFilled({min.x, max.y - 2.5f}, max, IM_COL32(64, 156, 255, 255));
+            dl->AddRectFilled(min, max, IM_COL32(51, 51, 54, 255));
+            dl->AddRectFilled({min.x, max.y - 2.5f}, max, IM_COL32(0, 120, 212, 255));
         } else if (hovered) {
-            dl->AddRectFilled(min, max, IM_COL32(36, 41, 50, 255));
+            dl->AddRectFilled(min, max, IM_COL32(45, 45, 48, 255));
         }
 
         dl->AddText({min.x + 13.f, min.y + 6.f},
-                    active ? IM_COL32(235, 240, 248, 255) : IM_COL32(160, 170, 185, 255),
+                    active ? IM_COL32(242, 242, 245, 255) : IM_COL32(160, 160, 168, 255),
                     names[i]);
 
         if (pressed && !active) { current = i; changed = true; }
         x += w;
     }
 
-    ImGui::SetCursorScreenPos({start.x, start.y + kRibbonTabHeight});
     dl->AddRectFilled({start.x, start.y + kRibbonTabHeight},
                       {start.x + width, start.y + kRibbonHeight},
-                      IM_COL32(42, 48, 58, 255));
+                      IM_COL32(51, 51, 54, 255));
+    // Sotto la tab strip: Dummy subito dopo SetCursor* spegne IsSetPos in sicurezza.
+    ImGui::SetCursorScreenPos({start.x, start.y + kRibbonTabHeight});
+    ImGui::Dummy({1.f, 1.f});
     return changed;
 }
 
@@ -66,7 +69,7 @@ inline void ribbonBeginGroup() {
     ImGui::Dummy({0.f, 4.f});
 }
 
-inline void ribbonEndGroup(const char* label) {
+inline void ribbonEndGroup(const char* label, bool last = false) {
     ImGui::EndGroup();
 
     const ImVec2 min = ImGui::GetItemRectMin();
@@ -78,10 +81,14 @@ inline void ribbonEndGroup(const char* label) {
     dl->AddText({min.x + (max.x - min.x - textW) * 0.5f, labelY},
                 IM_COL32(140, 150, 165, 255), label);
 
+    if (last) return;
+
+    // Separatore + spazio verso il gruppo successivo. Dummy con altezza > 0
+    // evita assert ImGui su item a dimensione zero in alcuni path di layout.
     ImGui::SameLine(0.f, 10.f);
     const ImVec2 sep = ImGui::GetCursorScreenPos();
     dl->AddLine({sep.x, min.y - 2.f}, {sep.x, labelY - 4.f}, IM_COL32(62, 70, 84, 255), 1.f);
-    ImGui::Dummy({10.f, 0.f});
+    ImGui::Dummy({10.f, 1.f});
     ImGui::SameLine(0.f, 0.f);
 }
 

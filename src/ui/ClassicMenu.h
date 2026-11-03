@@ -1278,6 +1278,19 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
                             games[gi].maxPlayers > 0 ? games[gi].maxPlayers : 8);
     }
     ImGui::Spacing();
+    {
+        const bool dlBusy = blk::remotegames::isDownloading();
+        if (dlBusy) {
+            const float p = blk::remotegames::downloadProgress();
+            ImGui::ProgressBar(p, {236, 10}, "");
+            const std::string stDl = blk::remotegames::peekDownloadStatus();
+            if (!stDl.empty())
+                ImGui::TextDisabled("%s", stDl.c_str());
+            else
+                ImGui::TextDisabled("Download %.0f%%...", p * 100.f);
+            ImGui::Spacing();
+        }
+    }
     if (hubPlayButton(L("hub.play"), {236, 52}, time)) {
         st.wantPlay = true;
         st.launchGame = st.selectedGame;
@@ -1330,7 +1343,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     if (ImGui::Button(fetching ? "..." : "Aggiorna", {80, 30}))
         st.wantRefreshGameServer = true;
     if (fetching) ImGui::EndDisabled();
-    ImGui::TextDisabled("IP del PC che ha pubblicato (porta 8080).");
+    ImGui::TextDisabled("Di solito non serve: stesso Wi-Fi, Blocky aperto sul PC.");
 
     // Il catalogo viaggia sullo stesso server dei giochi: e lo stesso computer.
     const bool catBusy = blk::remotecatalog::isBusy();
@@ -1429,6 +1442,25 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             if (g.isPublished) {
                 cdl->AddRectFilled({p.x + 8, p.y + 8}, {p.x + 92, p.y + 28}, IM_COL32(12, 160, 100, 235), 8.f);
                 cdl->AddText({p.x + 16, p.y + 11}, IM_COL32(255, 255, 255, 255), "PUBBLICATO");
+            }
+            const bool gCached = g.remote && blk::remotegames::isDownloaded(g.id);
+            const bool gDl = g.remote && blk::remotegames::isDownloading()
+                && blk::remotegames::downloadingId() == g.id;
+            if (gDl) {
+                const float dp = blk::remotegames::downloadProgress();
+                cdl->AddRectFilled({p.x + 8, p.y + 56}, {p.x + thumbW - 8, p.y + 70},
+                                   IM_COL32(20, 30, 50, 200), 4.f);
+                cdl->AddRectFilled({p.x + 8, p.y + 56},
+                                   {p.x + 8 + (thumbW - 16) * dp, p.y + 70},
+                                   IM_COL32(40, 140, 255, 240), 4.f);
+            } else if (g.remote && !gCached) {
+                cdl->AddRectFilled({p.x + thumbW - 78, p.y + 8}, {p.x + thumbW - 8, p.y + 28},
+                                   IM_COL32(40, 110, 220, 230), 8.f);
+                cdl->AddText({p.x + thumbW - 70, p.y + 11}, IM_COL32(255, 255, 255, 255), "SCARICA");
+            } else if (gCached) {
+                cdl->AddRectFilled({p.x + thumbW - 70, p.y + 8}, {p.x + thumbW - 8, p.y + 28},
+                                   IM_COL32(70, 90, 120, 220), 8.f);
+                cdl->AddText({p.x + thumbW - 60, p.y + 11}, IM_COL32(255, 255, 255, 255), "PRONTO");
             }
             ImGui::Dummy({0, 84});
             ImGui::Text("%s", g.title.c_str());

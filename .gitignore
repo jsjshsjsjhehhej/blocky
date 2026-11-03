@@ -45,6 +45,11 @@ blocky_dev_offline.txt
 *.pfx
 google-services.json
 
+# --- Cache e copie di backup -------------------------------------------
+__pycache__/
+*.pyc
+*.bak
+
 # --- Stato locale dell'editor ------------------------------------------
 imgui.ini
 .claude/settings.local.json

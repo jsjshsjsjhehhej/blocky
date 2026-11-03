@@ -16,6 +16,15 @@ enum class PartMaterial : int {
     Ice,
     Brick,
     ForceField,
+    // Texture reali (PNG in assets/textures/materials/)
+    Fabric,
+    Marble,
+    Sand,
+    Slate,
+    DiamondPlate,
+    CorrodedMetal,
+    Granite,
+    Asphalt,
     Count
 };
 
@@ -32,7 +41,35 @@ inline const char* partMaterialName(PartMaterial m) {
     case PartMaterial::Ice: return "Ice";
     case PartMaterial::Brick: return "Brick";
     case PartMaterial::ForceField: return "ForceField";
+    case PartMaterial::Fabric: return "Fabric";
+    case PartMaterial::Marble: return "Marble";
+    case PartMaterial::Sand: return "Sand";
+    case PartMaterial::Slate: return "Slate";
+    case PartMaterial::DiamondPlate: return "DiamondPlate";
+    case PartMaterial::CorrodedMetal: return "CorrodedMetal";
+    case PartMaterial::Granite: return "Granite";
+    case PartMaterial::Asphalt: return "Asphalt";
     default: return "Plastic";
+    }
+}
+
+/** Nome file texture (senza estensione) sotto assets/textures/materials/. */
+inline const char* partMaterialTextureStem(PartMaterial m) {
+    switch (m) {
+    case PartMaterial::Wood: return "wood";
+    case PartMaterial::Metal: return "metal";
+    case PartMaterial::Concrete: return "concrete";
+    case PartMaterial::Grass: return "grass";
+    case PartMaterial::Brick: return "brick";
+    case PartMaterial::Fabric: return "fabric";
+    case PartMaterial::Marble: return "marble";
+    case PartMaterial::Sand: return "sand";
+    case PartMaterial::Slate: return "slate";
+    case PartMaterial::DiamondPlate: return "diamondplate";
+    case PartMaterial::CorrodedMetal: return "corrodedmetal";
+    case PartMaterial::Granite: return "granite";
+    case PartMaterial::Asphalt: return "asphalt";
+    default: return nullptr;
     }
 }
 
@@ -44,15 +81,23 @@ inline PartMaterial partMaterialFromName(const std::string& name) {
                             [](char c) { return c == ' ' || c == '_' || c == '-'; }),
             s.end());
     if (s == "neon") return PartMaterial::Neon;
-    if (s == "metal" || s == "diamondplate" || s == "corrodedmetal") return PartMaterial::Metal;
+    if (s == "metal") return PartMaterial::Metal;
+    if (s == "diamondplate" || s == "diamond") return PartMaterial::DiamondPlate;
+    if (s == "corrodedmetal" || s == "corroded" || s == "rust") return PartMaterial::CorrodedMetal;
     if (s == "wood" || s == "woodplanks") return PartMaterial::Wood;
-    if (s == "concrete" || s == "slate" || s == "cobblestone") return PartMaterial::Concrete;
-    if (s == "grass" || s == "ground" || s == "sand") return PartMaterial::Grass;
+    if (s == "concrete" || s == "cobblestone") return PartMaterial::Concrete;
+    if (s == "slate") return PartMaterial::Slate;
+    if (s == "grass" || s == "ground") return PartMaterial::Grass;
+    if (s == "sand") return PartMaterial::Sand;
     if (s == "glass") return PartMaterial::Glass;
     if (s == "ice") return PartMaterial::Ice;
     if (s == "brick") return PartMaterial::Brick;
     if (s == "forcefield" || s == "force") return PartMaterial::ForceField;
     if (s == "smoothplastic" || s == "smooth") return PartMaterial::SmoothPlastic;
+    if (s == "fabric" || s == "cloth") return PartMaterial::Fabric;
+    if (s == "marble") return PartMaterial::Marble;
+    if (s == "granite") return PartMaterial::Granite;
+    if (s == "asphalt" || s == "pavement" || s == "road") return PartMaterial::Asphalt;
     return PartMaterial::Plastic;
 }
 
@@ -73,18 +118,27 @@ inline void partMaterialShading(PartMaterial m, float& specular, float& roughnes
         emissiveBias = 1.f;
         break;
     case PartMaterial::Metal:
+    case PartMaterial::DiamondPlate:
         specular = 0.95f;
         roughness = 0.18f;
         break;
+    case PartMaterial::CorrodedMetal:
+        specular = 0.35f;
+        roughness = 0.72f;
+        break;
     case PartMaterial::Wood:
+    case PartMaterial::Fabric:
         specular = 0.08f;
         roughness = 0.85f;
         break;
     case PartMaterial::Concrete:
+    case PartMaterial::Asphalt:
+    case PartMaterial::Slate:
         specular = 0.06f;
         roughness = 0.92f;
         break;
     case PartMaterial::Grass:
+    case PartMaterial::Sand:
         specular = 0.04f;
         roughness = 0.95f;
         break;
@@ -99,8 +153,13 @@ inline void partMaterialShading(PartMaterial m, float& specular, float& roughnes
         alpha = 0.55f;
         break;
     case PartMaterial::Brick:
+    case PartMaterial::Granite:
         specular = 0.1f;
         roughness = 0.88f;
+        break;
+    case PartMaterial::Marble:
+        specular = 0.55f;
+        roughness = 0.28f;
         break;
     case PartMaterial::ForceField:
         specular = 0.6f;

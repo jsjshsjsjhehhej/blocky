@@ -26,7 +26,8 @@ public:
 
     void draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
               glm::vec3 worldPos, float yawDeg,
-              const bool* hideSlot = nullptr, float rightArmHold = 0.f) const;
+              const bool* hideSlot = nullptr, float rightArmHold = 0.f,
+              const std::vector<HoldPartPose>* holdParts = nullptr) const;
 
     void drawPreview(const BlockDrawContext& ctx, DrawCubeFn drawCube,
                      glm::vec3 worldPos, float yawDeg, float spinDeg,
@@ -78,7 +79,8 @@ private:
 
 inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
                               glm::vec3 worldPos, float yawDeg,
-                              const bool* hideSlot, float rightArmHold) const {
+                              const bool* hideSlot, float rightArmHold,
+                              const std::vector<HoldPartPose>* holdParts) const {
     const float walkLeg = humanoidLegSwing(humanoid);
     const float walkArm = humanoidArmSwing(humanoid);
     float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
@@ -109,6 +111,18 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
 
         glm::vec3 c = p.offset;
         if (p.name == "Torso" || p.name == "Head") c.y += bob;
+
+        // Posa custom dell'item: vince su camminata/salto per quella parte.
+        if (const HoldPartPose* hp = holdParts ? findHoldPose(*holdParts, p.name) : nullptr) {
+            RigPose pose = p.anim;
+            pose.pos += hp->pos;
+            pose.rot.y += hp->rot.y;
+            drawPart(ctx, drawCube, root, c, p.size, p.color, p.pivot,
+                     hp->rot.x, hp->rot.z, pose);
+            if (p.name == "Head")
+                drawSmileFace(ctx, drawCube, root, headY + bob + hp->pos.y);
+            continue;
+        }
 
         float rx = p.rotX;
         float rz = p.rotZ;

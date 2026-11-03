@@ -16,7 +16,7 @@
 --  dedicato nel motore, come esiste gia' per spada e torcia.
 -- ============================================================
 
-local ITEM_NAME = "Fucile"
+local ITEM_NAME = "w_shotgun_spas"
 
 local Gui    = game:GetService("StarterGui")
 local Suoni  = game:GetService("SoundService")

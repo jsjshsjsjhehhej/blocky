@@ -3,6 +3,10 @@
 // direttamente le globali di main.cpp (g_screen, g_world, g_menu, ecc.).
 // Compila solo se incluso da main.cpp esattamente in questo punto.
 
+#include "render/RenderCullLod.h"
+#include "platform/Resilience.h"
+#include "platform/SystemStats.h"
+
 static void onGlfwError(int code, const char* desc) {
     char buf[256];
     std::snprintf(buf, sizeof(buf), "GLFW error %d: %s", code, desc ? desc : "?");
@@ -44,8 +48,11 @@ static void updateCrashContext() {
 inline void drawFrameProfiler() {
     using namespace plat::prof;
 
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    if (!ImGui::Begin("Prestazioni", nullptr,
+    plat::sysstats::update(ImGui::GetIO().DeltaTime);
+    const plat::sysstats::Snapshot& sys = plat::sysstats::snap();
+
+    ImGui::SetNextWindowBgAlpha(0.88f);
+    if (!ImGui::Begin("Statistiche prestazioni", &g_showProfiler,
                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
         ImGui::End();
         return;
@@ -54,6 +61,45 @@ inline void drawFrameProfiler() {
     const State& s = state();
     const float target = g_vsync ? 16.67f : 0.f;
 
+    if (ImGui::CollapsingHeader("Sistema", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("CPU (processo): %.0f%%", sys.cpuProcessPct);
+        char ws[32], pr[32];
+        plat::sysstats::formatMb(ws, sizeof(ws), sys.memWorkingSetBytes);
+        plat::sysstats::formatMb(pr, sizeof(pr), sys.memPrivateBytes);
+        ImGui::Text("Memoria client: %s", ws);
+        ImGui::TextDisabled("Memoria privata: %s", pr);
+        if (sys.gpuRenderer[0])
+            ImGui::Text("GPU: %s", sys.gpuRenderer);
+        else
+            ImGui::TextDisabled("GPU: —");
+        if (sys.gpuVendor[0])
+            ImGui::TextDisabled("%s · %s", sys.gpuVendor, sys.gpuVersion);
+        if (sys.vramKnown) {
+            char tot[32], free[32];
+            plat::sysstats::formatMb(tot, sizeof(tot), sys.vramTotalBytes);
+            plat::sysstats::formatMb(free, sizeof(free), sys.vramFreeBytes);
+            if (sys.vramTotalBytes > 0)
+                ImGui::Text("VRAM (stima): %s liberi / %s", free, tot);
+            else
+                ImGui::Text("VRAM libera (stima): %s", free);
+        } else {
+            ImGui::TextDisabled("VRAM: non disponibile su questa GPU/driver");
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Gioco", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("FPS: %.0f  ·  frame: %.2f ms", g_fps, s.frameAvgMs);
+        ImGui::TextDisabled("Qualita': %s · preset %s",
+                            g_engine.quality.name,
+                            g_engine.preset == QualityPreset::Low ? "Low"
+                            : g_engine.preset == QualityPreset::High ? "High" : "Medium");
+        ImGui::TextDisabled("Parti: %d  ·  modelli: %d",
+                            (int)g_world.parts.size(), (int)g_world.models.size());
+        if (g_net.role != NetRole::Offline)
+            ImGui::Text("Rete: %s", g_net.status);
+    }
+
+    ImGui::Separator();
     ImGui::Text("Frame: %.2f ms  (%.0f fps)", s.frameAvgMs,
                 s.frameAvgMs > 0.f ? 1000.f / s.frameAvgMs : 0.f);
     if (target > 0.f) {
@@ -106,6 +152,34 @@ inline void drawFrameProfiler() {
         ImGui::Text("Fisica [%s]: attive %d/%d (%d dormono)", ph.tier, ph.active,
                     g_bphys.budget().maxActive, ph.sleeping);
         ImGui::TextDisabled("congelate %d  lontane %d  statiche %d", ph.frozen, ph.culled, ph.statics);
+        if (g_audioMixer.ready())
+            ImGui::Text("Audio: %d suoni insieme", g_audioMixer.activeVoices());
+        else
+            ImGui::TextDisabled("Audio: mixer spento (voce singola)");
+    }
+
+    {
+        const blk::resilience::State& rs = blk::resilience::state();
+        ImGui::Separator();
+        ImGui::Text("Resilience (bug/lag)");
+        ImGui::TextDisabled("Emergenza lag: %d/3  |  fix mondo: %d  |  fix fisica: %d",
+                            rs.emergencyLevel, rs.lastWorldFixes, rs.lastPhysicsFixes);
+        ImGui::TextDisabled("Script kill (budget): %d  |  fix mondo totali: %d",
+                            rs.scriptKillCount, rs.totalWorldFixes);
+    }
+
+    {
+        const RenderCullStats& rs = g_renderCullStats;
+        ImGui::Separator();
+        ImGui::Text("Render Auto LOD / cull");
+        ImGui::TextDisabled(
+            "Part: %d disegnate / %d  (dist %d  frustum %d  occ %d  piccole %d  budget %d)",
+            rs.partsDrawn, rs.partsTotal, rs.partsDistCulled, rs.partsFrustumCulled,
+            rs.partsOcclusionCulled, rs.partsSmallCulled, rs.partsBudgetCulled);
+        ImGui::TextDisabled("Occluder soft-Z: %d  ·  Stud off: %d  mesh low: %d",
+                            rs.occlusionOccluders, rs.partsStudLod, rs.partsShapeLod);
+        ImGui::TextDisabled("Modelli: %d / %d visibili (%d scartati)",
+                            rs.modelsDrawn, rs.modelsTotal, rs.modelsCulled);
     }
 
     ImGui::Separator();
@@ -113,6 +187,7 @@ inline void drawFrameProfiler() {
     if (g_renderW < g_w)
         ImGui::TextDisabled("Render scale attivo: %.0f%% dei pixel",
                             100.f * (float)(g_renderW * g_renderH) / (float)(g_w * g_h));
+    ImGui::TextDisabled("F4 · menu Visualizza / Esc in gioco");
 
     ImGui::End();
 }

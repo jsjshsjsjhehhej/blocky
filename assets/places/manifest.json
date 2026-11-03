@@ -7,6 +7,22 @@
       "script": "scripts/baseplate.lua",
       "players": 1247,
       "accent": [0.20, 0.62, 0.35]
+    },
+    {
+      "id": "minecraft",
+      "title": "Mini Minecraft",
+      "subtitle": "Mondo voxel generato — scava e costruisci",
+      "script": "scripts/minecraft.lua",
+      "players": 980,
+      "accent": [0.36, 0.58, 0.24]
+    },
+    {
+      "id": "phantom_forces",
+      "title": "BlockyPlace Shooter",
+      "subtitle": "Phantom Forces style — viewmodel a Part, solo Luau",
+      "script": "scripts/phantom_forces.lua",
+      "players": 640,
+      "accent": [0.55, 0.22, 0.18]
     }
   ]
 }
