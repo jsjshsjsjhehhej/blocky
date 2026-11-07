@@ -24,6 +24,10 @@
 #include "main_ui/Studio2020Ui.h"
 #include "main_ui/StudioProUi.h"
 #include "main_ui/StudioPlatformPanels.h"
+#include "main_ui/StudioDevTools.h"
+#include "main_ui/AnimationStudioUi.h"
+#include "main_ui/StudioExplorer.h"
+#include "main_ui/StudioPropertyGrid.h"
 
 static void drawScriptCreatedGuidePopup() {
     if (!g_showScriptCreatedGuide) return;
@@ -54,6 +58,524 @@ static void drawScriptCreatedGuidePopup() {
         }
         ImGui::EndPopup();
     }
+}
+
+// ---- Barra dei comandi (ribbon) ----------------------------------------
+//
+// Ogni scheda ha pochi gruppi con un titolo; i comandi rari stanno nei menu
+// a tendina (ribbonMenuButton) invece che in decine di pulsanti; ogni
+// comando c'e' in un posto solo. Tutte le scritte passano da L() (ui/Loc.h):
+// le traduzioni sono in assets/lang/<lingua>.json.
+
+static void ribbonPartMenuItems() {
+    if (ImGui::MenuItem(L("rb.block"))) insertNewPart();
+    if (ImGui::MenuItem(L("rb.ball"))) insertShapedPart(PartShape::Ball);
+    if (ImGui::MenuItem(L("rb.cylinder"))) insertShapedPart(PartShape::Cylinder);
+    if (ImGui::MenuItem(L("rb.wedge"))) insertShapedPart(PartShape::Wedge);
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.neon"))) insertNeonPart();
+    if (ImGui::MenuItem(L("rb.light"))) insertPointLightPart();
+    if (ImGui::MenuItem(L("rb.explode"))) insertExplodePart();
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.spawn"))) studioRunInsertKind(7);
+}
+
+// Script, LocalScript o ModuleScript sulla part selezionata, come il menu
+// "Inserisci oggetto" di Roblox Studio.
+static void ribbonScriptMenuItems() {
+    const bool sel = g_selectedPart >= 0;
+    if (ImGui::MenuItem(L("rb.sc.server"), nullptr, false, sel)) studioAddScriptOfType(ScriptType::Server);
+    if (ImGui::MenuItem(L("rb.sc.local"), nullptr, false, sel)) studioAddScriptOfType(ScriptType::Client);
+    if (ImGui::MenuItem(L("rb.sc.module"), nullptr, false, sel)) studioAddScriptOfType(ScriptType::ModuleScript);
+    if (!sel) ImGui::TextDisabled("%s", L("rb.sc.needsel"));
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.templates"), nullptr, g_showScriptTemplates)) g_showScriptTemplates = !g_showScriptTemplates;
+}
+
+// Barra di accesso rapido (in alto a destra sulla striscia delle schede):
+// Salva, Annulla, Ripeti, come in Roblox Studio.
+static void drawRibbonQuickAccess(ImVec2 stripMin, float stripW) {
+    const float s = studio::kRibbonTabHeight - 6.f;
+    const ImVec2 after = ImGui::GetCursorScreenPos();
+    float x = stripMin.x + stripW - 3.f * (s + 4.f) - 6.f;
+    const float y = stripMin.y + 3.f;
+    if (studio::ribbonQuickButton("qsave", studio::Icon::Save, L("rb.q.save"), {x, y})) doSavePlace();
+    x += s + 4.f;
+    if (studio::ribbonQuickButton("qundo", studio::Icon::Undo, L("rb.q.undo"), {x, y}, g_undo.canUndo()))
+        studioDoUndo();
+    x += s + 4.f;
+    if (studio::ribbonQuickButton("qredo", studio::Icon::Redo, L("rb.q.redo"), {x, y}, g_undo.canRedo()))
+        studioDoRedo();
+    ImGui::SetCursorScreenPos(after);   // torna sotto le schede (segue un Dummy)
+}
+
+static void drawStudioRibbonBody(int& tab) {
+    static const char* kTabKeys[] = {"rb.tab.home", "rb.tab.model", "rb.tab.avatar", "rb.tab.ui",
+                                     "rb.tab.script", "rb.tab.test", "rb.tab.view"};
+    const char* tabs[7];
+    for (int i = 0; i < 7; ++i) tabs[i] = L(kTabKeys[i]);
+    if (tab < 0 || tab > 6) tab = 0;
+    const ImVec2 stripMin = ImGui::GetCursorScreenPos();
+    const float stripW = ImGui::GetContentRegionAvail().x;
+    studio::ribbonTabs(tabs, 7, tab);
+    drawRibbonQuickAccess(stripMin, stripW);
+    ImGui::Dummy({0.f, 3.f});
+    // Se i gruppi non ci stanno (finestra stretta, lingue con parole lunghe)
+    // la barra scorre in orizzontale: rotella sopra la barra o le frecce ai lati.
+    static float s_scroll[7] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    static float s_contentW[7] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    float& scroll = s_scroll[tab];
+    const float bodyW = ImGui::GetWindowWidth() - 16.f;
+    const float maxScroll = std::max(0.f, s_contentW[tab] - bodyW);
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        const ImGuiIO& io = ImGui::GetIO();
+        scroll -= (io.MouseWheel + io.MouseWheelH) * 60.f;
+    }
+    scroll = std::clamp(scroll, 0.f, maxScroll);
+    const float indent = 8.f - scroll;
+    const float contentX0 = ImGui::GetWindowPos().x + indent;
+    ImGui::Indent(indent);
+
+    using studio::Icon;
+    auto tool = [](const char* id, Icon icon, const char* key, StudioTool t) {
+        if (studio::ribbonBigButton(id, icon, L(key), g_tool == t)) {
+            g_tool = t;
+            g_scaleDragging = g_moveDragging = g_rotateDragging = false;
+        }
+    };
+    auto toolsGroup = [&](const char* idPrefix) {
+        studio::ribbonBeginGroup();
+        std::string p = idPrefix;
+        tool((p + "sel").c_str(), Icon::Cursor, "rb.select", StudioTool::Select);
+        tool((p + "mov").c_str(), Icon::Move, "rb.move", StudioTool::Move);
+        tool((p + "scl").c_str(), Icon::Scale, "rb.scale", StudioTool::Scale);
+        tool((p + "rot").c_str(), Icon::Rotate, "rb.rotate", StudioTool::Rotate);
+        studio::ribbonEndGroup(L("rb.g.tools"));
+    };
+    auto toggle = [](const char* id, Icon icon, const char* key, bool& flag) {
+        if (studio::ribbonBigButton(id, icon, L(key), flag)) flag = !flag;
+    };
+    auto small = [](const char* id, Icon icon, const char* key, bool enabled = true) {
+        return studio::ribbonSmallButton(id, icon, L(key), false, enabled);
+    };
+    GLFWwindow* win = glfwGetCurrentContext();
+    const bool hasSel = g_selectedPart >= 0 || studioMultiSelectionSize() > 0;
+
+    if (tab == 0) {   // ---- HOME ----
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("paste", Icon::NewFile, L("rb.paste"), false, !g_clipboard.empty()))
+            studioPasteClipboard();
+        studio::ribbonBeginStack();
+        if (small("copy", Icon::Duplicate, "rb.copy", hasSel)) studioCopySelection();
+        if (small("cut", Icon::Trash, "rb.cut", hasSel)) studioCutSelection();
+        if (small("dup", Icon::Duplicate, "rb.duplicate", hasSel)) studioDuplicateSelection();
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.clipboard"));
+
+        toolsGroup("h");
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonMenuButton("hpart", Icon::Cube, L("rb.part"))) {
+            ribbonPartMenuItems();
+            ImGui::EndPopup();
+        }
+        if (studio::ribbonBigButton("hmdl", Icon::Package, L("rb.import"))) insertImportedModel();
+        toggle("htbx", Icon::Folder, "rb.toolbox", g_showToolbox);
+        studio::ribbonBeginStack();
+        if (small("hobj", Icon::NewFile, "rb.object")) g_showInsertObject = true;
+        if (small("hscr", Icon::Script, "rb.scriptmenu")) ImGui::OpenPopup("hscr##menu");
+        if (ImGui::BeginPopup("hscr##menu")) {
+            ribbonScriptMenuItems();
+            ImGui::EndPopup();
+        }
+        if (small("hui", Icon::NewFile, "rb.uimenu")) ImGui::OpenPopup("hui##menu");
+        if (ImGui::BeginPopup("hui##menu")) {
+            if (ImGui::MenuItem(L("rb.textlabel"))) insertNewTextLabel();
+            if (ImGui::MenuItem(L("rb.textbutton"))) insertNewTextButton();
+            if (ImGui::MenuItem(L("rb.frame"))) insertNewFrame();
+            if (ImGui::MenuItem(L("rb.image"))) insertNewImageLabel();
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.insert"));
+
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("hgrp", Icon::Package, "rb.group", hasSel)) studioGroupSelection();
+        if (small("hugrp", Icon::Package, "rb.ungroup", !studioSelectedWholeGroups().empty())) studioUngroupSelection();
+        if (small("hlock", Icon::Anchor, "rb.lock", hasSel)) studioSetLockedOnSelection(!selectedPartLocked());
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("hanc", Icon::Anchor, "rb.anchor", hasSel)) studioSetAnchoredOnSelection(true);
+        if (small("huanc", Icon::Anchor, "rb.unanchor", hasSel)) studioSetAnchoredOnSelection(false);
+        if (small("hpaint", Icon::Light, "rb.paint")) {
+            g_paintToolActive = !g_paintToolActive;
+            if (g_paintToolActive) studioPaintAtSelection();
+        }
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.edit"));
+
+        studio::ribbonBeginGroup();
+        if (!g_studioTesting) {
+            if (studio::ribbonBigButton("hplay", Icon::Play, L("rb.play"))) startStudioTest(win);
+        } else if (studio::ribbonBigButton("hstop", Icon::Stop, L("rb.stop"), true)) {
+            stopStudioTest(win);
+        }
+        studio::ribbonBeginStack();
+        if (small("hhere", Icon::Play, "rb.playhere", !g_studioTesting)) studioPlayHere(win);
+        if (small("hmp", Icon::Head, "rb.multi")) g_showMpTest = !g_showMpTest;
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.test"));
+
+        studio::ribbonBeginGroup();
+        toggle("hset", Icon::Grid, "rb.settings", g_showGameSettings);
+        if (studio::ribbonMenuButton("hgame", Icon::Package, L("rb.gamemenu"))) {
+            ImGui::MenuItem(L("rb.teams"), nullptr, &g_showTeamsEditor);
+            ImGui::MenuItem(L("rb.leaderstats"), nullptr, &g_showLeaderstatsEditor);
+            ImGui::MenuItem(L("rb.spawns"), nullptr, &g_showSpawnEditor);
+            ImGui::MenuItem(L("rb.badges"), nullptr, &g_showBadgePanel);
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.datastore"), nullptr, &g_showDataStoreBrowser);
+            ImGui::MenuItem(L("rb.remotes"), nullptr, &g_showRemotesBrowser);
+            ImGui::MenuItem(L("rb.http"), nullptr, &g_showHttpServicePanel);
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.placesettings"), nullptr, &g_showPlaceSettings);
+            ImGui::MenuItem(L("rb.humdefaults"), nullptr, &g_showHumanoidDefaults);
+            ImGui::MenuItem(L("rb.prompts"), nullptr, &g_showPromptPlacer);
+            ImGui::MenuItem(L("rb.ctxactions"), nullptr, &g_showContextActions);
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.settings"), true);
+    } else if (tab == 1) {   // ---- MODELLO ----
+        toolsGroup("m");
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonMenuButton("mpart", Icon::Cube, L("rb.part"))) {
+            ribbonPartMenuItems();
+            ImGui::EndPopup();
+        }
+        toggle("mcol", Icon::Light, "rb.color", g_showBrickColorPicker);
+        toggle("mmat", Icon::Grid, "rb.material", g_showMaterialPalette);
+        studio::ribbonEndGroup(L("rb.g.parts"));
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonMenuButton("malign", Icon::Grid, L("rb.align"))) {
+            static const char* axes[3] = {"X", "Y", "Z"};
+            for (int a = 0; a < 3; ++a) {
+                char lab[96];
+                std::snprintf(lab, sizeof(lab), "%s %s: %s", L("rb.align"), axes[a], L("rb.al.min"));
+                if (ImGui::MenuItem(lab)) studioAlignSelection(a, StudioAlignMode::Min);
+                std::snprintf(lab, sizeof(lab), "%s %s: %s", L("rb.align"), axes[a], L("rb.al.center"));
+                if (ImGui::MenuItem(lab)) studioAlignSelection(a, StudioAlignMode::Center);
+                std::snprintf(lab, sizeof(lab), "%s %s: %s", L("rb.align"), axes[a], L("rb.al.max"));
+                if (ImGui::MenuItem(lab)) studioAlignSelection(a, StudioAlignMode::Max);
+                if (a < 2) ImGui::Separator();
+            }
+            ImGui::Separator();
+            for (int a = 0; a < 3; ++a) {
+                char lab[96];
+                std::snprintf(lab, sizeof(lab), "%s %s", L("rb.al.dist"), axes[a]);
+                if (ImGui::MenuItem(lab)) studioDistributeSelection(a);
+            }
+            ImGui::EndPopup();
+        }
+        if (studio::ribbonMenuButton("mtrans", Icon::Transform, L("rb.transform"))) {
+            if (ImGui::MenuItem(L("rb.tr.rot90y"))) studioRotateSelectionY(90.f);
+            if (ImGui::MenuItem(L("rb.tr.rotm90y"))) studioRotateSelectionY(-90.f);
+            if (ImGui::MenuItem(L("rb.tr.rot90x"))) studioRotateSelectionAxis(0, 90.f);
+            if (ImGui::MenuItem(L("rb.tr.rot90z"))) studioRotateSelectionAxis(2, 90.f);
+            ImGui::Separator();
+            static const char* axes[3] = {"X", "Y", "Z"};
+            for (int a = 0; a < 3; ++a) {
+                char lab[96];
+                std::snprintf(lab, sizeof(lab), "%s %s", L("rb.tr.mirror"), axes[a]);
+                if (ImGui::MenuItem(lab)) studioMirrorSelection(a);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.tr.scale2"))) studioUniformScaleSelection(2.f);
+            if (ImGui::MenuItem(L("rb.tr.scale05"))) studioUniformScaleSelection(0.5f);
+            if (ImGui::MenuItem(L("rb.tr.matchsize"))) studioMatchSizeToPrimary();
+            if (ImGui::MenuItem(L("rb.tr.matchcolor"))) studioMatchColorToPrimary();
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.tr.typein"))) g_showTransformTypeIn = true;
+            if (ImGui::MenuItem(L("rb.pivot"), nullptr, g_showPivotTools)) g_showPivotTools = !g_showPivotTools;
+            ImGui::EndPopup();
+        }
+        if (studio::ribbonMenuButton("mgroup", Icon::Package, L("rb.group"))) {
+            if (ImGui::MenuItem(L("rb.group"), "Ctrl+G")) studioGroupSelection();
+            if (ImGui::MenuItem(L("rb.gm"))) studioGroupSelectionAsModel();
+            if (ImGui::MenuItem(L("rb.ungroup"), nullptr, false, !studioSelectedWholeGroups().empty()))
+                studioUngroupSelection();
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.arrange"));
+
+        // Snap come in Roblox Studio: passo di spostamento (stud) e di rotazione (gradi).
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        ImGui::Checkbox(L("rb.snap.on"), &g_studioSnapEnabled);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(g_studioLocalSpace ? L("rb.space.local") : L("rb.space.world")))
+            g_studioLocalSpace = !g_studioLocalSpace;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", L("rb.space.tip"));
+        ImGui::SetNextItemWidth(110.f);
+        if (ImGui::DragFloat("##snapmove", &g_studioSnapMove, 0.05f, 0.05f, 64.f, L("rb.snap.move")))
+            g_studioSnapMove = std::max(0.05f, g_studioSnapMove);
+        ImGui::SetNextItemWidth(110.f);
+        if (ImGui::DragFloat("##snaprot", &g_studioSnapRotate, 0.5f, 1.f, 180.f, L("rb.snap.rot")))
+            g_studioSnapRotate = std::clamp(g_studioSnapRotate, 1.f, 180.f);
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.snap"));
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonMenuButton("msel", Icon::Cursor, L("rb.selmenu"))) {
+            if (ImGui::MenuItem(L("rb.sel.all"), "Ctrl+A")) studioSelectAllParts();
+            if (ImGui::MenuItem(L("rb.sel.invert"))) studioInvertSelection();
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.sel.color"), nullptr, false, g_selectedPart >= 0)) studioSelectSimilar(0);
+            if (ImGui::MenuItem(L("rb.sel.material"), nullptr, false, g_selectedPart >= 0)) studioSelectSimilar(1);
+            if (ImGui::MenuItem(L("rb.sel.size"), nullptr, false, g_selectedPart >= 0)) studioSelectSimilar(2);
+            if (ImGui::MenuItem(L("rb.sel.unanchored"))) studioSelectUnanchored();
+            if (ImGui::MenuItem(L("rb.sel.unlocked"))) studioSelectUnlocked();
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.findpart"), nullptr, &g_showFindPart);
+            ImGui::MenuItem(L("rb.tags"), nullptr, &g_showTagsWindow);
+            ImGui::MenuItem(L("rb.selsets"), nullptr, &g_showSelectionSets);
+            ImGui::MenuItem(L("rb.selhistory"), nullptr, &g_showSelectionHistory);
+            ImGui::EndPopup();
+        }
+        toggle("mmeas", Icon::Scale, "rb.measure", g_showMeasure);
+        if (studio::ribbonMenuButton("mtools", Icon::Transform, L("rb.toolsmenu"))) {
+            ImGui::MenuItem(L("rb.batchrename"), nullptr, &g_showBatchRename);
+            ImGui::MenuItem(L("rb.copyprops"), nullptr, &g_showCopyPasteProps);
+            ImGui::MenuItem(L("rb.batchtools"), nullptr, &g_showBatchTools);
+            ImGui::MenuItem(L("rb.physbatch"), nullptr, &g_showPhysicsBatch);
+            ImGui::MenuItem(L("rb.bulkscripts"), nullptr, &g_showBulkScripts);
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.prefabs"), nullptr, &g_showQuickPrefabs);
+            ImGui::MenuItem(L("rb.generators"), nullptr, &g_showKitGenerators);
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.randcolors"), nullptr, false, hasSel)) studioRandomizeColors();
+            if (ImGui::MenuItem(L("rb.spawnhere"), nullptr, false, g_selectedPart >= 0)) studioSetSpawnFromSelection();
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.selection"));
+
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("manc", Icon::Anchor, "rb.anchor", hasSel)) studioSetAnchoredOnSelection(true);
+        if (small("muanc", Icon::Anchor, "rb.unanchor", hasSel)) studioSetAnchoredOnSelection(false);
+        if (small("mcoll", Icon::Cube, "rb.collide", hasSel)) studioSetCanCollideOnSelection(true);
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("mncoll", Icon::Cube, "rb.nocollide", hasSel)) studioSetCanCollideOnSelection(false);
+        if (small("mcgrp", Icon::Package, "rb.colgroups")) g_showCollisionGroups = !g_showCollisionGroups;
+        studio::ribbonEndStack();
+        if (studio::ribbonMenuButton("mcons", Icon::Anchor, L("rb.constraints"))) {
+            if (ImGui::MenuItem(L("rb.c.weld"))) studioCreateWeldFromSelection();
+            if (ImGui::MenuItem(L("rb.c.hinge"))) studioCreateConstraintFromSelection(ConstraintKind::Hinge);
+            if (ImGui::MenuItem(L("rb.c.rope"))) studioCreateConstraintFromSelection(ConstraintKind::Rope);
+            if (ImGui::MenuItem(L("rb.c.spring"))) studioCreateConstraintFromSelection(ConstraintKind::Spring);
+            if (ImGui::MenuItem(L("rb.c.rod"))) studioCreateConstraintFromSelection(ConstraintKind::Rod);
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.c.join"))) studioJoinSurfaces();
+            if (ImGui::MenuItem(L("rb.c.list"), nullptr, g_showWeldsWindow)) g_showWeldsWindow = !g_showWeldsWindow;
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.physics"));
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("mterr", Icon::Grid, L("rb.terrain"), g_terrainToolActive || g_showTerrainEditor)) {
+            g_showTerrainEditor = true;
+            g_terrainToolActive = !g_terrainToolActive;
+        }
+        if (studio::ribbonBigButton("mspawn", Icon::Walk, L("rb.spawn"))) studioRunInsertKind(7);
+        if (studio::ribbonMenuButton("mlight", Icon::Light, L("rb.lighting"))) {
+            ImGui::TextDisabled("%s", L("rb.clock"));
+            studioClockTimeSlider();
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.lightpresets"), nullptr, &g_showLightingPresets);
+            ImGui::MenuItem(L("rb.atmosphere"), nullptr, &g_showAtmospherePanel);
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.world"));
+
+        studio::ribbonBeginGroup();
+        if (studio::ribbonMenuButton("mscr", Icon::Script, L("rb.scriptmenu"))) {
+            ribbonScriptMenuItems();
+            ImGui::EndPopup();
+        }
+        if (studio::ribbonBigButton("mobj", Icon::NewFile, L("rb.object"))) g_showInsertObject = true;
+        studio::ribbonEndGroup(L("rb.g.advanced"), true);
+    } else if (tab == 2) {   // ---- AVATAR ----
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("aavat", Icon::Torso, L("rb.avatar"))) enterAvatarPublisher();
+        if (studio::ribbonBigButton("arig", Icon::ArmRight, L("rb.rig"))) beginRigPlayer();
+        if (studio::ribbonBigButton("afriend", Icon::Head, L("rb.friend"))) insertFriendPlayer();
+        studio::ribbonBeginStack();
+        if (small("ariged", Icon::Torso, "rb.rigeditor")) g_showPlayerRigEditor = !g_showPlayerRigEditor;
+        if (small("ahum", Icon::Head, "rb.humdefaults")) g_showHumanoidDefaults = !g_showHumanoidDefaults;
+        if (small("aanimid", Icon::Walk, "rb.animids")) g_showAnimIdPanel = !g_showAnimIdPanel;
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.character"));
+        studio::ribbonBeginGroup();
+        toggle("astd", Icon::Walk, "rb.animstudio", g_showAnimStudio);
+        if (studio::ribbonBigButton("aanim", Icon::Walk, L("rb.animate"))) beginAnimateSelectedModel();
+        studio::ribbonBeginStack();
+        if (small("arigan", Icon::Walk, "rb.animator")) g_showRigAnimator = !g_showRigAnimator;
+        if (small("apub", Icon::Save, "rb.publishanim")) g_showPlayerAnimPublisher = true;
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.anim"), true);
+    } else if (tab == 3) {   // ---- INTERFACCIA ----
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("utl", Icon::NewFile, L("rb.textlabel"))) insertNewTextLabel();
+        if (studio::ribbonBigButton("utb", Icon::NewFile, L("rb.textbutton"))) insertNewTextButton();
+        if (studio::ribbonBigButton("ufr", Icon::NewFile, L("rb.frame"))) insertNewFrame();
+        if (studio::ribbonBigButton("uim", Icon::NewFile, L("rb.image"))) insertNewImageLabel();
+        studio::ribbonEndGroup(L("rb.g.gui"));
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("ul3", Icon::NewFile, L("rb.label3d"))) insertNewLabel();
+        if (studio::ribbonBigButton("usnd", Icon::Package, L("rb.sound"))) insertSound();
+        studio::ribbonEndGroup(L("rb.g.media"), true);
+    } else if (tab == 4) {   // ---- SCRIPT ----
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("snew", Icon::Script, L("rb.newscript"))) addScriptToSelected();
+        if (studio::ribbonBigButton("splace", Icon::Script, L("rb.placescript"))) g_showScript = true;
+        studio::ribbonEndGroup(L("rb.g.scripts"));
+        studio::ribbonBeginGroup();
+        toggle("sout", Icon::Script, "rb.output", g_showLuaOutput);
+        toggle("sana", Icon::Grid, "rb.analysis", g_showScriptAnalysis);
+        toggle("scmd", Icon::Script, "rb.cmdbar", g_showCommandBar);
+        studio::ribbonEndGroup(L("rb.g.debug"));
+        studio::ribbonBeginGroup();
+        toggle("sapi", Icon::Folder, "rb.api", g_showApiReference);
+        toggle("sgui", Icon::Folder, "rb.guide", g_showLuaGuide);
+        studio::ribbonEndGroup(L("rb.g.help"), true);
+    } else if (tab == 5) {   // ---- TEST ----
+        studio::ribbonBeginGroup();
+        if (!g_studioTesting) {
+            if (studio::ribbonBigButton("tplay", Icon::Play, L("rb.play"))) startStudioTest(win);
+        } else if (studio::ribbonBigButton("tstop", Icon::Stop, L("rb.stop"), true)) {
+            stopStudioTest(win);
+        }
+        if (studio::ribbonBigButton("there", Icon::Play, L("rb.playhere"), false, !g_studioTesting)) studioPlayHere(win);
+        if (studio::ribbonBigButton("tpause", Icon::Stop, L(g_simPaused ? "rb.resume" : "rb.pause"), g_simPaused,
+                                    g_studioTesting))
+            g_simPaused = !g_simPaused;
+        studio::ribbonEndGroup(L("rb.g.play"));
+        studio::ribbonBeginGroup();
+        toggle("tmp", Icon::Head, "rb.multi", g_showMpTest);
+        if (studio::ribbonBigButton("tclose", Icon::Trash, L("rb.closeplayers"), false, !g_mpTestClients.empty()))
+            studioStopMultiplayerTest();
+        toggle("tdev", Icon::Camera, "rb.device", g_showDeviceEmulator);
+        studio::ribbonEndGroup(L("rb.g.clients"));
+        studio::ribbonBeginGroup();
+        toggle("tcon", Icon::Script, "rb.console", g_showDevConsole);
+        toggle("tperf", Icon::Grid, "rb.perf", g_showScriptPerf);
+        toggle("twatch", Icon::Camera, "rb.watch", g_showWatch);
+        if (studio::ribbonBigButton("tmute", Icon::Light, L(g_audioMuted ? "rb.audiooff" : "rb.audioon"), g_audioMuted))
+            studioToggleMute();
+        if (studio::ribbonMenuButton("tdbg", Icon::Grid, L("rb.debugmenu"))) {
+            ImGui::MenuItem(L("rb.coldebug"), nullptr, &g_showCollisionDebug);
+            ImGui::MenuItem(L("rb.pathdebug"), nullptr, &g_showPathDebug);
+            ImGui::MenuItem(L("rb.physpanel"), nullptr, &g_showPhysicsPanel);
+            ImGui::MenuItem(L("rb.perfoverlay"), nullptr, &g_showPerfOverlay);
+            ImGui::MenuItem(L("rb.stats"), nullptr, &g_showPerfStats);
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.validator"), nullptr, &g_showPlaceValidator);
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.debug"), true);
+    } else {   // ---- VISUALIZZA ----
+        studio::ribbonBeginGroup();
+        toggle("vexp", Icon::Folder, "rb.explorer", g_showExplorer);
+        toggle("vprp", Icon::Transform, "rb.properties", g_showProps);
+        toggle("vtbx", Icon::Package, "rb.toolbox", g_showToolbox);
+        toggle("vout", Icon::Script, "rb.output", g_showLuaOutput);
+        studio::ribbonEndGroup(L("rb.g.windows"));
+        studio::ribbonBeginGroup();
+        toggle("vgrid", Icon::Grid, "rb.grid", g_studioGridVisible);
+        toggle("vwire", Icon::Cube, "rb.wireframe", g_viewWireframe);
+        toggle("vcol", Icon::Cube, "rb.collisions", g_viewCollision);
+        toggle("vcon", Icon::Anchor, "rb.constraints", g_showConstraintLines);
+        studio::ribbonEndGroup(L("rb.g.show"));
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("vfoc", Icon::Camera, L("rb.focus"), false, hasSel)) studioFocusSelection();
+        if (studio::ribbonBigButton("viso", Icon::Grid, L("rb.isolate"), g_viewIsolate)) studioIsolateToggle();
+        if (studio::ribbonMenuButton("vviews", Icon::Camera, L("rb.views"))) {
+            static const char* kViewKeys[6] = {"rb.v.top", "rb.v.front", "rb.v.back", "rb.v.left", "rb.v.right", "rb.v.iso"};
+            for (int v = 0; v < 6; ++v)
+                if (ImGui::MenuItem(L(kViewKeys[v]))) studioViewFrom(v);
+            ImGui::Separator();
+            if (ImGui::MenuItem(L("rb.zoomext"))) studioZoomExtents();
+            ImGui::MenuItem(L("rb.cambookmarks"), nullptr, &g_showCameraBookmarks);
+            ImGui::MenuItem(L("rb.campanel"), nullptr, &g_showCameraPanel);
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(140);
+            ImGui::SliderFloat(L("rb.fov"), &g_cam.fov, 30.f, 110.f, "%.0f");
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.camera"));
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("vshot", Icon::Camera, L("rb.screenshot"))) studioRequestScreenshot();
+#ifndef __ANDROID__
+        if (studio::ribbonBigButton("vfull", Icon::Grid, L("rb.fullscreen"), win && glfwGetWindowMonitor(win)))
+            studioToggleFullscreen(win);
+#endif
+        studio::ribbonEndGroup(L("rb.g.screen"));
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("vtags", Icon::Package, "rb.tags")) g_showTagsWindow = !g_showTagsWindow;
+        if (small("vstats", Icon::Grid, "rb.stats")) g_showPerfStats = !g_showPerfStats;
+        if (small("vkeys", Icon::Script, "rb.hotkeys")) g_showHotkeySheet = !g_showHotkeySheet;
+        studio::ribbonEndStack();
+        toggle("vsearch", Icon::Folder, "rb.search", g_showCommandPalette);
+        if (studio::ribbonMenuButton("vmore", Icon::Folder, L("rb.morewin"))) {
+            ImGui::MenuItem(L("rb.versions"), nullptr, &g_showVersionHistory);
+            ImGui::MenuItem(L("rb.profiler"), "F4", &g_showProfiler);
+            ImGui::MenuItem(L("rb.settings"), nullptr, &g_showGameSettings);
+            ImGui::MenuItem(L("rb.attributes"), nullptr, &g_showAttributesEditor);
+            ImGui::MenuItem(L("rb.quick"), nullptr, &g_showQuickActions);
+            ImGui::MenuItem(L("rb.colgroups"), nullptr, &g_showCollisionGroups);
+            ImGui::MenuItem(L("rb.terrain"), nullptr, &g_showTerrainEditor);
+            ImGui::MenuItem(L("rb.findreplace"), nullptr, &g_showFindReplace);
+            ImGui::Separator();
+            ImGui::MenuItem(L("rb.sounds"), nullptr, &g_showSoundBrowser);
+            ImGui::MenuItem(L("rb.assets"), nullptr, &g_showAssets);
+            ImGui::MenuItem(L("rb.partcounter"), nullptr, &g_showPartCounter);
+            ImGui::MenuItem(L("rb.plugins"), nullptr, &g_showPluginBar);
+            ImGui::MenuItem(L("rb.prefs"), nullptr, &g_showStudioPrefs);
+            ImGui::EndPopup();
+        }
+        studio::ribbonEndGroup(L("rb.g.tools2"), true);
+    }
+
+    s_contentW[tab] = ImGui::GetItemRectMax().x - contentX0 + 8.f;
+    if (!g_exportMsg.empty()) {
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored({1.f, 0.85f, 0.4f, 1.f}, "%s", g_exportMsg.c_str());
+    }
+    ImGui::Unindent(indent);
+
+    // Frecce di scorrimento sui bordi quando c'e' altro da vedere.
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const float by0 = wp.y + studio::kRibbonTabHeight, by1 = wp.y + studio::kRibbonHeight;
+    auto arrow = [&](bool left) {
+        const float x0 = left ? wp.x : wp.x + ImGui::GetWindowWidth() - 18.f;
+        ImGui::SetCursorScreenPos({x0, by0});
+        ImGui::PushID(left ? "rbl" : "rbr");
+        if (ImGui::InvisibleButton("##sc", {18.f, by1 - by0})) scroll += left ? -240.f : 240.f;
+        const bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled({x0, by0}, {x0 + 18.f, by1}, hov ? IM_COL32(70, 78, 92, 240) : IM_COL32(45, 48, 54, 220));
+        const float cy = (by0 + by1) * 0.5f, cx = x0 + 9.f;
+        if (left) dl->AddTriangleFilled({cx + 4, cy - 7}, {cx + 4, cy + 7}, {cx - 4, cy}, IM_COL32(220, 225, 235, 255));
+        else dl->AddTriangleFilled({cx - 4, cy - 7}, {cx - 4, cy + 7}, {cx + 4, cy}, IM_COL32(220, 225, 235, 255));
+    };
+    if (scroll > 0.5f) arrow(true);
+    if (scroll < maxScroll - 0.5f) arrow(false);
 }
 
 static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
@@ -260,7 +782,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             if (ImGui::MenuItem("Duplica selezione", "Ctrl+D")) studioDuplicateSelection();
             ImGui::Separator();
             if (ImGui::MenuItem(L("menu.dup"), "Ctrl+D")) studioDuplicateSelectionOffset();
-            if (ImGui::MenuItem(L("menu.script_part"), "Ctrl+L")) addScriptToSelected();
+            if (ImGui::MenuItem(L("menu.script_part"))) addScriptToSelected();
             if (ImGui::MenuItem(L("menu.delete"), "Del")) deleteSelected();
             drawStudioFeaturesEditMenu();
             drawStudioProEditMenu();
@@ -281,6 +803,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         }
         if (ImGui::BeginMenu(L("animation"))) {
             ImGui::MenuItem("Blocky Animator (personaggio)...", nullptr, &g_showRigAnimator);
+            ImGui::MenuItem("Animation Studio (rig, IK, curve)...", nullptr, &g_showAnimStudio);
             ImGui::Separator();
             if (ImGui::MenuItem(L("menu.animate_model"), "Ctrl+Shift+A"))
                 beginAnimateSelectedModel();
@@ -296,7 +819,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::MenuItem("Riferimento API (Roblox-style)", nullptr, &g_showApiReference);
             ImGui::MenuItem("Output Lua (print)", nullptr, &g_showLuaOutput);
             ImGui::Separator();
-            ImGui::MenuItem("Guida Lua Blocky", "F2", &g_showLuaGuide);
+            ImGui::MenuItem("Guida Lua Blocky", nullptr, &g_showLuaGuide);
             if (ImGui::MenuItem("Apri script globale place"))
                 g_showScript = true;
             ImGui::EndMenu();
@@ -312,7 +835,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::MenuItem(L("menu.properties"), nullptr, &g_showProps);
             ImGui::MenuItem(L("menu.create_panel"), nullptr, &g_showCreatePanel);
             ImGui::MenuItem(L("menu.global_script"), nullptr, &g_showScript);
-            ImGui::MenuItem("Guida Lua Blocky", "F2", &g_showLuaGuide);
+            ImGui::MenuItem("Guida Lua Blocky", nullptr, &g_showLuaGuide);
             ImGui::MenuItem("Riferimento API", nullptr, &g_showApiReference);
             ImGui::MenuItem("Output Lua", nullptr, &g_showLuaOutput);
             ImGui::MenuItem(L("menu.engine_settings"), nullptr, &g_showPlatformPanel);
@@ -377,166 +900,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoBringToFrontOnFocus))
     {
-        // Tab come Roblox Studio: Home · Avatar · UI · Script · Model · Test
-        static const char* kTabs[] = { "Home", "Avatar", "UI", "Script", "Model", "Test" };
-        if (g_studioRibbonTab < 0 || g_studioRibbonTab > 5) g_studioRibbonTab = 0;
-        studio::ribbonTabs(kTabs, 6, g_studioRibbonTab);
-        ImGui::Dummy({0.f, 3.f});
-        ImGui::Indent(8.f);
-
-        auto clearGizmoDrag = []() {
-            g_scaleDragging = false;
-            g_moveDragging = false;
-            g_rotateDragging = false;
-        };
-        auto sep = []() {
-            ImGui::SameLine(0.f, 8.f);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            dl->AddLine({p.x, p.y + 4.f}, {p.x, p.y + 70.f}, IM_COL32(62, 70, 84, 255));
-            ImGui::Dummy({8.f, 1.f});
-            ImGui::SameLine(0.f, 0.f);
-        };
-
-        // ---- HOME: tools + Part + Play (come ribbon Studio) ----
-        if (g_studioRibbonTab == 0) {
-            if (studio::ribbonBigButton("sel", studio::Icon::Cursor, "Select",
-                                        g_tool == StudioTool::Select)) {
-                g_tool = StudioTool::Select; clearGizmoDrag();
-            }
-            if (studio::ribbonBigButton("mov", studio::Icon::Move, "Move",
-                                        g_tool == StudioTool::Move)) {
-                g_tool = StudioTool::Move; clearGizmoDrag();
-            }
-            if (studio::ribbonBigButton("scl", studio::Icon::Scale, "Scale",
-                                        g_tool == StudioTool::Scale)) {
-                g_tool = StudioTool::Scale; clearGizmoDrag();
-            }
-            if (studio::ribbonBigButton("rot", studio::Icon::Rotate, "Rotate",
-                                        g_tool == StudioTool::Rotate)) {
-                g_tool = StudioTool::Rotate; clearGizmoDrag();
-            }
-            sep();
-            if (studio::ribbonBigButton("part", studio::Icon::Cube, "Part"))
-                insertNewPart();
-            if (studio::ribbonBigButton("mdl", studio::Icon::Package, "Model"))
-                insertImportedModel();
-            if (studio::ribbonBigButton("tbx", studio::Icon::Folder, "Toolbox", g_showToolbox))
-                g_showToolbox = !g_showToolbox;
-            if (studio::ribbonBigButton("ast", studio::Icon::Package, "Assets", g_showAssets)) {
-                g_showAssets = !g_showAssets;
-                if (g_showAssets) g_bottomDockTab = 1;
-            }
-            sep();
-            drawStudioSnapViewRibbonExtras();
-            drawStudio2020RibbonExtras();
-            drawStudioProRibbonExtras();
-            sep();
-            if (studio::ribbonBigButton("scrH", studio::Icon::Script, "Script"))
-                addScriptToSelected();
-            if (studio::ribbonBigButton("playH", studio::Icon::Play, "Play",
-                                       false, !g_studioTesting))
-                startStudioTest(glfwGetCurrentContext());
-        }
-        // ---- AVATAR ----
-        else if (g_studioRibbonTab == 1) {
-            if (studio::ribbonBigButton("avat", studio::Icon::Torso, "Avatar"))
-                enterAvatarPublisher();
-            if (studio::ribbonBigButton("rig", studio::Icon::ArmRight, "Rig"))
-                beginRigPlayer();
-            if (studio::ribbonBigButton("anid", studio::Icon::Walk, "AnimId"))
-                g_showPlayerAnimPublisher = true;
-            if (studio::ribbonBigButton("friend", studio::Icon::Head, "Friend"))
-                insertFriendPlayer();
-        }
-        // ---- UI ----
-        else if (g_studioRibbonTab == 2) {
-            if (studio::ribbonBigButton("tlbl", studio::Icon::NewFile, "TextLabel"))
-                insertNewTextLabel();
-            if (studio::ribbonBigButton("tbtn", studio::Icon::NewFile, "TextButton"))
-                insertNewTextButton();
-            if (studio::ribbonBigButton("frm", studio::Icon::NewFile, "Frame"))
-                insertNewFrame();
-            if (studio::ribbonBigButton("img", studio::Icon::NewFile, "ImageLabel"))
-                insertNewImageLabel();
-            if (studio::ribbonBigButton("lbl", studio::Icon::NewFile, "Label 3D"))
-                insertNewLabel();
-            if (studio::ribbonBigButton("snd", studio::Icon::Package, "Sound"))
-                insertSound();
-        }
-        // ---- SCRIPT ----
-        else if (g_studioRibbonTab == 3) {
-            if (studio::ribbonBigButton("scr", studio::Icon::Script, "Script"))
-                addScriptToSelected();
-            if (studio::ribbonBigButton("anim", studio::Icon::Walk, "Animate"))
-                beginAnimateSelectedModel();
-            sep();
-            if (studio::ribbonBigButton("out", studio::Icon::Script, "Output", g_showLuaOutput))
-                g_showLuaOutput = !g_showLuaOutput;
-            if (studio::ribbonBigButton("guide", studio::Icon::Script, "Guida Lua", g_showLuaGuide))
-                g_showLuaGuide = !g_showLuaGuide;
-        }
-        // ---- MODEL ----
-        else if (g_studioRibbonTab == 4) {
-            if (studio::ribbonBigButton("blk", studio::Icon::Cube, "Block"))
-                insertNewPart();
-            if (studio::ribbonBigButton("ball", studio::Icon::Sphere, "Ball"))
-                insertShapedPart(PartShape::Ball);
-            if (studio::ribbonBigButton("cyl", studio::Icon::Cylinder, "Cylinder"))
-                insertShapedPart(PartShape::Cylinder);
-            if (studio::ribbonBigButton("wed", studio::Icon::Wedge, "Wedge"))
-                insertShapedPart(PartShape::Wedge);
-            sep();
-            if (studio::ribbonBigButton("neon", studio::Icon::Light, "Neon"))
-                insertNeonPart();
-            if (studio::ribbonBigButton("pl", studio::Icon::Light, "PointLight"))
-                insertPointLightPart();
-            if (studio::ribbonBigButton("boom", studio::Icon::Trash, "Explode"))
-                insertExplodePart();
-            sep();
-            if (studio::ribbonBigButton("dup", studio::Icon::Duplicate, "Duplicate"))
-                duplicateSelected();
-            if (studio::ribbonBigButton("del", studio::Icon::Trash, "Delete"))
-                deleteSelected();
-            sep();
-            if (studio::ribbonBigButton("anc", studio::Icon::Anchor, "Anchor"))
-                studioSetAnchoredOnSelection(true);
-            if (studio::ribbonBigButton("uanc", studio::Icon::Anchor, "Unanchor"))
-                studioSetAnchoredOnSelection(false);
-            if (studio::ribbonBigButton("col", studio::Icon::Cube, "Collide"))
-                studioSetCanCollideOnSelection(true);
-            if (studio::ribbonBigButton("ncol", studio::Icon::Cube, "NoCollide"))
-                studioSetCanCollideOnSelection(false);
-            sep();
-            drawStudioModelTabExtras();
-            drawStudioTransformRibbonExtras();
-        }
-        // ---- TEST ----
-        else if (g_studioRibbonTab == 5) {
-            if (!g_studioTesting) {
-                if (studio::ribbonBigButton("play", studio::Icon::Play, "Play"))
-                    startStudioTest(glfwGetCurrentContext());
-            } else {
-                if (studio::ribbonBigButton("stop", studio::Icon::Stop, "Stop", true))
-                    stopStudioTest(glfwGetCurrentContext());
-            }
-            sep();
-            if (studio::ribbonBigButton("exp", studio::Icon::Folder, "Explorer", g_showExplorer))
-                g_showExplorer = !g_showExplorer;
-            if (studio::ribbonBigButton("prp", studio::Icon::Transform, "Properties", g_showProps))
-                g_showProps = !g_showProps;
-            if (studio::ribbonBigButton("tbx2", studio::Icon::Package, "Toolbox", g_showToolbox))
-                g_showToolbox = !g_showToolbox;
-            if (studio::ribbonBigButton("cam", studio::Icon::Camera, "Camera"))
-                g_mode = CamMode::Studio;
-        }
-
-        if (!g_exportMsg.empty()) {
-            ImGui::SameLine();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored({1.f, 0.85f, 0.4f, 1.f}, "%s", g_exportMsg.c_str());
-        }
-        ImGui::Unindent(8.f);
+        drawStudioRibbonBody(g_studioRibbonTab);
     }
     ImGui::End();
     ImGui::PopStyleColor();
@@ -605,189 +969,12 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         studio_chrome::pushDockPanelColors();
         ImGui::Begin("Explorer", &g_showExplorer, kStudioPanelFlags);
 
-        drawExplorerToolbar();
-        ImGui::Separator();
-        // Albero game → Workspace / Services (come Studio a destra).
-        ImGui::TextDisabled("game");
-        if (ImGui::TreeNodeEx("Workspace", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::Selectable("SpawnLocation##sp", g_selectedSpawn))
-                selectSpawn();
-            {
-                char tbuf[96];
-                std::snprintf(tbuf, sizeof(tbuf), "Terrain (%d voxel)##terrain", g_terrain.blockCount());
-                ImGui::Selectable(tbuf, false);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "workspace.Terrain — FillBlock, ReadVoxels, WriteVoxels\n"
-                        "Solo via script (Test/Play), stile Roblox Studio.");
-            }
-
-            if (ImGui::TreeNodeEx("Parts", ImGuiTreeNodeFlags_DefaultOpen)) {
-                drawExplorerPartsTree();
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNodeEx("Models", ImGuiTreeNodeFlags_DefaultOpen)) {
-                for (int i = 0; i < (int)g_world.models.size(); ++i) {
-                    auto& m = g_world.models[i];
-                    std::string label = m.name + "##model" + std::to_string(i);
-                    if (ImGui::Selectable(label.c_str(), i == g_selectedModel)) {
-                        selectModel(i);
-                        g_showProps = true;
-                    }
-                }
-                if (ImGui::SmallButton("+ Import Model")) insertImportedModel();
-                ImGui::TreePop();
-            }
-
-            ImGui::TreePop(); // Workspace
-        }
-
-        ImGui::Separator();
-        if (ImGui::TreeNodeEx("Services", ImGuiTreeNodeFlags_DefaultOpen)) {
-            // Full DataModel service catalog (scriptable via GetService).
-            if (ImGui::TreeNodeEx("All Services", ImGuiTreeNodeFlags_DefaultOpen)) {
-                drawExplorerServiceTree();
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNodeEx("StarterGui", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::Selectable("StarterGui (service)##svc7", g_selectedService == 7))
-                    toggleService(7);
-                if (ImGui::TreeNodeEx("ScreenGui", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
-                        auto& l = g_world.labels[i];
-                        std::string label = l.className + " · " + l.name + "##lab" + std::to_string(i);
-                        if (ImGui::Selectable(label.c_str(), i == g_selectedLabel))
-                            selectLabel(i);
-                    }
-                    if (ImGui::SmallButton("+ TextLabel")) insertNewTextLabel();
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("+ Label")) insertNewLabel();
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("+ TextButton")) insertNewTextButton();
-                    ImGui::TreePop();
-                }
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNodeEx("StarterPack", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::Selectable("StarterPack (service)##svc15",
-                        g_selectedService == studio::platform::Svc_StarterPack))
-                    toggleService(studio::platform::Svc_StarterPack);
-                ImGui::TextDisabled("Tool → hotbar in Test/Play (un solo percorso)");
-                for (int i = 0; i < (int)g_world.backpack.size(); ++i) {
-                    auto& b = g_world.backpack[i];
-                    bool eq = (g_world.equippedBackpack == i);
-                    std::string label = (eq ? "* " : "") + b.name + "##bp" + std::to_string(i);
-                    if (ImGui::Selectable(label.c_str(), i == g_selectedBackpack)) {
-                        g_selectedBackpack = i;
-                        g_showProps = true;
-                    }
-                }
-                if (ImGui::SmallButton("+ Item")) {
-                    g_world.addBackpackItem("Item", (int)g_world.backpack.size());
-                    g_selectedBackpack = (int)g_world.backpack.size() - 1;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("+ Sword"))
-                    g_world.addBackpackItem("Sword", 3, BackpackTool::Sword);
-                ImGui::SameLine();
-                if (ImGui::SmallButton("+ Pistola"))
-                    g_world.addBackpackItem("Pistola", 4, BackpackTool::Pistol);
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNodeEx("Players", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::Selectable("Players (service)##svc10", g_selectedService == 10))
-                    toggleService(10);
-                bool playerOpen = ImGui::TreeNodeEx("LocalPlayer",
-                    ImGuiTreeNodeFlags_DefaultOpen
-                    | (g_selectedPlayer && g_selectedPlayerPart < 0 ? ImGuiTreeNodeFlags_Selected : 0));
-                if (ImGui::IsItemClicked())
-                    selectPlayer(-1);
-                if (playerOpen) {
-                    ImGui::TextDisabled(g_player.humanoid.userRigged ? "Rig: OK" : "Rig: mancante");
-                    if (ImGui::SmallButton("Riggare..."))
-                        beginRigPlayer();
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Anim ID..."))
-                        g_showPlayerAnimPublisher = true;
-
-                    if (ImGui::TreeNodeEx("Humanoid", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        if (ImGui::IsItemClicked())
-                            selectPlayer(-1);
-                        for (int i = 0; i < (int)g_player.humanoid.parts.size(); ++i) {
-                            auto& bp = g_player.humanoid.parts[i];
-                            bool sel = g_selectedPlayer && g_selectedPlayerPart == i;
-                            if (ImGui::Selectable(bp.name.c_str(), sel))
-                                selectPlayer(i);
-                        }
-                        ImGui::TreePop();
-                    }
-                    ImGui::TreePop();
-                }
-                ImGui::TreePop();
-            }
-
-            if (ImGui::TreeNodeEx("StarterPlayer")) {
-                if (ImGui::Selectable("StarterPlayer##svc13",
-                        g_selectedService == studio::platform::Svc_StarterPlayer))
-                    toggleService(studio::platform::Svc_StarterPlayer);
-                if (ImGui::Selectable("StarterCharacter##svc14",
-                        g_selectedService == studio::platform::Svc_StarterCharacter))
-                    toggleService(studio::platform::Svc_StarterCharacter);
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNodeEx("SoundService", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::Selectable("SoundService (service)##svc30",
-                        g_selectedService == studio::platform::Svc_SoundService))
-                    toggleService(studio::platform::Svc_SoundService);
-                for (int i = 0; i < (int)g_sounds.sounds.size(); ++i) {
-                    auto& s = g_sounds.sounds[i];
-                    std::string label = s.name + (s.playing ? " [playing]" : "") + "##snd" + std::to_string(i);
-                    if (ImGui::Selectable(label.c_str(), i == g_selectedSound)) {
-                        selectSound(i);
-                        g_showProps = true;
-                    }
-                }
-                if (ImGui::SmallButton("+ Sound")) insertSound();
-                ImGui::TreePop();
-            }
-            bool animSel = g_selectedService < 0 && !g_selectedPlayer && !g_selectedSpawn
-                && g_selectedPart < 0 && g_selectedModel < 0 && g_selectedSound < 0
-                && g_selectedLabel < 0;
-            if (ImGui::Selectable("Animator##svc", animSel)) {
-                clearAllSelection();
-                g_showProps = true;
-            }
-            ImGui::TextDisabled("clip: %s", g_animator.lastPlayed.c_str());
-            ImGui::TreePop();
-        }
-
-        ImGui::Separator();
-        if (ImGui::BeginMenu("Create object")) {
-            if (ImGui::MenuItem("Part")) insertNewPart();
-            if (ImGui::MenuItem("Ball")) insertShapedPart(PartShape::Ball);
-            if (ImGui::MenuItem("Cylinder")) insertShapedPart(PartShape::Cylinder);
-            if (ImGui::MenuItem("Wedge")) insertShapedPart(PartShape::Wedge);
-            if (ImGui::MenuItem("Model (import)")) insertImportedModel();
-            ImGui::Separator();
-            if (ImGui::MenuItem("TextLabel")) insertNewTextLabel();
-            if (ImGui::MenuItem("TextButton")) insertNewTextButton();
-            if (ImGui::MenuItem("Sound")) insertSound();
-            ImGui::Separator();
-            if (ImGui::MenuItem("Script on selection")) addScriptToSelected();
-            if (ImGui::MenuItem("Tool (StarterPack)"))
-                g_world.addBackpackItem("Tool", (int)g_world.backpack.size());
-            ImGui::EndMenu();
-        }
-        if (ImGui::Button("Aggiungi Script al blocco", {-1, 0}))
-            addScriptToSelected();
-        if (g_showFbx && fbxOk) ImGui::BulletText("FBX (legacy)");
+        drawRobloxExplorer();   // main_ui/StudioExplorer.h: albero stile Roblox Studio
+        (void)fbxOk;
         ImGui::End();
         studio_chrome::popDockPanelColors();
     }
+    drawViewportContextMenu();   // clic destro fermo sul viewport (StudioExplorer.h)
 
     if (g_showProps) {
         ImGui::SetNextWindowPos({rightX, propsY}, ImGuiCond_Always);
@@ -1541,119 +1728,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::TextDisabled("Salva/Pubblica sono sempre in fondo a questo pannello.");
         } else {
             auto& p = g_world.parts[g_selectedPart];
-            studio_chrome::drawClassNameBanner("Part", p.name.c_str());
+            studio_chrome::drawClassNameBanner(exPartClass(p), p.name.c_str());
             drawMultiPartPropertiesSection();
-            ImGui::TextDisabled("Shape: %s", partShapeName(p.shape));
-            if (ImGui::InputText("Name", g_partNameBuf, sizeof(g_partNameBuf)))
-                p.name = g_partNameBuf;
-            {
-                int sh = (int)p.shape;
-                if (sh < 0 || sh >= (int)PartShape::Count) sh = 0;
-                const char* shapes[] = { "Block", "Ball", "Cylinder", "Wedge" };
-                if (ImGui::Combo("Shape", &sh, shapes, IM_ARRAYSIZE(shapes))) {
-                    p.shape = (PartShape)sh;
-                    if (p.shape != PartShape::Block) p.useStud = false;
-                    markPlaceDirty();
-                }
-            }
+            drawRobloxPartProperties(p, g_selectedPart);   // StudioPropertyGrid.h
 
-            ImGui::Separator();
-            ImGui::Text("Transform");
-            ImGui::DragFloat3("Position", &p.position.x, 0.25f);
-            ImGui::DragFloat3("Size", &p.size.x, 0.25f, 0.05f, 100000.f);
-            ImGui::DragFloat3("Rotation °", &p.rotation.x, 1.f);
-            if (g_tool == StudioTool::Move)
-                ImGui::TextWrapped("Muovi: frecce RGB. Snap 0.25 · Shift=0.05 · Ctrl=libero.");
-            else if (g_tool == StudioTool::Scale)
-                ImGui::TextWrapped("Scala: cubetti sulle facce (lento · Shift=piu' veloce · Ctrl=libero).");
-            else if (g_tool == StudioTool::Rotate)
-                ImGui::TextWrapped("Ruota: anelli RGB + tick 15°. Snap 5° · Shift=1° · Ctrl=libero.");
-            else
-                ImGui::TextWrapped("Seleziona: scegli Muovi / Scala / Ruota dalla toolbar.");
-            if (ImGui::Button("Allarga X")) p.size.x = std::min(100000.f, p.size.x + 1.f);
-            ImGui::SameLine();
-            if (ImGui::Button("Allarga Z")) p.size.z = std::min(100000.f, p.size.z + 1.f);
-            ImGui::SameLine();
-            if (ImGui::Button("Alza Y")) p.size.y = std::min(100000.f, p.size.y + 1.f);
-            if (ImGui::Button("Ingrandisci x1.25")) studioScaleSelection(1.25f);
-            ImGui::SameLine();
-            if (ImGui::Button("Riduci x0.8")) studioScaleSelection(0.8f);
-
-            ImGui::Separator();
-            drawPartColorPicker(p.color);
-            ImGui::Separator();
-#define PART_PROP(T, field, luaName, jsonKey, def, mn, mx, help) \
-            partprops::editUi(luaName, p.field, mn, mx);          \
-            partprops::helpTooltip(help);
-#include "engine/PartProps.def"
-#undef PART_PROP
-            if (!p.anchored)
-                ImGui::TextColored({0.45f, 0.8f, 1.f, 1.f}, "Non ancorata: in Play cade, rotola e si spinge");
-            ImGui::Checkbox("Stud texture", &p.useStud);
-
-            ImGui::Separator();
-            ImGui::TextColored({0.85f, 0.75f, 0.35f, 1.f}, "Material");
-            {
-                int matIdx = (int)p.material;
-                if (matIdx < 0 || matIdx >= (int)PartMaterial::Count) matIdx = 0;
-                const char* mats[] = {
-                    "Plastic", "SmoothPlastic", "Neon", "Metal", "Wood",
-                    "Concrete", "Grass", "Glass", "Ice", "Brick", "ForceField",
-                    "Fabric", "Marble", "Sand", "Slate", "DiamondPlate",
-                    "CorrodedMetal", "Granite", "Asphalt"
-                };
-                if (ImGui::Combo("Material##mat", &matIdx, mats, IM_ARRAYSIZE(mats)))
-                    p.setMaterial((PartMaterial)matIdx);
-            }
-            drawPartStudioExtras(p);
-            ImGui::SliderFloat("Emissive", &p.emissive, 0.f, 2.f, "%.2f");
-            ImGui::Checkbox("PointLight (illumina intorno)", &p.pointLight);
-            if (p.pointLight) {
-                ImGui::SliderFloat("Light Range", &p.lightRange, 4.f, 60.f, "%.0f");
-                ImGui::SliderFloat("Light Brightness", &p.lightBrightness, 0.2f, 4.f, "%.2f");
-                ImGui::TextDisabled("Colore luce = colore Part · max 8 luci attive");
-            }
-
-            ImGui::Separator();
-            ImGui::TextColored({1.f, 0.45f, 0.3f, 1.f}, "Distruzione");
-            ImGui::Checkbox("CanDestroy", &p.canDestroy);
-            ImGui::Checkbox("BoomOnTouch", &p.boomOnTouch);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("In Test: 1 avvicinamento = boom");
-            ImGui::SliderFloat("BoomAutoSecs", &p.boomAutoSecs, 0.f, 15.f, "%.1f s");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("0 = solo tocco; >0 = esplode da solo dopo N secondi in Test");
-            if (!p.canDestroy)
-                ImGui::TextDisabled("Destroy / Explode / spada non la rimuovono");
-            else {
-                ImGui::SliderFloat("Health", &p.health, 1.f, 500.f, "%.0f");
-                p.maxHealth = std::max(p.maxHealth, p.health);
-                if (ImGui::Button("Explodi ora", {180, 0})) {
-                    glm::vec3 boomPos = p.position;
-                    if (g_studioTesting || g_screen == AppScreen::Playing)
-                        doBoomAt(boomPos, 14.f, 55.f, 24);
-                    else
-                        g_particles.spawnExplosion(boomPos, 14.f, 24);
-                    g_exportMsg = "BOOM!";
-                    if ((g_studioTesting || g_screen == AppScreen::Playing) && p.canDestroy) {
-                        int idx = g_selectedPart;
-                        selectPart(-1);
-                        if (idx >= 0 && idx < (int)g_world.parts.size())
-                            g_world.parts.erase(g_world.parts.begin() + idx);
-                    } else if (!g_studioTesting && g_screen == AppScreen::Studio) {
-                        g_exportMsg += " (solo FX in editor — Test per danno/distruggi)";
-                    }
-                }
-            }
-
-            ImGui::Separator();
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.90f, 0.28f, 0.20f, 1.f});
-            if (ImGui::Button("Rimuovi Part", {-1, 0})) deleteSelected();
-            ImGui::PopStyleColor(2);
-
-            ImGui::Separator();
-            ImGui::TextColored({0.9f, 0.7f, 0.2f, 1.f}, "Script del blocco");
+            ImGui::PushStyleColor(ImGuiCol_Header, {0.22f, 0.23f, 0.26f, 1.f});
+            const bool scriptOpen = ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen);
+            ImGui::PopStyleColor();
+            if (scriptOpen) {
             ImGui::TextWrapped(
                 "Non e' Lua vanilla: usi l'API Blocky (tipo Roblox). "
                 "Esplosione = part:Explode(). Apri View → Guida Lua Blocky.");
@@ -1778,6 +1860,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 ImGui::Separator();
                 ImGui::TextWrapped("%s", g_luaRunMsg.c_str());
             }
+            }   // Script
         }
 
         // Salva/Pubblica: SEMPRE visibile qui sotto, qualunque cosa sia
@@ -1852,7 +1935,10 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             if (ImGui::Button("Avvia Server dedicato", {-1, 32})) {
                 if (publishCurrentGame())
                     refreshGamesList();
-                launchDedicatedServer(g_maxPlayers, g_gameNameBuf[0] ? g_gameNameBuf : "Blocky");
+                // Il server carica questo place ed esegue i suoi Script server.
+                const std::string serverPlace = blockyDataDir() + "/server_place.json";
+                launchDedicatedServer(g_maxPlayers, g_gameNameBuf[0] ? g_gameNameBuf : "Blocky",
+                                      writeCurrentPlaceTo(serverPlace) ? serverPlace : std::string());
             }
             if (!g_publishMsg.empty())
                 ImGui::TextWrapped("%s", g_publishMsg.c_str());
@@ -2032,7 +2118,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGui::Text("Piattaforma: %s",
                     g_engine.platform == TargetPlatform::Unknown
                         ? "PC" : targetPlatformName(g_engine.platform));
-        ImGui::Text("%s: %s", L("lang"), locLangLabel(loc().lang));
+        ImGui::Text("%s: %s", L("lang"), locCurrentName());
         drawLanguageSelector("enginepanel_lang");
         ImGui::Text("Graphics:   %s", gfxApiName(g_engine.gfxApi));
         ImGui::Text("Profilo:    %s", g_engine.quality.name);

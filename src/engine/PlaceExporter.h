@@ -22,6 +22,16 @@
 
 class PlaceExporter {
 public:
+    /**
+     * Chiamato prima di ogni esportazione: chi tiene il mondo in uno stato
+     * provvisorio (l'Animation Studio muove le parti nella posa) lo rimette a
+     * posto, cosi' nel file finisce sempre il mondo vero e non la posa.
+     */
+    static void (*&beforeExportHook())() {
+        static void (*hook)() = nullptr;
+        return hook;
+    }
+
     static std::string escapeScript(const std::string& s) {
         std::string o;
         o.reserve(s.size() + 8);
@@ -38,6 +48,7 @@ public:
     static std::string exportPlace(const DataModel& dm, const Humanoid& humanoid,
                                    const glm::vec3& playerPos, float playerYaw,
                                    const LightingService* lighting = nullptr) {
+        if (beforeExportHook()) beforeExportHook()();
         std::ostringstream j;
         j << std::fixed << std::setprecision(3);
         j << "{\n";
@@ -68,7 +79,7 @@ public:
         j << "  \"parts\": [\n";
         for (size_t i = 0; i < dm.parts.size(); ++i) {
             const auto& p = dm.parts[i];
-            j << "    {\"name\":\"" << p.name << "\",\"pos\":[" << p.position.x << "," << p.position.y << "," << p.position.z
+            j << "    {\"name\":\"" << escapeScript(p.name) << "\",\"pos\":[" << p.position.x << "," << p.position.y << "," << p.position.z
               << "],\"size\":[" << p.size.x << "," << p.size.y << "," << p.size.z
               << "],\"rot\":[" << p.rotation.x << "," << p.rotation.y << "," << p.rotation.z
               << "],\"color\":[" << p.color.r << "," << p.color.g << "," << p.color.b << "]";
@@ -94,8 +105,8 @@ public:
         j << "  \"labels\": [\n";
         for (size_t i = 0; i < dm.labels.size(); ++i) {
             const auto& l = dm.labels[i];
-            j << "    {\"name\":\"" << l.name << "\",\"text\":\"" << l.text
-              << "\",\"className\":\"" << l.className
+            j << "    {\"name\":\"" << escapeScript(l.name) << "\",\"text\":\"" << escapeScript(l.text)
+              << "\",\"className\":\"" << escapeScript(l.className)
               << "\",\"anchor\":[" << l.anchorX << "," << l.anchorY << ",0"
               << "],\"offset\":[" << l.offsetX << "," << l.offsetY << ",0"
               << "],\"size\":[" << l.sizeW << "," << l.sizeH << ",0"
@@ -164,7 +175,7 @@ public:
         j << "  \"humanoidParts\": [\n";
         for (size_t i = 0; i < humanoid.parts.size(); ++i) {
             const auto& p = humanoid.parts[i];
-            j << "    {\"name\":\"" << p.name << "\",\"size\":[" << p.size.x << "," << p.size.y << "," << p.size.z
+            j << "    {\"name\":\"" << escapeScript(p.name) << "\",\"size\":[" << p.size.x << "," << p.size.y << "," << p.size.z
               << "],\"color\":[" << p.color.r << "," << p.color.g << "," << p.color.b << "]}";
             if (i + 1 < humanoid.parts.size()) j << ",";
             j << "\n";

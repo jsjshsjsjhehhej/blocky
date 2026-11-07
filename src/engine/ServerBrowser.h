@@ -37,12 +37,19 @@ struct Entry {
     std::string name;
     int   players = 0;
     int   maxPlayers = 8;
+    std::string jobId;    // vuoto = server di una versione senza JobId
+    bool  anyGame = false; // dedicato senza --game: accetta qualsiasi gioco
+    bool  dedicated = false; // BlockyServer, non il dispositivo di un giocatore
+
+    bool full() const { return players >= maxPlayers; }
 
     std::string label() const {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf), "%s  -  %d/%d  -  %s:%d",
+        char buf[200];
+        std::snprintf(buf, sizeof(buf), "%s  -  %d/%d  -  %s:%d%s%s",
                       name.empty() ? "Server" : name.c_str(),
-                      players, maxPlayers, ip.c_str(), port);
+                      players, maxPlayers, ip.c_str(), port,
+                      jobId.empty() ? "" : "  -  job ",
+                      blk::jobid::shortForm(jobId).c_str());
         return buf;
     }
 };
@@ -137,10 +144,23 @@ inline void startScan(int port, int gameIdx) {
                         e.maxPlayers = ann.maxPlayers ? ann.maxPlayers : 8;
                         ann.name[sizeof(ann.name) - 1] = 0;
                         e.name = ann.name;
+                        e.anyGame = (ann.hdr.gameIndex == 0xFFFF);
+                        // Nell'annuncio peerId e' 0 per un dedicato, 1 per un giocatore che ospita.
+                        e.dedicated = (ann.hdr.peerId == 0);
+                        if (n >= (int)sizeof(NetAnnounceEx)) {
+                            NetAnnounceEx ex{};
+                            std::memcpy(&ex, buf, sizeof(ex));
+                            ex.jobId[sizeof(ex.jobId) - 1] = 0;
+                            if (blk::jobid::isValid(ex.jobId)) e.jobId = ex.jobId;
+                        }
 
+                        // Lo stesso server risponde a piu' bersagli (broadcast
+                        // e 127.0.0.1): con il JobId si riconosce anche quando
+                        // l'indirizzo da cui risponde e' diverso.
                         bool dup = false;
                         for (const auto& f : found)
-                            if (f.ip == e.ip && f.port == e.port) { dup = true; break; }
+                            if ((f.ip == e.ip && f.port == e.port)
+                                || (!e.jobId.empty() && f.jobId == e.jobId)) { dup = true; break; }
                         if (!dup) found.push_back(std::move(e));
                     }
                 }

@@ -121,11 +121,15 @@ struct StudioFollowState {
 static StudioFollowState g_follow;
 
 static bool studioGizmoDragging() {
-    return g_moveDragging || g_rotateDragging || g_scaleDragging;
+    return g_moveDragging || g_rotateDragging || g_scaleDragging || g_freeDragging;
 }
 
 static void studioSyncGroupFollow() {
     StudioFollowState& f = g_follow;
+    if (g_animStudioDriving) {   // le muove l animazione, non l utente
+        f = StudioFollowState{};
+        return;
+    }
     std::vector<int> sel = studioActivePartIndices();
     for (int i : g_multiParts)
         if (!partIndexValid(i)) { studioMultiClear(); sel.clear(); break; }
@@ -246,6 +250,28 @@ static void studioGroupsPollHotkeys() {
 
 // ---- Explorer ----------------------------------------------------------------
 
+// Trascina e rilascia: le part (la trascinata, o tutta la selezione se ne fa
+// parte) entrano nel Model gid; gid = 0 le toglie dai Model.
+static void studioMovePartsToGroup(int dragged, int gid) {
+    if (!partIndexValid(dragged)) return;
+    std::vector<int> idx = studioMultiContains(dragged) ? studioActivePartIndices() : std::vector<int>{dragged};
+    const std::vector<PartGroup> before = g_world.groups;
+    const std::vector<int> partsBefore = UndoStack::partGroups(g_world);
+    for (int i : idx)
+        if (partIndexValid(i) && !g_world.parts[(size_t)i].locked) g_world.parts[(size_t)i].groupId = gid;
+    g_undo.recordGroupChange(before, partsBefore, g_world);
+    markPlaceDirty();
+    const PartGroup* g = partgroups::find(g_world, gid);
+    g_exportMsg = std::to_string(idx.size()) + (g ? " part in \"" + g->name + "\"" : std::string(" part fuori dai Model"));
+}
+
+static void studioDropTargetForGroup(int gid) {
+    if (!ImGui::BeginDragDropTarget()) return;
+    if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("BLOCKY_PART"))
+        studioMovePartsToGroup(*(const int*)pl->Data, gid);
+    ImGui::EndDragDropTarget();
+}
+
 static int g_groupRenaming = 0;
 static bool g_groupRenameFocus = false;
 static char g_groupRenameBuf[64] = {};
@@ -294,6 +320,7 @@ static void drawExplorerGroupNode(int gid) {
     if (whole) flags |= ImGuiTreeNodeFlags_Selected;
     const std::string label = "[Model] " + g->name + "  (" + std::to_string(members.size()) + ")";
     const bool open = ImGui::TreeNodeEx("##g", flags, "%s", label.c_str());
+    studioDropTargetForGroup(gid);
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         if (ImGui::GetIO().KeyCtrl) {
             for (int m : members) {
@@ -328,4 +355,9 @@ static void drawExplorerPartsTree() {
     for (int gid : partgroups::childGroups(g_world, 0)) drawExplorerGroupNode(gid);
     for (int i = 0; i < (int)g_world.parts.size(); ++i)
         if (!partgroups::find(g_world, g_world.parts[(size_t)i].groupId)) drawExplorerPartRow(i);
+    // Mentre si trascina una part: la zona per toglierla dai Model.
+    if (const ImGuiPayload* pl = ImGui::GetDragDropPayload(); pl && pl->IsDataType("BLOCKY_PART")) {
+        ImGui::Selectable("  -> rilascia qui: fuori dai Model", false);
+        studioDropTargetForGroup(0);
+    }
 }

@@ -142,6 +142,8 @@ inline std::atomic<bool>& fetchReady() { static std::atomic<bool> b{false}; retu
  */
 inline void startFetch(const std::string& hostPort) {
     if (hostPort.empty()) return;
+    // Il catalogo online non ha (ancora) gli avatar: solo il PC in rete locale.
+    if (blk::remotegames::isCloud(hostPort)) return;
 
     std::thread([hostPort]() {
         std::string host;

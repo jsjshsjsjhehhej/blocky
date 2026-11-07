@@ -9,8 +9,10 @@
 #include "PartShape.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -87,9 +89,20 @@ inline void applyUpsert(DataModel& world, const PartPacket& pkt) {
     WorkspacePart& p = existing ? *existing : scratch;
     p.netId = pkt.netId;
     p.name = pkt.name[0] ? std::string(pkt.name) : ("Part" + std::to_string(pkt.netId));
-    p.position = {pkt.px, pkt.py, pkt.pz};
+    const glm::vec3 pos{pkt.px, pkt.py, pkt.pz};
+    const glm::vec3 rot{pkt.rx, pkt.ry, pkt.rz};
+    // Part libera: la simula chi la manda (server / host). Qui la si fa
+    // scivolare verso l'ultima posizione ricevuta invece di saltare a 12 Hz;
+    // ancorata, nuova o lontanissima: subito al suo posto.
+    p.netDriven = pkt.anchored == 0;
+    p.netTargetPos = pos;
+    p.netTargetRot = rot;
+    const bool snap = !existing || !p.netDriven || glm::length(p.position - pos) > 25.f;
+    if (snap) {
+        p.position = pos;
+        p.rotation = rot;
+    }
     p.size = {std::max(0.05f, pkt.sx), std::max(0.05f, pkt.sy), std::max(0.05f, pkt.sz)};
-    p.rotation = {pkt.rx, pkt.ry, pkt.rz};
     p.color = {pkt.cr, pkt.cg, pkt.cb};
     if (pkt.shape < (uint8_t)PartShape::Count)
         p.shape = (PartShape)pkt.shape;
@@ -101,17 +114,21 @@ inline void applyUpsert(DataModel& world, const PartPacket& pkt) {
         world.parts.push_back(std::move(scratch));
 }
 
-inline void applyDestroy(DataModel& world, uint32_t netId) {
+/** Chi toglie davvero la part (il runtime Lua aggiorna anche gli indici degli script). */
+using EraseFn = std::function<void(int index)>;
+
+inline void applyDestroy(DataModel& world, uint32_t netId, const EraseFn& erase = nullptr) {
     if (netId == 0) return;
-    auto& parts = world.parts;
-    parts.erase(std::remove_if(parts.begin(), parts.end(),
-                               [netId](const WorkspacePart& p) { return p.netId == netId; }),
-                parts.end());
+    for (int i = (int)world.parts.size() - 1; i >= 0; --i) {
+        if (world.parts[(size_t)i].netId != netId) continue;
+        if (erase) erase(i);
+        else world.parts.erase(world.parts.begin() + i);
+    }
 }
 
-inline bool applyPacket(DataModel& world, const PartPacket& pkt) {
+inline bool applyPacket(DataModel& world, const PartPacket& pkt, const EraseFn& erase = nullptr) {
     if (pkt.op == (uint8_t)Op::Destroy) {
-        applyDestroy(world, pkt.netId);
+        applyDestroy(world, pkt.netId, erase);
         return true;
     }
     if (pkt.op == (uint8_t)Op::Upsert) {
@@ -119,6 +136,23 @@ inline bool applyPacket(DataModel& world, const PartPacket& pkt) {
         return true;
     }
     return false;
+}
+
+/**
+ * Client, ogni frame: le part mosse dal server scivolano verso l'ultima
+ * posizione ricevuta (circa 90% in 1/6 s), cosi' 12 aggiornamenti al
+ * secondo sembrano un movimento continuo.
+ */
+inline void smoothNetDriven(DataModel& world, float dt) {
+    const float k = 1.f - std::exp(-dt * 14.f);
+    for (auto& p : world.parts) {
+        if (!p.netDriven) continue;
+        p.position += (p.netTargetPos - p.position) * k;
+        for (int a = 0; a < 3; ++a) {
+            float d = std::fmod(p.netTargetRot[a] - p.rotation[a] + 540.f, 360.f) - 180.f;   // giro piu' corto
+            p.rotation[a] += d * k;
+        }
+    }
 }
 
 /** Hash grezzo per dirty-check (posizione/size/rot/colore/flag). */

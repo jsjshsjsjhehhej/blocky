@@ -329,6 +329,7 @@
             lua_pushstring(ls, className); lua_setfield(ls, -2, "ClassName");
             lua_pushstring(ls, luaL_optstring(ls, 2, className)); lua_setfield(ls, -2, "Name");
             lua_pushinteger(ls, partIdx); lua_setfield(ls, -2, "__partIndex");
+            trackPartTable(ls, -1);
             lua_pushnumber(ls, 16); lua_setfield(ls, -2, "Range");
             lua_pushnumber(ls, 1); lua_setfield(ls, -2, "Brightness");
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
@@ -390,7 +391,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -402,7 +403,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -414,7 +415,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -426,7 +427,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -438,7 +439,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -450,7 +451,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -462,7 +463,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -474,7 +475,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -486,7 +487,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -498,7 +499,7 @@
             lua_pushboolean(ls, 1); lua_setfield(ls, -2, "Enabled");
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); }
+                if (lua_isnumber(ls, -1)) { lua_pushvalue(ls, -1); lua_setfield(ls, -3, "__partIndex"); trackPartTable(ls, -2); }
                 lua_pop(ls, 1);
             }
             return 1;
@@ -733,6 +734,23 @@
         }
         lua_pushnil(ls); return 1;
     }
+    // Antenati Luau (Model, Folder dello script) sopra la part piu' alta del motore.
+    static int pushLuaAncestor(lua_State* ls, int idx, const char* wanted, bool byClass) {
+        auto* rt = fromState(ls);
+        int top = idx;
+        while (rt && rt->workspace && top >= 0 && top < (int)rt->workspace->parts.size()
+               && rt->workspace->parts[top].parentIndex >= 0)
+            top = rt->workspace->parts[top].parentIndex;
+        if (pushPreludeField(ls, "luaAncestorOfPart")) {
+            lua_pushinteger(ls, top);
+            lua_pushstring(ls, wanted);
+            lua_pushboolean(ls, byClass);
+            if (lua_pcall(ls, 3, 1, 0) == LUA_OK) return 1;
+            lua_pop(ls, 1);
+        }
+        lua_pushnil(ls);
+        return 1;
+    }
     static int luaPartFindFirstAncestor(lua_State* ls) {
         auto* rt = fromState(ls);
         int idx = partIndexFromSelf(ls, 1);
@@ -745,7 +763,7 @@
             }
             walk = rt->workspace->parts[walk].parentIndex;
         }
-        lua_pushnil(ls); return 1;
+        return pushLuaAncestor(ls, idx, name, false);
     }
     static int luaPartFindFirstAncestorOfClass(lua_State* ls) {
         auto* rt = fromState(ls);
@@ -759,7 +777,7 @@
             }
             walk = rt->workspace->parts[walk].parentIndex;
         }
-        lua_pushnil(ls); return 1;
+        return pushLuaAncestor(ls, idx, cls, true);
     }
     static int luaPartGetPivot(lua_State* ls) {
         WorkspacePart* p = livePart(ls, 1);
@@ -797,7 +815,7 @@
         lua_newtable(ls);
         lua_pushinteger(ls, idx); lua_setfield(ls, -2, "__partIndex");
         lua_pushstring(ls, key); lua_setfield(ls, -2, "__attrKey");
-        blockyPushCFunction(ls, luaAttrChangedConnect); lua_setfield(ls, -2, "Connect");
+        pushSignalMethod(ls, luaAttrChangedConnect, "luaAttrChangedConnect", 0); lua_setfield(ls, -2, "Connect"); pushSignalMethod(ls, luaAttrChangedConnect, "luaAttrChangedConnect", 1); lua_setfield(ls, -2, "Once"); pushSignalMethod(ls, luaAttrChangedConnect, "luaAttrChangedConnect", 2); lua_setfield(ls, -2, "Wait");
         return 1;
     }
 
@@ -946,14 +964,14 @@
         const char* tag = luaL_checkstring(ls, lua_istable(ls, 1) ? 2 : 1);
         lua_newtable(ls);
         lua_pushstring(ls, tag); lua_setfield(ls, -2, "_tag");
-        blockyPushCFunction(ls, luaCollectionTagAddedConnect); lua_setfield(ls, -2, "Connect");
+        pushSignalMethod(ls, luaCollectionTagAddedConnect, "luaCollectionTagAddedConnect", 0); lua_setfield(ls, -2, "Connect"); pushSignalMethod(ls, luaCollectionTagAddedConnect, "luaCollectionTagAddedConnect", 1); lua_setfield(ls, -2, "Once"); pushSignalMethod(ls, luaCollectionTagAddedConnect, "luaCollectionTagAddedConnect", 2); lua_setfield(ls, -2, "Wait");
         return 1;
     }
     static int luaCollectionGetInstanceRemovedSignal(lua_State* ls) {
         const char* tag = luaL_checkstring(ls, lua_istable(ls, 1) ? 2 : 1);
         lua_newtable(ls);
         lua_pushstring(ls, tag); lua_setfield(ls, -2, "_tag");
-        blockyPushCFunction(ls, luaCollectionTagRemovedConnect); lua_setfield(ls, -2, "Connect");
+        pushSignalMethod(ls, luaCollectionTagRemovedConnect, "luaCollectionTagRemovedConnect", 0); lua_setfield(ls, -2, "Connect"); pushSignalMethod(ls, luaCollectionTagRemovedConnect, "luaCollectionTagRemovedConnect", 1); lua_setfield(ls, -2, "Once"); pushSignalMethod(ls, luaCollectionTagRemovedConnect, "luaCollectionTagRemovedConnect", 2); lua_setfield(ls, -2, "Wait");
         return 1;
     }
 
@@ -962,8 +980,16 @@
         return 1;
     }
     static int luaWorkspaceSetGravity(lua_State* ls) {
-        float g = (float)luaL_optnumber(ls, lua_istable(ls, 1) ? 2 : 1, 196.2);
+        float g = (float)luaL_optnumber(ls, lua_istable(ls, 1) ? 2 : 1, 80.0);
         scriptControls().workspaceGravity = std::clamp(g, 0.f, 1000.f);
+        // anche il campo, che e' quello che la fisica legge (readWorkspaceGravity)
+        lua_getglobal(ls, "workspace");
+        if (lua_istable(ls, -1)) {
+            lua_pushstring(ls, "Gravity");
+            lua_pushnumber(ls, scriptControls().workspaceGravity);
+            lua_rawset(ls, -3);
+        }
+        lua_pop(ls, 1);
         return 0;
     }
 
@@ -1339,12 +1365,20 @@
         lua_getglobal(L, "UserInputService");
         if (lua_istable(L, -1)) {
             lua_newtable(L);
-            blockyPushCFunction(L, luaInputBeganConnect);
+            pushSignalMethod(L, luaInputBeganConnect, "luaInputBeganConnect", 0);
             lua_setfield(L, -2, "Connect");
+            pushSignalMethod(L, luaInputBeganConnect, "luaInputBeganConnect", 1);
+            lua_setfield(L, -2, "Once");
+            pushSignalMethod(L, luaInputBeganConnect, "luaInputBeganConnect", 2);
+            lua_setfield(L, -2, "Wait");
             lua_setfield(L, -2, "InputBegan");
             lua_newtable(L);
-            blockyPushCFunction(L, luaInputEndedConnect);
+            pushSignalMethod(L, luaInputEndedConnect, "luaInputEndedConnect", 0);
             lua_setfield(L, -2, "Connect");
+            pushSignalMethod(L, luaInputEndedConnect, "luaInputEndedConnect", 1);
+            lua_setfield(L, -2, "Once");
+            pushSignalMethod(L, luaInputEndedConnect, "luaInputEndedConnect", 2);
+            lua_setfield(L, -2, "Wait");
             lua_setfield(L, -2, "InputEnded");
             blockyPushCFunction(L, luaInputGetMouseLocation);
             lua_setfield(L, -2, "GetMouseLocation");
@@ -1372,8 +1406,12 @@
             lua_getfield(L, -1, "Players");
             if (lua_istable(L, -1)) {
                 lua_newtable(L);
-                blockyPushCFunction(L, luaPlayerRemovingConnect);
+                pushSignalMethod(L, luaPlayerRemovingConnect, "luaPlayerRemovingConnect", 0);
                 lua_setfield(L, -2, "Connect");
+                pushSignalMethod(L, luaPlayerRemovingConnect, "luaPlayerRemovingConnect", 1);
+                lua_setfield(L, -2, "Once");
+                pushSignalMethod(L, luaPlayerRemovingConnect, "luaPlayerRemovingConnect", 2);
+                lua_setfield(L, -2, "Wait");
                 lua_setfield(L, -2, "PlayerRemoving");
                 blockyPushCFunction(L, luaPlayersGetUserIdFromNameAsync);
                 lua_setfield(L, -2, "GetUserIdFromNameAsync");

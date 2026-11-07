@@ -50,6 +50,7 @@
 #include "engine/PartGroupsLua.h"
 #include "engine/PartConstraints.h"
 #include "engine/PartConstraintsLua.h"
+#include "engine/CloudCatalog.h"
 #include "engine/PartPropsUi.h"
 #include "engine/R6PlayerExport.h"
 #include "engine/UndoStack.h"
@@ -85,6 +86,7 @@
 static bool kIsGameEngine = false;
 
 #include "ui/ClassicMenu.h"
+#include "ui/UiFonts.h"
 #include "ui/StudioChrome.h"
 #include "studio/StudioIcons.h"
 #include "studio/StudioRibbon.h"
@@ -762,6 +764,9 @@ static int g_lookPresetUi = 0;
 
 #include "main_ui/ScreenTransitions.h"
 
+#include "main_ui/PlaceLauncherUi.h"
+#include "main_ui/ServerControlUi.h"
+
 #include "main_ui/AvatarShop.h"
 
 #include "main_ui/SaveLoadPublish.h"
@@ -1090,6 +1095,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                     if (lmb) updateMoveDrag((float)mx, (float)my);
                     else endMoveDrag();
                 }
+                if (g_freeDragArmed || g_freeDragging) {   // part trascinata col mouse
+                    if (lmb) updateFreeDrag((float)mx, (float)my);
+                    else endFreeDrag();
+                }
                 if (g_rotateDragging) {
                     if (lmb) updateRotateDrag((float)mx, (float)my);
                     else endRotateDrag();
@@ -1106,8 +1115,8 @@ static void blockyStepFrame(GLFWwindow* win) {
                     if (ImGui::IsKeyPressed(ImGuiKey_4)) g_tool = StudioTool::Rotate;
                     if (ImGui::IsKeyPressed(ImGuiKey_F8))
                         enterAvatarPublisher();
-                    if (ImGui::IsKeyPressed(ImGuiKey_F2))
-                        g_showLuaGuide = !g_showLuaGuide;
+                    if (ImGui::IsKeyPressed(ImGuiKey_F2))   // come Roblox Studio: rinomina
+                        studioExplorerBeginRename();
                     // Window Search (Studio platform) — Ctrl+Shift+P
                     if (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift
                         && ImGui::IsKeyPressed(ImGuiKey_P))
@@ -1349,6 +1358,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                         stopStudioTest(win);
                 }
                 f5Was = f5;
+                pumpScriptInput(win);   // InputBegan / InputEnded per gli script
                 f1Was = f1;
 
                 static bool f3Was = false;
@@ -1401,7 +1411,11 @@ static void blockyStepFrame(GLFWwindow* win) {
                     studioFollowRebaseline();
                 }
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) studioDuplicateSelection();
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L)) addScriptToSelected();
+                // Ctrl+L come Roblox Studio: gizmo negli assi della part (Locale) o del mondo.
+                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L)) {
+                    g_studioLocalSpace = !g_studioLocalSpace;
+                    g_exportMsg = g_studioLocalSpace ? "Spazio: Locale (Ctrl+L)" : "Spazio: Mondo (Ctrl+L)";
+                }
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelected();
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) {
                     // "Normale" vuol dire normale PER QUESTO DISPOSITIVO.
@@ -1465,13 +1479,16 @@ static void blockyStepFrame(GLFWwindow* win) {
                     (g_screen == AppScreen::Studio && g_mode == CamMode::Play);
                 if (inPlay) {
                     g_bphys.configure(g_engine.quality);
+                    // workspace.Gravity degli script (prima non cambiava la fisica)
+                    g_bphys.setGravity(g_lua.ok ? g_lua.readWorkspaceGravity() : bphys::kGravity);
                     g_bphys.sync(g_world.parts, g_playerPos, dt);
                     g_bphys.syncJoints(g_world.welds);
                 } else {
                     g_bphys.reset();
                     g_anchoredWelds.reset();   // all'avvio della prossima partita si riprendono gli offset
                 }
-                physAcc += dt;
+                // Pausa del Test (scheda Test / Developer Console): niente passi.
+                physAcc = (inPlay && g_simPaused) ? 0.f : physAcc + dt;
                 int guard = 0;
                 while (physAcc >= step && guard++ < 8) {
                     if (inPlay) {
@@ -1521,8 +1538,16 @@ static void blockyStepFrame(GLFWwindow* win) {
                   // Replica Part host→client (stile Roblox DataModel).
                   if (g_net.role == NetRole::Host)
                       g_net.tickWorldReplication(g_world, dt);
-                  else if (g_net.role == NetRole::Client)
-                      g_net.applyIncomingWorld(g_world);
+                  else if (g_net.role == NetRole::Client) {
+                      // le part tolte dal server passano dal runtime: gli
+                      // script locali restano sulle part giuste
+                      g_net.applyIncomingWorld(g_world, [](int i) {
+                          if (g_lua.ok && g_lua.workspace == &g_world) g_lua.destroyPartNow(i);
+                          else g_world.parts.erase(g_world.parts.begin() + i);
+                      });
+                      // le part libere le muove il server: movimento continuo, non a scatti
+                      WorldReplication::smoothNetDriven(g_world, dt);
+                  }
                 }
                 pollPortMapStatus(g_menu.netStatus, sizeof(g_menu.netStatus));
                 if (g_lua.scriptSetChanged) {
@@ -1559,6 +1584,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                 if (g_net.role == NetRole::Offline)      { denied = true; reasonCode = 1; }
                 else if (g_net.role == NetRole::Host)    { denied = true; reasonCode = 2; }
                 else if (g_net.rejected)                 { denied = true; reasonCode = 3; }
+                else if (g_net.connected && gateServerOnly() && !g_net.hostDedicated) {
+                    // Collegati al dispositivo di un altro giocatore, non a un server.
+                    denied = true; reasonCode = 6;
+                }
                 else if (g_net.connected) {
                     GateResult gr = gateEvaluate(g_net);
                     if (gr.state == GateState::Allowed) g_gatePassed = true;
@@ -1569,15 +1598,20 @@ static void blockyStepFrame(GLFWwindow* win) {
                 // accettava come prova soltanto una partita multigiocatore in
                 // corso, e rifiutava un mondo scaricato dal server dei giochi
                 // e giocato da soli — arrivato dalla rete un attimo prima.
-                if (denied && blk::remotegames::serverSeenRecently()) {
+                // Con il gioco solo da server questa eccezione non vale piu':
+                // era il motivo per cui si giocava senza Wi-Fi fino a 10
+                // minuti dopo aver visto il server dei giochi.
+                if (denied && !gateServerOnly() && blk::remotegames::serverSeenRecently()) {
                     denied = false;
                     g_gatePassed = true;
                 }
 
                 if (denied) {
                     std::snprintf(g_gateTitle, sizeof(g_gateTitle), "Blocky needs Wi-Fi");
-                    std::snprintf(g_gateMsg, sizeof(g_gateMsg),
-                                  "Controlla la connessione e riprova.");
+                    std::snprintf(g_gateMsg, sizeof(g_gateMsg), "%s",
+                                  reasonCode == 6 || reasonCode == 2
+                                      ? "Si gioca solo nei server Blocky: entra da Gioca."
+                                      : "Controlla la connessione e riprova.");
                     LOG_SEC("gate", "negato codice=%d", reasonCode);
                     // Anche sul flusso normale: LOG_SEC in certe build non
                     // scrive nulla, e senza questo motivo un giocatore
@@ -1603,6 +1637,8 @@ static void blockyStepFrame(GLFWwindow* win) {
                 std::string crashReason;
                 bool okFrame = TestSessionGuard::runGuarded([&]() {
                     { PROF_SCOPE(plat::prof::Phase::Scripts); g_lua.fireHeartbeat(dt); }
+                    // AnimationTrack degli script (Humanoid:LoadAnimation) sul corpo del player.
+                    g_lua.applyCharacterAnimation(g_player.humanoid);
                     {
                         static bool eWas = false;
                         bool eNow = false;
@@ -1639,6 +1675,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                     // stato che potrebbe essere a meta' modificato.
                     CrashHandler::note(("Crash contenuto durante gioco/Test: " + crashReason).c_str());
                     std::fprintf(stderr, "[TestSessionGuard] crash contenuto: %s\n", crashReason.c_str());
+                    LOG_ERR("test", "crash durante il Test: %s", crashReason.c_str());
                     if (g_screen == AppScreen::Studio && g_studioTesting) {
                         stopStudioTest(win);
                         g_luaRunMsg = "Test interrotto — crash nello script: " + crashReason;
@@ -1723,7 +1760,10 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
         else if (g_screen == AppScreen::Loading) {
             g_loadTimer += dt;
-            if (g_loadTimer >= g_loadDur) finishLoading();
+            // Finche' il Place Launcher cerca il server la barra si ferma
+            // poco prima della fine, invece di restare piena senza far nulla.
+            if (!placeLauncherLoadingReady()) g_loadTimer = std::min(g_loadTimer, g_loadDur * 0.9f);
+            else if (g_loadTimer >= g_loadDur) finishLoading();
         }
         else if (g_screen == AppScreen::AvatarPublisher) {
             clearDynamicLights();
@@ -1790,6 +1830,9 @@ static void blockyStepFrame(GLFWwindow* win) {
             studio2020PollHotkeys();
         }
         multiplayerTestStatusTick();
+        devToolsTick(dt);
+        animStudioTick(dt);
+        placeLauncherFrame(win);
         {
             // Il testo puo allontanarsi dalla base della piattaforma, non da 1.0.
             // Prima il limite era fisso: su un telefono la base giusta e ~1.6, e
@@ -1863,7 +1906,8 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
             {
                 std::string foundHost;
-                if (blk::gameslan::takeFoundHost(foundHost)) {
+                if (blk::gameslan::takeFoundHost(foundHost)
+                    && !blk::remotegames::isCloud(g_menu.gameServer)) {
                     std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "%s", foundHost.c_str());
                     blk::remotegames::saveHost(foundHost);
                     std::string h;
@@ -2012,8 +2056,17 @@ static void blockyStepFrame(GLFWwindow* win) {
                 }
             }
             if (g_menu.wantPlay && g_menu.launchGame >= 0) {
-                startLoadingGame(g_menu.launchGame);
+                // Il Place Launcher sceglie il server mentre si carica; il
+                // server puo' rimettere la ricerca automatica di prima.
+                if (gateServerOnly() || blk::clientsettings::getBool("FFlagPlaceLauncherPlay", true))
+                    placeLaunchPlay(g_menu.launchGame);
+                else
+                    startLoadingGame(g_menu.launchGame);
                 g_menu.wantPlay = false;
+            }
+            if (g_menu.wantJoinJob) {
+                g_menu.wantJoinJob = false;
+                placeLaunchJoinText(g_menu.joinJob, g_menu.selectedGame);
             }
             if (g_menu.wantJoinIp && g_menu.launchGame >= 0) {
                 g_joinByIp = true;
@@ -2053,6 +2106,7 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
         else if (g_screen == AppScreen::Loading) {
             drawLoadingScreen(g_loadTimer / g_loadDur, g_activeGame.title, (float)g_w, (float)g_h, now);
+            drawPlaceLauncherLoadingStatus();
         }
         else if (g_screen == AppScreen::Studio) {
             // L anteprima della presa vale solo finche il suo pannello e
@@ -2100,14 +2154,20 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
 
         { PROF_SCOPE(plat::prof::Phase::Ui);
+        drawServerControlOverlay(); // messaggio del giorno, aggiornamenti (dal backend)
+        drawAnimStudioWindow();   // rig e animazione (solo in Studio)
+        drawAnimStudioOverlay();
+        drawDevToolsWindows();   // F9 & co.: sopra qualunque schermata
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
 
+        studioSaveScreenshotIfRequested(g_w, g_h);  // pulsante Screenshot (Studio)
         glfwSwapInterval(g_vsync ? 1 : 0);
         // Qui la CPU ASPETTA la GPU: se questo numero e grande, il collo di
         // bottiglia e la scheda video, non il codice.
         { PROF_SCOPE(plat::prof::Phase::Present); glfwSwapBuffers(win); }
         plat::prof::endFrame(dt);
+        perfLogTick(dt);
         if (blk::resilience::tickLagDefense(plat::prof::state().frameMs, g_engine.quality,
                                             g_engine.quality.autoLagDefense))
             updateRenderResolution();
@@ -2117,12 +2177,28 @@ static void blockyStepFrame(GLFWwindow* win) {
         // diretta di surriscaldamento su mobile. targetFps=0 (default PC) lo
         // disattiva del tutto: non tocca ne' il rendering ne' l'input, solo
         // il tempo che il thread principale passa in sleep a fine frame.
+        //
+        // Tabella di marcia fissa, non "dormi quello che manca a questo
+        // frame": su Android sleep_for sfora spesso di 1-3 ms, e misurando
+        // ogni frame da capo quello sforamento si perdeva sempre (perf.txt:
+        // 17-20 ms a frame con 5 ms di lavoro = 50-57 fps invece di 60).
+        // Con le scadenze fisse il frame dopo uno sforamento dorme meno e la
+        // media torna al tetto. Un frame gia' in ritardo non dorme e
+        // riallinea la tabella, invece di accumulare debito.
+        static double s_frameDeadline = 0.0;
         if (g_engine.quality.targetFps > 0) {
             const double frameBudget = 1.0 / (double)g_engine.quality.targetFps;
-            const double elapsed = glfwGetTime() - now;
-            const double remaining = frameBudget - elapsed;
-            if (remaining > 0.0005)
-                std::this_thread::sleep_for(std::chrono::duration<double>(remaining));
+            const double t = glfwGetTime();
+            s_frameDeadline += frameBudget;
+            if (s_frameDeadline < t || s_frameDeadline > t + frameBudget * 2.0) {
+                s_frameDeadline = t; // in ritardo (o tabella saltata): si riparte da adesso
+            } else {
+                const double remaining = s_frameDeadline - t;
+                if (remaining > 0.0005)
+                    std::this_thread::sleep_for(std::chrono::duration<double>(remaining));
+            }
+        } else {
+            s_frameDeadline = 0.0;
         }
 }
 
@@ -2224,6 +2300,13 @@ static int blockyInitEngine(GLFWwindow*& win) {
     // riversarle nello stile di ImGui, e con esse l altezza di ogni pulsante.
     blk::ui::update(g_w, g_h);
     io.FontGlobalScale = blk::ui::uiScale();
+    // Font vero del sistema al posto del ProggyClean di ImGui (vedi UiFonts.h).
+    // Font del sistema (Segoe UI / Roboto). I font in assets/fonts restano
+    // pronti: basta passare resolveScriptPath("fonts") al posto di "".
+    blk::ui::loadUiFonts(blk::ui::uiScale(), "");
+    // Impostazioni decise dal server: subito le ultime salvate, poi quelle
+    // nuove in background (vedi ServerControlUi.h).
+    serverControlBoot();
 
     if (kIsGameEngine)
         applyStudioTheme();
@@ -2270,10 +2353,18 @@ static int blockyInitEngine(GLFWwindow*& win) {
         std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "127.0.0.1:%d", gamesPort);
         std::printf("[Blocky] Giochi pubblicati in rete locale sulla porta %d\n", gamesPort);
 #endif
+        // Catalogo online (backend/): i giochi pubblicati da tutti, con questo
+        // PC acceso o no. Se c'e', e' lui il server dei giochi dell'hub.
+        const std::string cloudCatalog = blk::cloud::catalogUrl();
+        if (!cloudCatalog.empty()) {
+            std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "%s", cloudCatalog.c_str());
+            blk::remotegames::startFetch(cloudCatalog);
+            LOG_INFO("games", "catalogo online: %s", blk::remotegames::serverLabel(cloudCatalog).c_str());
+        }
 #ifdef __ANDROID__
         // Telefono: IP del PC salvato + scoperta LAN. GET /games → menu + download.
         const std::string savedServer = blk::remotegames::loadHost();
-        if (!savedServer.empty()) {
+        if (!savedServer.empty() && cloudCatalog.empty()) {
             std::snprintf(g_menu.gameServer, sizeof(g_menu.gameServer), "%s", savedServer.c_str());
             blk::remotegames::startFetch(savedServer);
             blk::remotecatalog::startFetch(savedServer);
@@ -2392,7 +2483,8 @@ static int blockyInitEngine(GLFWwindow*& win) {
 #endif
     // Giocatore di prova aperto dal "Test multiplayer" di Studio: entra
     // subito in partita invece di mostrare il menu.
-    if (!kIsGameEngine) maybeStartMultiplayerTestFromEnv(win);
+    // Invito passato all avvio (blocky://place/...): si entra dopo il login.
+    if (!kIsGameEngine && !maybeStartMultiplayerTestFromEnv(win)) captureInviteFromEnv();
     return 1;
 }
 

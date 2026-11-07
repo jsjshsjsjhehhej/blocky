@@ -17,6 +17,7 @@
 #include "ui/Loc.h"
 #include "ui/UiTheme.h"
 #include "ui/UiMetrics.h"
+#include "ui/UiFonts.h"
 #include "render/Texture2D.h"
 
 #include <algorithm>
@@ -64,6 +65,11 @@ struct ClassicMenuState {
 
     char joinCode[16] = "";
     bool wantJoinCode = false;
+
+    // "Unisciti": JobId di un server, invito blocky://place/... o codice
+    // blk:// — lo legge il Place Launcher (main_ui/PlaceLauncherUi.h).
+    char joinJob[128] = "";
+    bool wantJoinJob = false;
 
     bool showLogin = true;
     HubTab tab = HubTab::Games;
@@ -571,7 +577,11 @@ inline bool hubPlayButton(const char* label, ImVec2 size, float pulse = 0.f) {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  {0.04f, 0.55f, 0.28f, 1.f});
     ImGui::PushStyleColor(ImGuiCol_Text,          {1.f, 1.f, 1.f, 1.f});
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.f);
-    bool p = ImGui::Button(label, size);
+    bool p;
+    {
+        blk::ui::FontScope bold(blk::ui::fontBold());
+        p = ImGui::Button(label, size);
+    }
     if (ImGui::IsItemHovered()) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -593,7 +603,11 @@ inline bool hubTabButton(const char* label, bool active) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.26f, 0.58f, 1.00f, 0.92f});
         ImGui::PushStyleColor(ImGuiCol_Text,          {1.f, 1.f, 1.f, 1.f});
     }
-    bool p = ImGui::Button(label, {112, 36});
+    bool p;
+    {
+        blk::ui::FontScope bold(blk::ui::fontBold());
+        p = ImGui::Button(label, {112, 36});
+    }
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
     return p;
@@ -601,7 +615,10 @@ inline bool hubTabButton(const char* label, bool active) {
 
 inline void hubPanelHeader(const char* title) {
     ImGui::PushStyleColor(ImGuiCol_Text, {0.06f, 0.34f, 0.78f, 1.f});
-    ImGui::Text("%s", title);
+    {
+        blk::ui::FontScope bold(blk::ui::headingFont());
+        ImGui::Text("%s", title);
+    }
     ImGui::PopStyleColor();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x;
@@ -731,12 +748,12 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
     const char* brand = "BLOCKY";
     float brandSz = 56.f;
     float brandBob = std::sin(time * 1.4f) * 3.f;
-    ImVec2 brandSzPx = ImGui::GetFont()->CalcTextSizeA(brandSz, FLT_MAX, 0.f, brand);
+    ImVec2 brandSzPx = blk::ui::displayFont()->CalcTextSizeA(brandSz, FLT_MAX, 0.f, brand);
     float bx = screenW * 0.5f - brandSzPx.x * 0.5f;
     float by = cy - 88.f + brandBob;
-    dl->AddText(ImGui::GetFont(), brandSz + 1.5f, {bx + 2, by + 3},
+    dl->AddText(blk::ui::displayFont(), brandSz + 1.5f, {bx + 2, by + 3},
                 IM_COL32(10, 40, 100, (alpha * 90) / 255), brand);
-    dl->AddText(ImGui::GetFont(), brandSz, {bx, by},
+    dl->AddText(blk::ui::displayFont(), brandSz, {bx, by},
                 IM_COL32(255, 255, 255, alpha), brand);
     const char* sub = L("hub.login_sub");
     ImVec2 subSz = ImGui::CalcTextSize(sub);
@@ -747,7 +764,7 @@ inline void drawLoginPage(ClassicMenuState& st, float screenW, float screenH, fl
     ImGui::SetCursorPos({cx, cy});
     ImGui::PushStyleColor(ImGuiCol_ChildBg, {1.f, 1.f, 1.f, 0.97f * appear});
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 20.f);
-    ImGui::BeginChild("LoginCard", {cardW, cardH}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+    ImGui::BeginChild("LoginCard", {cardW, cardH}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
 
     ImDrawList* cdl = ImGui::GetWindowDrawList();
     ImVec2 cp = ImGui::GetWindowPos();
@@ -1207,8 +1224,21 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImDrawList* dl = ImGui::GetWindowDrawList();
     drawBlueHubBackground(dl, screenW, screenH, time);
 
-    dl->AddText(ImGui::GetFont(), 30.f, {22, 18}, IM_COL32(255, 255, 255, 255), "BLOCKY");
-    dl->AddText({128, 28}, IM_COL32(180, 215, 255, 200), "hub");
+    {
+        // Logo e "hub" devono stare prima delle schede (x = 168): con un font
+        // largo come Montserrat Black il logo si rimpicciolisce invece di
+        // finire sopra "hub".
+        ImFont* brandFont = blk::ui::displayFont();
+        const float hubW = ImGui::CalcTextSize("hub").x;
+        float brandPx = 30.f;
+        float brandW = brandFont->CalcTextSizeA(brandPx, FLT_MAX, 0.f, "BLOCKY").x;
+        while (brandPx > 18.f && 22.f + brandW + 6.f + hubW > 160.f) {
+            brandPx -= 1.f;
+            brandW = brandFont->CalcTextSizeA(brandPx, FLT_MAX, 0.f, "BLOCKY").x;
+        }
+        dl->AddText(brandFont, brandPx, {22, 33.f - brandPx * 0.5f}, IM_COL32(255, 255, 255, 255), "BLOCKY");
+        dl->AddText({22.f + brandW + 6.f, 28}, IM_COL32(180, 215, 255, 200), "hub");
+    }
 
     ImGui::SetCursorPos({168, 15});
     float tabStartX = ImGui::GetCursorScreenPos().x;
@@ -1230,7 +1260,9 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
         std::snprintf(userChip, sizeof(userChip), "%s  ·  %d B$",
                       st.username[0] ? st.username : "Player", st.shopCoins);
         ImVec2 chipSz = ImGui::CalcTextSize(userChip);
-        float chipX = screenW - chipSz.x - 122.f;
+        // A sinistra di lingua + Log out (che partono da screenW - 168):
+        // prima finiva sopra il pulsante della lingua.
+        float chipX = screenW - 168.f - 16.f - 10.f - chipSz.x;
         dl->AddRectFilled({chipX - 16, 14}, {chipX + chipSz.x + 16, 50},
                           IM_COL32(255, 255, 255, 28), 18.f);
         dl->AddRect({chipX - 16, 14}, {chipX + chipSz.x + 16, 50},
@@ -1261,7 +1293,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::PushStyleColor(ImGuiCol_ChildBg, {1.f, 1.f, 1.f, 0.96f});
 
     ImGui::SetCursorPos({24, 86});
-    ImGui::BeginChild("PlayPanel", {268, 220}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+    ImGui::BeginChild("PlayPanel", {268, 220}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
     {
         ImVec2 wp = ImGui::GetWindowPos();
         ImGui::GetWindowDrawList()->AddRectFilledMultiColor(
@@ -1272,7 +1304,10 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     hubPanelHeader("PLAY");
     if (!games.empty()) {
         int gi = std::clamp(st.selectedGame, 0, (int)games.size() - 1);
-        ImGui::TextWrapped("%s", games[gi].title.c_str());
+        {
+            blk::ui::FontScope bold(blk::ui::fontBold());
+            ImGui::TextWrapped("%s", games[gi].title.c_str());
+        }
         ImGui::TextDisabled("%s", games[gi].subtitle.c_str());
         ImGui::TextDisabled("Max %d giocatori · multiplayer auto",
                             games[gi].maxPlayers > 0 ? games[gi].maxPlayers : 8);
@@ -1320,6 +1355,21 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
 
     ImGui::Spacing();
     ImGui::Separator();
+    ImGui::TextDisabled("Unisciti a un server preciso");
+    ImGui::SetNextItemWidth(150);
+    const bool enterJob = ImGui::InputTextWithHint("##joinjob", "Job ID o invito", st.joinJob,
+                                                   sizeof(st.joinJob), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    const bool hasJob = st.joinJob[0] != '\0';
+    if (!hasJob) ImGui::BeginDisabled();
+    if ((ImGui::Button("Unisciti", {80, 30}) || enterJob) && hasJob) {
+        st.wantJoinJob = true;
+        st.launchGame = st.selectedGame;
+    }
+    if (!hasJob) ImGui::EndDisabled();
+    ImGui::TextDisabled("Incolla il Job ID o l'invito di un amico.");
+
+    ImGui::Spacing();
     ImGui::TextDisabled("Entra con IP");
     ImGui::SetNextItemWidth(150);
     ImGui::InputText("##joinip", st.joinIp, sizeof(st.joinIp));
@@ -1378,7 +1428,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::EndChild();
 
     ImGui::SetCursorPos({24, 320});
-    ImGui::BeginChild("AvatarQuick", {268, 180}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+    ImGui::BeginChild("AvatarQuick", {268, 180}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
     hubPanelHeader("AVATAR");
     ImGui::TextWrapped("Le parti che crei nel Catalog sono gia' sull'avatar (anche senza pubblicarle nello Shop).");
     ImGui::Spacing();
@@ -1394,7 +1444,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
     ImGui::EndChild();
 
     ImGui::SetCursorPos({308, 86});
-    ImGui::BeginChild("MainPanel", {screenW - 332, screenH - 110}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+    ImGui::BeginChild("MainPanel", {screenW - 332, screenH - 110}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
 
     if (st.tab == HubTab::Games) {
         hubPanelHeader("GAMES");
@@ -1413,7 +1463,13 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             ImGui::PushStyleColor(ImGuiCol_ChildBg,
                 sel ? ImVec4{0.90f, 0.95f, 1.f, pop} : ImVec4{0.99f, 0.995f, 1.f, pop});
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.f);
-            ImGui::BeginChild("gcard", {cardW, cardH}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+            // Margine fisso da scheda: miniatura e cornice sotto sono misurate
+            // su 9px, non sul margine (piu' largo) dei pannelli.
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {9.f, 9.f});
+            ImGui::BeginChild("gcard", {cardW, cardH},
+                              ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PopStyleVar();
             ImDrawList* cdl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
             float thumbW = cardW - 18.f;
@@ -1463,7 +1519,10 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
                 cdl->AddText({p.x + thumbW - 60, p.y + 11}, IM_COL32(255, 255, 255, 255), "PRONTO");
             }
             ImGui::Dummy({0, 84});
-            ImGui::Text("%s", g.title.c_str());
+            {
+                blk::ui::FontScope bold(blk::ui::fontBold());
+                ImGui::Text("%s", g.title.c_str());
+            }
             ImGui::TextDisabled("%s", g.subtitle.c_str());
             ImGui::TextColored({0.10f, 0.46f, 0.92f, 1.f}, "%d / %d posti",
                                g.playersOnline, g.maxPlayers > 0 ? g.maxPlayers : 8);
@@ -1549,7 +1608,7 @@ inline void drawHubPage(ClassicMenuState& st, const std::vector<GameEntry>& game
             ImGui::PushID(i);
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.f);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.97f, 0.985f, 1.f, 1.f});
-            ImGui::BeginChild("shopitem", {shopRowW, it.fromPublisher ? 86.f : 64.f}, ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened);
+            ImGui::BeginChild("shopitem", {shopRowW, it.fromPublisher ? 86.f : 64.f}, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
             if (it.kind == 1) {
                 ImGui::TextColored({0.55f, 0.28f, 0.85f, 1.f}, "[Walk] %s", it.name.c_str());
                 ImGui::TextDisabled("Walking Animation · da %s · %d B$", it.seller.c_str(), it.price);
@@ -1708,10 +1767,10 @@ inline void drawLoadingScreen(float progress, const std::string& gameTitle,
     ImVec2 c{screenW * 0.5f, screenH * 0.48f};
     const char* brand = "BLOCKY";
     float bob = std::sin(time * 2.2f) * 4.f;
-    ImVec2 brandSz = ImGui::GetFont()->CalcTextSizeA(46.f, FLT_MAX, 0.f, brand);
-    dl->AddText(ImGui::GetFont(), 46.f, {c.x - brandSz.x * 0.5f + 2, c.y - 118 + bob + 3},
+    ImVec2 brandSz = blk::ui::displayFont()->CalcTextSizeA(46.f, FLT_MAX, 0.f, brand);
+    dl->AddText(blk::ui::displayFont(), 46.f, {c.x - brandSz.x * 0.5f + 2, c.y - 118 + bob + 3},
                 IM_COL32(10, 40, 100, 90), brand);
-    dl->AddText(ImGui::GetFont(), 46.f, {c.x - brandSz.x * 0.5f, c.y - 118 + bob},
+    dl->AddText(blk::ui::displayFont(), 46.f, {c.x - brandSz.x * 0.5f, c.y - 118 + bob},
                 IM_COL32(255, 255, 255, 255), brand);
 
     const char* loading = "Caricamento...";
@@ -1784,6 +1843,8 @@ inline void drawServerListWindow(ClassicMenuState& st) {
             "passare. Puoi anche entrare a mano con \"Entra con IP\".");
     } else {
         for (size_t i = 0; i < servers.size(); ++i) {
+            // Solo server: i giocatori che ospitano non si possono raggiungere.
+            if (gateServerOnly() && !servers[i].dedicated) continue;
             ImGui::PushID((int)i);
             const auto& s = servers[i];
             const bool full = (s.players >= s.maxPlayers);
@@ -1798,6 +1859,11 @@ inline void drawServerListWindow(ClassicMenuState& st) {
             if (full) ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::TextUnformatted(s.label().c_str());
+            if (!s.jobId.empty()) {
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Job ID %s", s.jobId.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Copia Job ID")) ImGui::SetClipboardText(s.jobId.c_str());
+            }
             ImGui::PopID();
         }
     }

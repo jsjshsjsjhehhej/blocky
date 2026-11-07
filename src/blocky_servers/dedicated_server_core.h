@@ -41,7 +41,13 @@ struct DedicatedServerConfig {
     int maxPlayers = 8;
     int gameIndex = -1;
     std::string name = "Blocky Server";
+    // Place da caricare: con questo il server esegue gli Script server e
+    // replica il mondo (ServerWorld.h). Vuoto = solo ripetitore, come prima.
+    std::string placePath;
 };
+
+/** Un passo di gioco del server (script + replica), chiamato a 60 Hz dal ciclo. */
+using ServerTickFn = std::function<void(float dt)>;
 
 /** Dove va il testo di stato: una console lo stampa, un servizio lo scrive su file. */
 using ServerLogFn = std::function<void(const std::string&)>;
@@ -90,6 +96,7 @@ inline void printServerHelp() {
         "  --max N      max giocatori 1-32 (default 8)\n"
         "  --name STR   nome sessione\n"
         "  --game N     restringi a un indice gioco (default: qualsiasi)\n"
+        "  --place F    carica il place F (.json/.blocky) ed esegue i suoi Script server\n"
         "\nEsempio:\n"
         "  BlockyServer.exe --port 27015 --max 12 --name \"Obby Party\"\n");
 }
@@ -114,6 +121,8 @@ inline void parseServerArgs(int argc, char** argv, DedicatedServerConfig& cfg, b
             cfg.gameIndex = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--name") == 0 && i + 1 < argc)
             cfg.name = argv[++i];
+        else if (std::strcmp(argv[i], "--place") == 0 && i + 1 < argc)
+            cfg.placePath = argv[++i];
     }
     cfg.maxPlayers = std::clamp(cfg.maxPlayers, 1, 32);
     if (cfg.port < 1024 || cfg.port > 65535) cfg.port = 27015;
@@ -141,6 +150,7 @@ inline bool startDedicatedServer(LanNet& net, const DedicatedServerConfig& cfg,
     log("  Porta: " + std::to_string(cfg.port));
     log("  Max giocatori: " + std::to_string(cfg.maxPlayers));
     log("  Nome: " + cfg.name);
+    log(std::string("  Job ID: ") + net.jobId);
     log(std::string("  Gioco: ") + (cfg.gameIndex < 0
         ? "qualsiasi (auto-match risponde a tutti)"
         : std::to_string(cfg.gameIndex)));
@@ -179,7 +189,9 @@ inline bool startDedicatedServer(LanNet& net, const DedicatedServerConfig& cfg,
  */
 inline void runDedicatedServerLoop(LanNet& net, int maxPlayers,
                                    std::atomic<bool>& keepRunning,
-                                   const ServerLogFn& log) {
+                                   const ServerLogFn& log,
+                                   const ServerTickFn& tick = nullptr) {
+    float tickAcc = 0.f, lastT = 0.f;
     float t0 = 0.f;
 #ifdef _WIN32
     LARGE_INTEGER freq{}, counter{};
@@ -199,6 +211,18 @@ inline void runDedicatedServerLoop(LanNet& net, int maxPlayers,
         float t = t0 += 0.016f;
 #endif
         net.poll(t);
+        if (tick) {
+            // Passi fissi da 1/60 s, al massimo 5 per giro (dopo un blocco
+            // lungo non si recupera tutto in un colpo).
+            tickAcc += std::clamp(t - lastT, 0.f, 0.25f);
+            const float step = 1.f / 60.f;
+            for (int n = 0; tickAcc >= step && n < 5; ++n) {
+                tick(step);
+                tickAcc -= step;
+            }
+            if (tickAcc > step) tickAcc = 0.f;
+        }
+        lastT = t;
         int c = net.playerCount();
         if (c != lastCount) {
             lastCount = c;

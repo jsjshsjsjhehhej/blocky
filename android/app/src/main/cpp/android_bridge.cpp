@@ -14,6 +14,7 @@
 
 #include "platform/Platform.h"
 #include "platform/FilePick.h"
+#include "engine/WebRequest.h"
 
 #define BRIDGE_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Blocky", __VA_ARGS__)
 #define BRIDGE_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Blocky", __VA_ARGS__)
@@ -482,8 +483,102 @@ std::string readSigningCertSha256() {
     return out;
 }
 
+namespace {
+
+/**
+ * HTTPS per il motore (blk::web, catalogo giochi online) con le classi Java
+ * di sistema: URL + HttpURLConnection. TLS e certificati li controlla
+ * Android. Si chiama da un thread qualsiasi (JniScope lo aggancia alla VM);
+ * le classi di sistema si trovano anche da un thread nativo.
+ */
+bool httpsRequest(const blk::web::Request& rq, blk::web::Response& out) {
+    JniScope jni(vm());
+    JNIEnv* env = jni.env;
+    if (!env) { out.error = "JNI non disponibile"; return false; }
+
+    auto failed = [&](const char* what) {
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            out.error = std::string(what) + " (rete o certificato)";
+            return true;
+        }
+        return false;
+    };
+    auto jstr = [&](const std::string& s) { return env->NewStringUTF(s.c_str()); };
+
+    jclass urlCls = env->FindClass("java/net/URL");
+    jclass httpCls = env->FindClass("java/net/HttpURLConnection");
+    jclass outCls = env->FindClass("java/io/OutputStream");
+    jclass inCls = env->FindClass("java/io/InputStream");
+    if (!urlCls || !httpCls || !outCls || !inCls) { clearPendingException(env); out.error = "classi Java mancanti"; return false; }
+
+    jobject url = env->NewObject(urlCls, env->GetMethodID(urlCls, "<init>", "(Ljava/lang/String;)V"), jstr(rq.url));
+    if (failed("indirizzo non valido") || !url) return false;
+    jobject conn = env->CallObjectMethod(url, env->GetMethodID(urlCls, "openConnection", "()Ljava/net/URLConnection;"));
+    if (failed("connessione fallita") || !conn) return false;
+
+    env->CallVoidMethod(conn, env->GetMethodID(httpCls, "setConnectTimeout", "(I)V"), (jint)rq.timeoutMs);
+    env->CallVoidMethod(conn, env->GetMethodID(httpCls, "setReadTimeout", "(I)V"), (jint)rq.timeoutMs);
+    env->CallVoidMethod(conn, env->GetMethodID(httpCls, "setRequestMethod", "(Ljava/lang/String;)V"), jstr(rq.method));
+    if (failed("metodo non valido")) return false;
+    const jmethodID setProp = env->GetMethodID(httpCls, "setRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V");
+    env->CallVoidMethod(conn, setProp, jstr("User-Agent"), jstr("Blocky"));
+    if (!rq.contentType.empty()) env->CallVoidMethod(conn, setProp, jstr("Content-Type"), jstr(rq.contentType));
+    if (!rq.bearer.empty()) env->CallVoidMethod(conn, setProp, jstr("Authorization"), jstr("Bearer " + rq.bearer));
+
+    if (!rq.body.empty()) {
+        env->CallVoidMethod(conn, env->GetMethodID(httpCls, "setDoOutput", "(Z)V"), JNI_TRUE);
+        env->CallVoidMethod(conn, env->GetMethodID(httpCls, "setFixedLengthStreamingMode", "(I)V"), (jint)rq.body.size());
+        jobject os = env->CallObjectMethod(conn, env->GetMethodID(httpCls, "getOutputStream", "()Ljava/io/OutputStream;"));
+        if (failed("invio fallito") || !os) return false;
+        jbyteArray arr = env->NewByteArray((jsize)rq.body.size());
+        if (!arr) { clearPendingException(env); out.error = "memoria insufficiente"; return false; }
+        env->SetByteArrayRegion(arr, 0, (jsize)rq.body.size(), reinterpret_cast<const jbyte*>(rq.body.data()));
+        env->CallVoidMethod(os, env->GetMethodID(outCls, "write", "([B)V"), arr);
+        env->CallVoidMethod(os, env->GetMethodID(outCls, "close", "()V"));
+        env->DeleteLocalRef(arr);
+        if (failed("invio interrotto")) return false;
+    }
+
+    const jint status = env->CallIntMethod(conn, env->GetMethodID(httpCls, "getResponseCode", "()I"));
+    if (failed("nessuna risposta")) return false;
+    out.status = (int)status;
+    out.transport = true;
+
+    // 4xx/5xx: il corpo (con il motivo) sta in getErrorStream.
+    jobject is = env->CallObjectMethod(conn, env->GetMethodID(httpCls, "getInputStream", "()Ljava/io/InputStream;"));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        is = env->CallObjectMethod(conn, env->GetMethodID(httpCls, "getErrorStream", "()Ljava/io/InputStream;"));
+        clearPendingException(env);
+    }
+    if (is) {
+        const jsize chunk = 64 * 1024;
+        jbyteArray buf = env->NewByteArray(chunk);
+        const jmethodID read = env->GetMethodID(inCls, "read", "([B)I");
+        std::vector<char> tmp((size_t)chunk);
+        while (buf) {
+            const jint n = env->CallIntMethod(is, read, buf);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); out.error = "lettura interrotta"; break; }
+            if (n <= 0) break;
+            env->GetByteArrayRegion(buf, 0, n, reinterpret_cast<jbyte*>(tmp.data()));
+            out.body.append(tmp.data(), (size_t)n);
+            if (out.body.size() > rq.maxBytes) { out.error = "risposta troppo grande"; break; }
+        }
+        if (buf) env->DeleteLocalRef(buf);
+        env->CallVoidMethod(is, env->GetMethodID(inCls, "close", "()V"));
+        clearPendingException(env);
+    }
+    env->CallVoidMethod(conn, env->GetMethodID(httpCls, "disconnect", "()V"));
+    clearPendingException(env);
+    return true;
+}
+
+} // namespace
+
 void installPlatformHooks(android_app* app) {
     g_app = app;
+    blk::web::httpsHook() = &httpsRequest;
     plat::setAndroidOpenUrlHook(&openUrl);
     plat::setAndroidSoftKeyboardHook(&softKeyboard);
     plat::setAndroidFilePickHook(&openFilePicker);

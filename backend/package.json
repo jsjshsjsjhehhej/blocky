@@ -1,0 +1,22 @@
+{
+  "name": "blocky-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servizi web di Blocky: impostazioni del client (FastFlag), versioni dell'app. Node.js + PostgreSQL.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "BLOCKY_MEMORY_DB=1 node src/main.ts",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "fastify": "5.2.1",
+    "pg": "8.13.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.2.17"
+  }
+}

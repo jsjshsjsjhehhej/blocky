@@ -330,6 +330,62 @@ static void runAllPartScripts(bool clearFirst = true) {
         g_luaRunMsg = "Test: script avviati (" + std::to_string(n) + ")";
 }
 
+/**
+ * UserInputService.InputBegan / InputEnded per gli script: ogni frame, in
+ * Play e nel Test, i tasti e i pulsanti del mouse che cambiano stato. Prima
+ * gli script si collegavano ma l'evento non arrivava mai.
+ */
+static void pumpScriptInput(GLFWwindow* win) {
+    struct Key { int code; const char* name; };
+    // Codici GLFW standard (le lettere sono il loro ASCII): numeri, perche' il GLFW
+    // di Android (glfw_shim) non definisce tutte le costanti GLFW_KEY_*.
+    static const Key kKeys[] = {
+        {65, "A"}, {66, "B"}, {67, "C"}, {68, "D"}, {69, "E"}, {70, "F"},
+        {71, "G"}, {72, "H"}, {73, "I"}, {74, "J"}, {75, "K"}, {76, "L"},
+        {77, "M"}, {78, "N"}, {79, "O"}, {80, "P"}, {81, "Q"}, {82, "R"},
+        {83, "S"}, {84, "T"}, {85, "U"}, {86, "V"}, {87, "W"}, {88, "X"},
+        {89, "Y"}, {90, "Z"}, {48, "Zero"}, {49, "One"}, {50, "Two"}, {51, "Three"},
+        {52, "Four"}, {53, "Five"}, {54, "Six"}, {55, "Seven"}, {56, "Eight"}, {57, "Nine"},
+        {32, "Space"}, {257, "Return"}, {258, "Tab"}, {259, "Backspace"}, {340, "LeftShift"}, {344, "RightShift"},
+        {341, "LeftControl"}, {345, "RightControl"}, {342, "LeftAlt"}, {265, "Up"}, {264, "Down"}, {263, "Left"},
+        {262, "Right"},
+    };
+    static bool keyWas[sizeof(kKeys) / sizeof(kKeys[0])] = {};
+    static bool mouseWas[3] = {};
+    if (!g_lua.ok || !win) return;
+    const bool inGame = g_screen == AppScreen::Playing || g_studioTesting;
+    double mx = 0, my = 0;
+    glfwGetCursorPos(win, &mx, &my);
+    const ImGuiIO& io = ImGui::GetIO();
+    for (size_t i = 0; i < sizeof(kKeys) / sizeof(kKeys[0]); ++i) {
+        const bool down = inGame && glfwGetKey(win, kKeys[i].code) == GLFW_PRESS;
+        if (down != keyWas[i])
+            g_lua.fireInput(down, kKeys[i].name, "Keyboard", (float)mx, (float)my, io.WantCaptureKeyboard);
+        keyWas[i] = down;
+    }
+    static const char* kMouse[3] = {"MouseButton1", "MouseButton2", "MouseButton3"};
+    for (int b = 0; b < 3; ++b) {
+        const bool down = inGame && glfwGetMouseButton(win, b) == GLFW_PRESS;
+        if (down != mouseWas[b])
+            g_lua.fireInput(down, "Unknown", kMouse[b], (float)mx, (float)my, io.WantCaptureMouse);
+        // ClickDetector: clic sinistro su una part (o su una sua figlia),
+        // entro 32 stud dal giocatore come MaxActivationDistance di Roblox.
+        if (b == 0 && down && !mouseWas[b] && !io.WantCaptureMouse) {
+            int idx = pickPartAtMouse((float)mx, (float)my);
+            for (int guard = 0; idx >= 0 && idx < (int)g_world.parts.size() && guard < 32; ++guard) {
+                if (g_lua.partHasClick(idx)) {
+                    const WorkspacePart& p = g_world.parts[(size_t)idx];
+                    const float reach = 32.f + 0.5f * glm::length(p.size);
+                    if (glm::length(p.position - g_playerPos) <= reach) g_lua.firePartClicked(idx);
+                    break;
+                }
+                idx = g_world.parts[(size_t)idx].parentIndex;
+            }
+        }
+        mouseWas[b] = down;
+    }
+}
+
 static void startTestScripts() {
     CrashHandler::note("startTestScripts: inizio");
     // Sessione Luau pulita: gli script vedono il workspace C++ così com'è
@@ -337,6 +393,7 @@ static void startTestScripts() {
     g_lua.shutdown();
     if (!g_lua.init(&g_world)) {
         std::fprintf(stderr, "[Test] Lua init fallita: %s\n", g_lua.lastError.c_str());
+        LOG_ERR("test", "Lua non parte: %s", g_lua.lastError.c_str());
         return;
     }
     CrashHandler::note("startTestScripts: g_lua.init ok");
@@ -577,7 +634,8 @@ static void pollPartTouched() {
         std::fprintf(stdout, "[Boom] touch/near '%s'\n", g_world.parts[idx].name.c_str());
         if (g_selectedPart == idx) selectPart(-1);
         else if (g_selectedPart > idx) --g_selectedPart;
-        g_world.parts.erase(g_world.parts.begin() + idx);
+        if (g_lua.ok && g_lua.workspace == &g_world) g_lua.destroyPartNow(idx);
+        else g_world.parts.erase(g_world.parts.begin() + idx);
         if (idx < (int)g_touching.size())
             g_touching.erase(g_touching.begin() + idx);
     }
@@ -608,7 +666,8 @@ static void tickBoomAutoFuse(float dt) {
         std::fprintf(stdout, "[Boom] auto fuse '%s'\n", p.name.c_str());
         if (g_selectedPart == i) selectPart(-1);
         else if (g_selectedPart > i) --g_selectedPart;
-        g_world.parts.erase(g_world.parts.begin() + i);
+        if (g_lua.ok && g_lua.workspace == &g_world) g_lua.destroyPartNow(i);
+        else g_world.parts.erase(g_world.parts.begin() + i);
         if (i < (int)g_touching.size())
             g_touching.erase(g_touching.begin() + i);
     }

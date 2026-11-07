@@ -47,6 +47,7 @@
  */
 
 #include "dedicated_server_core.h"
+#include "ServerWorld.h"
 #include "platform/Platform.h"
 
 #include <windows.h>
@@ -54,6 +55,7 @@
 #include <atomic>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <string>
 
 namespace {
@@ -130,6 +132,27 @@ DWORD WINAPI serviceCtrlHandler(DWORD ctrl, DWORD, LPVOID, LPVOID) {
  * thread separato, perche' il control handler (sopra) gira gia' su un
  * thread diverso fornito dalla SCM stessa.
  */
+/**
+ * Con --place: il mondo del gioco e gli Script server (ServerWorld.h), come
+ * BlockyServer. Vuoto il tick = il servizio fa solo da ripetitore.
+ */
+static ServerTickFn loadServerWorld(LanNet& net, const DedicatedServerConfig& cfg, const ServerLogFn& log,
+                                    std::unique_ptr<blkserver::ServerWorld>& world) {
+    if (cfg.placePath.empty()) {
+        log("  Nessun --place: solo ripetitore (gli Script server non girano)");
+        return nullptr;
+    }
+    world = std::make_unique<blkserver::ServerWorld>();
+    if (!world->load(cfg.placePath, net, log)) {
+        log("  Script server: NON attivi, il servizio fa solo da ripetitore");
+        world.reset();
+        return nullptr;
+    }
+    log("  Script server: ATTIVI (il server e' l'autorita' sulle part)");
+    blkserver::ServerWorld* w = world.get();
+    return [w, &net](float dt) { w->tick(net, dt); };
+}
+
 void WINAPI serviceMain(DWORD, char**) {
     g_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_status.dwServiceSpecificExitCode = 0;
@@ -145,10 +168,13 @@ void WINAPI serviceMain(DWORD, char**) {
         return;
     }
 
+    std::unique_ptr<blkserver::ServerWorld> world;
+    const ServerTickFn tick = loadServerWorld(net, g_config, logLine, world);
+
     reportStatus(SERVICE_RUNNING);
     logLine("[RCC] Servizio avviato.");
 
-    runDedicatedServerLoop(net, g_config.maxPlayers, g_keepRunning, logLine);
+    runDedicatedServerLoop(net, g_config.maxPlayers, g_keepRunning, logLine, tick);
 
     logLine("[RCC] Servizio fermato.");
     reportStatus(SERVICE_STOPPED);
@@ -189,6 +215,7 @@ bool installService(const DedicatedServerConfig& cfg) {
         + " --max " + std::to_string(cfg.maxPlayers)
         + " --name \"" + cfg.name + "\"";
     if (cfg.gameIndex >= 0) binPath += " --game " + std::to_string(cfg.gameIndex);
+    if (!cfg.placePath.empty()) binPath += " --place \"" + cfg.placePath + "\"";
 
     SC_HANDLE scm = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!scm) {
@@ -282,19 +309,21 @@ int runConsole(const DedicatedServerConfig& cfg) {
     };
     LanNet net;
     if (!startDedicatedServer(net, cfg, consoleLog)) return 1;
+    std::unique_ptr<blkserver::ServerWorld> world;
+    const ServerTickFn tick = loadServerWorld(net, cfg, consoleLog, world);
     std::atomic<bool> keepRunning{true};
-    runDedicatedServerLoop(net, cfg.maxPlayers, keepRunning, consoleLog);
+    runDedicatedServerLoop(net, cfg.maxPlayers, keepRunning, consoleLog, tick);
     return 0;
 }
 
 void printServiceHelp() {
     std::printf(
         "BlockyRccService — server dedicato come servizio Windows\n"
-        "  --install [--port N] [--max N] [--name STR] [--game N]\n"
+        "  --install [--port N] [--max N] [--name STR] [--game N] [--place F]\n"
         "      Registra il servizio (richiede amministratore).\n"
         "  --uninstall\n"
         "      Rimuove il servizio (richiede amministratore).\n"
-        "  --console [--port N] [--max N] [--name STR] [--game N]\n"
+        "  --console [--port N] [--max N] [--name STR] [--game N] [--place F]\n"
         "      Prova lo stesso ciclo in una console, senza installare nulla.\n"
         "\nSenza argomenti: assume di essere avviato dalla Service Control\n"
         "Manager di Windows.\n");

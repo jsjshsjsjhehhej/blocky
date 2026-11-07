@@ -44,6 +44,17 @@ static glm::vec3 partAxisDir(const WorkspacePart& p, int axis) {
     return len > 1e-6f ? w / len : local;
 }
 
+// Spazio del gizmo come Roblox Studio: Mondo (predefinito) o Locale (Ctrl+L).
+// La scala resta sempre sugli assi della part.
+static glm::vec3 gizmoAxisDir(const WorkspacePart& p, int axis) {
+    if (g_studioLocalSpace) return partAxisDir(p, axis);
+    glm::vec3 w(0.f);
+    w[axis] = 1.f;
+    return w;
+}
+// Asse della rotazione in corso, fissato quando parte il trascinamento.
+static glm::vec3 g_rotateAxisW{0.f, 1.f, 0.f};
+
 static float gizmoRingRadius(const WorkspacePart& p) {
     float m = std::max(p.size.x, std::max(p.size.y, p.size.z)) * 0.5f;
     return std::clamp(m + 2.4f, 3.2f, 14.f);
@@ -90,7 +101,7 @@ static bool gizmoWorldToScreen(const glm::vec3& world, float& outX, float& outY)
 }
 
 static glm::vec3 moveHandleTip(const WorkspacePart& p, int axis) {
-    return p.position + partAxisDir(p, axis) * gizmoArrowLen(p);
+    return p.position + gizmoAxisDir(p, axis) * gizmoArrowLen(p);
 }
 
 
@@ -108,7 +119,16 @@ static glm::vec3 modelBaseExtent(int idx) {
     return glm::max(ext, glm::vec3(0.05f));
 }
 
+// Vero quando l Animation Studio anima la part selezionata: il gizmo dello
+// Studio la sposterebbe e l animazione la rimetterebbe subito a posto; li si
+// usa il gizmo delle ossa (AnimationStudioUi.h).
+static bool g_animStudioGizmoBlock = false;
+// Vero mentre l Animation Studio mette le part del rig nella posa: lo Studio
+// non deve trattarlo come uno spostamento fatto a mano (follow dei Model, Undo).
+static bool g_animStudioDriving = false;
+
 static WorkspacePart* gizmoPart() {
+    if (g_animStudioGizmoBlock) return nullptr;
     if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size()) {
         if (g_world.parts[g_selectedPart].locked) return nullptr;
         return &g_world.parts[g_selectedPart];
@@ -477,7 +497,7 @@ static bool pickMoveHandle(float mx, float my, int& outAxis) {
         if (rayHitAabb(o, d, tip, glm::vec3(0.55f), t) && t < bestT) {
             bestT = t; outAxis = axis; hit = true;
         }
-        glm::vec3 dir = partAxisDir(p, axis);
+        glm::vec3 dir = gizmoAxisDir(p, axis);
         for (int k = 1; k <= 6; ++k) {
             glm::vec3 pt = p.position + dir * (len * (float)k / 7.f);
             if (rayHitAabb(o, d, pt, glm::vec3(0.28f), t) && t < bestT) {
@@ -500,7 +520,7 @@ static bool pickRotateHandle(float mx, float my, int& outAxis) {
     float R = gizmoRingRadius(p);
     const float band = 0.55f;
     for (int axis = 0; axis < 3; ++axis) {
-        glm::vec3 axisV = partAxisDir(p, axis);
+        glm::vec3 axisV = gizmoAxisDir(p, axis);
         float t = 0.f;
         if (!rayPlane(o, d, p.position, axisV, t)) continue;
         glm::vec3 hitP = o + d * t;
@@ -620,7 +640,7 @@ static void beginMoveDrag(int axis, float mx, float my) {
     float t = 0.f;
     glm::vec3 planeN = (axis == 1) ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
     if (axis >= 0) {
-        glm::vec3 axisV = partAxisDir(p, axis);
+        glm::vec3 axisV = gizmoAxisDir(p, axis);
         glm::vec3 camF = g_cam.front();
         glm::vec3 side = glm::cross(axisV, camF);
         if (glm::length(side) < 1e-4f) side = glm::cross(axisV, glm::vec3(0, 1, 0));
@@ -641,7 +661,7 @@ static void updateMoveDrag(float mx, float my) {
     float t = 0.f;
 
     if (g_moveAxis >= 0 && g_moveAxis <= 2) {
-        glm::vec3 axisV = partAxisDir(p, g_moveAxis);
+        glm::vec3 axisV = gizmoAxisDir(p, g_moveAxis);
         glm::vec3 camF = g_cam.front();
         glm::vec3 side = glm::cross(axisV, camF);
         if (glm::length(side) < 1e-4f) side = glm::cross(axisV, glm::vec3(0, 1, 0));
@@ -696,7 +716,8 @@ static void beginRotateDrag(int axis, float mx, float my) {
     g_rotateLiveDelta = 0.f;
     glm::vec3 o, d;
     screenToRay(mx, my, g_lastView, g_lastProj, o, d);
-    glm::vec3 axisV = partAxisDir(p, axis);
+    glm::vec3 axisV = gizmoAxisDir(p, axis);
+    g_rotateAxisW = axisV;
     float t = 0.f;
     if (rayPlane(o, d, p.position, axisV, t))
         g_rotateStartAngle = angleAroundAxis(p.position, axisV, o + d * t);
@@ -710,7 +731,7 @@ static void updateRotateDrag(float mx, float my) {
     auto& p = *pt;
     glm::vec3 o, d;
     screenToRay(mx, my, g_lastView, g_lastProj, o, d);
-    glm::vec3 axisV = partAxisDir(p, g_rotateAxis);
+    const glm::vec3 axisV = g_rotateAxisW;
     float t = 0.f;
     if (!rayPlane(o, d, p.position, axisV, t)) return;
     float ang = angleAroundAxis(p.position, axisV, o + d * t);
@@ -720,8 +741,9 @@ static void updateRotateDrag(float mx, float my) {
         if (step <= 0.f) step = gizmoShift() ? 1.f : 5.f;
         deltaDeg = snapValue(deltaDeg, step);
     }
-    p.rotation = g_rotateStartRot;
-    p.rotation[g_rotateAxis] = g_rotateStartRot[g_rotateAxis] + deltaDeg;
+    // Rotazione vera attorno all asse (mondo o part): prima si sommavano i gradi a
+    // un angolo di Eulero, e con una part gia ruotata girava attorno all asse sbagliato.
+    p.rotation = partgroups::toEuler(glm::angleAxis(glm::radians(deltaDeg), axisV) * partgroups::toQuat(g_rotateStartRot));
     g_rotateLiveDelta = deltaDeg;
     gizmoCommitToModel();
 }
@@ -733,11 +755,7 @@ static void endRotateDrag() {
         for (int i = 0; i < 3; ++i) {
             while (p.rotation[i] > 180.f) p.rotation[i] -= 360.f;
             while (p.rotation[i] < -180.f) p.rotation[i] += 360.f;
-            if (!gizmoCtrl()) {
-                float step = studioSnapRotateStep();
-                if (step <= 0.f) step = gizmoShift() ? 1.f : 5.f;
-                p.rotation[i] = snapValue(p.rotation[i], step);
-            }
+            // lo scatto e gia sul giro fatto (updateRotateDrag), non sui singoli angoli
         }
         if (g_xformTrack && g_selectedPart >= 0)
             g_undo.recordTransform(g_selectedPart, g_xformBefore, p);
@@ -765,6 +783,101 @@ static bool rayHitPart(const glm::vec3& o, const glm::vec3& d, const WorkspacePa
     return rayHitAabb(lo, ld, glm::vec3(0), p.size, tOut);
 }
 
+
+// ---- Trascinare una part col mouse (il "dragger" di Roblox Studio) ---------------------------
+// Clic su una part con Seleziona o Sposta e trascina: la part scivola sopra le
+// altre part e sul terreno (y = 0), con lo snap della griglia. Le altre part
+// selezionate la seguono (follow dei Model, StudioGroupsUi.h).
+static bool partIndexValid(int i);                 // StudioFeaturesUi.h
+static std::vector<int> studioActivePartIndices(); // StudioFeaturesUi.h
+static bool g_freeDragArmed = false;
+static bool g_freeDragging = false;
+static float g_freeDragX0 = 0.f, g_freeDragY0 = 0.f;
+static WorkspacePart g_freeDragBefore;
+
+static void armFreeDrag(float mx, float my) {
+    g_freeDragArmed = false;
+    if (g_tool != StudioTool::Select && g_tool != StudioTool::Move) return;
+    if (g_animStudioGizmoBlock || !partIndexValid(g_selectedPart) || g_world.parts[(size_t)g_selectedPart].locked) return;
+    g_freeDragArmed = true;
+    g_freeDragX0 = mx;
+    g_freeDragY0 = my;
+}
+
+/** Il punto sotto il mouse sulle part (escluse quelle trascinate) o sul terreno, con la normale. */
+static bool freeDragSurface(float mx, float my, const std::vector<int>& skip, glm::vec3& hitP, glm::vec3& hitN) {
+    glm::vec3 o, d;
+    screenToRay(mx, my, g_lastView, g_lastProj, o, d);
+    d = glm::normalize(d);
+    float best = 1e9f;
+    int bestPart = -1;
+    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+        if (std::find(skip.begin(), skip.end(), i) != skip.end()) continue;
+        const WorkspacePart& p = g_world.parts[(size_t)i];
+        if (p.transparency >= 0.99f) continue;
+        float t = 0.f;
+        if (rayHitPart(o, d, p, t) && t > 0.f && t < best) { best = t; bestPart = i; }
+    }
+    if (bestPart >= 0) {
+        const WorkspacePart& p = g_world.parts[(size_t)bestPart];
+        hitP = o + d * best;
+        // Faccia colpita: l'asse locale dove il punto sta sul bordo della scatola.
+        const glm::mat3 R = glm::mat3(partRotationMatrix(p.rotation));
+        const glm::vec3 l = glm::transpose(R) * (hitP - p.position);
+        int ax = 0;
+        float bestR = -1.f;
+        for (int k = 0; k < 3; ++k) {
+            const float r = std::fabs(l[k]) / std::max(1e-3f, p.size[k] * 0.5f);
+            if (r > bestR) { bestR = r; ax = k; }
+        }
+        glm::vec3 n(0.f);
+        n[ax] = l[ax] >= 0.f ? 1.f : -1.f;
+        hitN = glm::normalize(R * n);
+        return true;
+    }
+    if (d.y < -1e-4f) {   // terreno
+        const float t = -o.y / d.y;
+        hitP = o + d * t;
+        hitN = {0.f, 1.f, 0.f};
+        return true;
+    }
+    return false;
+}
+
+static void updateFreeDrag(float mx, float my) {
+    if (!g_freeDragArmed && !g_freeDragging) return;
+    if (!partIndexValid(g_selectedPart)) { g_freeDragArmed = g_freeDragging = false; return; }
+    if (!g_freeDragging) {
+        if (std::fabs(mx - g_freeDragX0) + std::fabs(my - g_freeDragY0) < 5.f) return;
+        g_freeDragging = true;
+        g_freeDragBefore = g_world.parts[(size_t)g_selectedPart];
+    }
+    WorkspacePart& p = g_world.parts[(size_t)g_selectedPart];
+    std::vector<int> skip = studioActivePartIndices();
+    if (std::find(skip.begin(), skip.end(), g_selectedPart) == skip.end()) skip.push_back(g_selectedPart);
+    glm::vec3 hit, n;
+    if (!freeDragSurface(mx, my, skip, hit, n)) return;
+    // Mezza misura della part (ruotata) lungo la normale: cosi' si appoggia, non affonda.
+    const glm::mat3 R = glm::mat3(partRotationMatrix(p.rotation));
+    const glm::vec3 half = p.size * 0.5f;
+    const float push = std::fabs(glm::dot(R[0], n)) * half.x + std::fabs(glm::dot(R[1], n)) * half.y
+                     + std::fabs(glm::dot(R[2], n)) * half.z;
+    glm::vec3 pos = hit + n * push;
+    const float step = studioSnapMoveStep();
+    if (step > 0.f && !gizmoCtrl())
+        for (int k = 0; k < 3; ++k)
+            if (std::fabs(n[k]) < 0.99f) pos[k] = snapValue(pos[k], step);   // snap solo lungo la superficie
+    p.position = pos;
+}
+
+static void endFreeDrag() {
+    if (g_freeDragging && partIndexValid(g_selectedPart)) {
+        g_undo.recordTransform(g_selectedPart, g_freeDragBefore, g_world.parts[(size_t)g_selectedPart]);
+        markPlaceDirty();
+    }
+    g_freeDragArmed = false;
+    g_freeDragging = false;
+}
 // Usata dalla camera in terza persona per non attraversare i muri (vedi
 // thirdPersonView in CameraAndInput.h) — dirUnit deve essere normalizzato
 // cosi' tOut e' una distanza vera in stud, non un parametro 0..1.

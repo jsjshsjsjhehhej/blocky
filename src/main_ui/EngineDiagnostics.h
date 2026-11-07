@@ -191,3 +191,34 @@ inline void drawFrameProfiler() {
 
     ImGui::End();
 }
+
+// ---- perf.txt: statistiche del frame su file, ogni 5 s in partita ----------
+// Per leggere le prestazioni di un telefono senza screenshot: il file sta
+// nella cartella dati (su Android: adb shell run-as com.blocky.preview cat
+// files/userdata/perf.txt). Solo tempi e qualita', niente dati dell'utente.
+static void perfLogTick(float dt) {
+    static float acc = 0.f;
+    static std::vector<std::string> lines;
+    if (g_screen != AppScreen::Playing) { acc = 0.f; return; }
+    acc += dt;
+    if (acc < 5.f) return;
+    acc = 0.f;
+
+    const auto& st = plat::prof::state();
+    char buf[512];
+    int n = std::snprintf(buf, sizeof(buf), "t=%.0fs fps=%.1f frame=%.2fms scala=%.2f %s parti=%d |",
+                          glfwGetTime(), st.frameAvgMs > 0.f ? 1000.f / st.frameAvgMs : 0.f, st.frameAvgMs,
+                          g_engine.quality.renderScale, g_engine.quality.name, (int)g_world.parts.size());
+    for (int i = 0; i < (int)plat::prof::Phase::Count && n > 0 && n < (int)sizeof(buf); ++i) {
+        const auto& ph = st.phase[i];
+        n += std::snprintf(buf + n, sizeof(buf) - (size_t)n, " %s=%.2f/%.1f",
+                           plat::prof::phaseName((plat::prof::Phase)i), ph.avgMs, ph.peakMs);
+    }
+    if (n > 0 && n < (int)sizeof(buf))
+        std::snprintf(buf + n, sizeof(buf) - (size_t)n, " | non_misurato=%.2f", plat::prof::unaccountedMs());
+    lines.emplace_back(buf);
+    if (lines.size() > 36) lines.erase(lines.begin());
+    std::ofstream f(blockyDataDir() + "/perf.txt", std::ios::trunc);
+    f << "# media/picco in ms per fase, una riga ogni 5 s (gli ultimi 3 minuti)\n";
+    for (const auto& l : lines) f << l << "\n";
+}

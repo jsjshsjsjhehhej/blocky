@@ -1,16 +1,22 @@
 
 #include <windows.h>
 #include <cstdio>
+#include <cstring>
 #ifndef BLOCKY_DEV
 #include "AutoUpdater.h"
 #endif
 
 typedef int (*BlockyRunFn)();
 
-int main() {
+int main(int argc, char** argv) {
 #ifndef BLOCKY_DEV
     blk::AutoUpdater::tryAutoUpdate("Blocky");
 #endif
+    // Blocky.exe "blocky://place/<id>?job=<jobId>": l'invito passa al motore
+    // nell'ambiente di QUESTO processo (non di sistema); lo valida il Place
+    // Launcher, qui si inoltra soltanto.
+    if (argc > 1 && argv[1] && std::strlen(argv[1]) < 256)
+        SetEnvironmentVariableA("BLOCKY_JOIN", argv[1]);
     HMODULE dll = LoadLibraryA("libblocky.dll");
     if (!dll) {
         MessageBoxA(nullptr,

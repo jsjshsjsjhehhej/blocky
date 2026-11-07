@@ -9,6 +9,7 @@
 
 #include "DataModel.h"
 #include "PartGroups.h"
+#include "JsonScan.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -140,7 +141,7 @@ inline void writeJson(std::ostream& o, const DataModel& dm) {
 // un tipo sconosciuto (file di una versione futura), si scartano.
 inline void readJson(const std::string& json, DataModel& dm) {
     dm.welds.clear();
-    const size_t key = json.find("\"constraints\"");
+    const size_t key = blk::jsonscan::topKey(json, "constraints");
     if (key == std::string::npos) return;
     const size_t open = json.find('[', key);
     if (open == std::string::npos) return;

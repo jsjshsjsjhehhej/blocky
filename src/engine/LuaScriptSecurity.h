@@ -89,6 +89,25 @@ inline int luaGlobalNewIndex(lua_State* ls) {
 inline void protectTable(lua_State* L, int idx) {
     if (idx < 0) idx = lua_gettop(L) + 1 + idx;
     if (!lua_istable(L, idx)) return;
+    // Ha gia' una metatabella del motore (Humanoid: __index/__newindex per
+    // WalkSpeed, Health...): sostituirla cancellava quelle proprieta' e
+    // `humanoid.WalkSpeed = 24` dava errore. Si tiene: si blocca getmetatable
+    // e, se il motore non ne aveva una, si aggiunge la protezione sulle chiavi nuove.
+    if (lua_getmetatable(L, idx)) {
+        if (!lua_getreadonly(L, -1)) {
+            lua_pushstring(L, "BlockyProtected");
+            lua_setfield(L, -2, "__metatable");
+            lua_getfield(L, -1, "__newindex");
+            const bool hasNewIndex = !lua_isnil(L, -1);
+            lua_pop(L, 1);
+            if (!hasNewIndex) {
+                blockyPushCFunction(L, luaProtectedNewIndex);
+                lua_setfield(L, -2, "__newindex");
+            }
+        }
+        lua_pop(L, 1);
+        return;
+    }
     lua_newtable(L);
     blockyPushCFunction(L, luaProtectedNewIndex);
     lua_setfield(L, -2, "__newindex");

@@ -10,6 +10,7 @@
 #include "../platform/SystemApi.h"
 #include "../platform/TargetPlatform.h"
 #include "PoolProtocol.h"
+#include "PlaceInstance.h"
 using namespace blk::PoolProtocol; // pacchetti Register/Resolve/Relay... vedi PoolProtocol.h
 #include "WorldReplication.h"
 #include <cstring>
@@ -257,6 +258,20 @@ struct NetAnnounce {
     char      name[24];
 };
 
+// Annuncio e benvenuto con il JobId del server IN CODA. Le versioni vecchie
+// controllano solo n >= sizeof(base) e leggono la parte iniziale: il campo in
+// piu' lo ignorano. Al contrario, da un server vecchio arriva solo la base e
+// il JobId resta vuoto.
+struct NetAnnounceEx {
+    NetAnnounce base;
+    char        jobId[37];
+};
+
+struct NetWelcomeEx {
+    NetWelcome base;
+    char       jobId[37];
+};
+
 struct NetRemoteEvent {
     NetHeader hdr;
     char      name[32];
@@ -334,6 +349,12 @@ struct LanNet {
     char status[128] = {};
     char joinIp[64] = "127.0.0.1";
     int  joinPort = 27015;
+    // JobId della partita in cui si e': generato da host/dedicato all'avvio,
+    // ricevuto dal client nel Welcome. Vuoto offline o con un server vecchio.
+    char jobId[37] = {};
+    // Lato client: il server in cui si e' entrati e' un BlockyServer dedicato
+    // (non il dispositivo di un altro giocatore). Dal Welcome, peerId 0.
+    bool hostDedicated = false;
     bool connected = false;
     bool rejected = false;
 
@@ -381,6 +402,7 @@ struct LanNet {
 
     // Replica mondo (solo Host genera; Client applica).
     uint32_t nextPartNetId = 1;
+    size_t worldReplCursor = 0;   // replica a turno (tickWorldReplication)
     WorldReplication::SentCache worldSentCache;
     float worldReplAcc = 0.f;
     static constexpr float kWorldReplHz = 12.f; // upsert dirty ~12/s
@@ -460,6 +482,8 @@ struct LanNet {
         rejected = false;
         dedicated = false;
         localId = 0;
+        jobId[0] = '\0';
+        hostDedicated = false;
 
         nextId = 1;
         relayActive = false;
@@ -512,6 +536,7 @@ struct LanNet {
         nextId = 2;
         gameIndex = gameIdx;
         joinPort = port;
+        std::snprintf(jobId, sizeof(jobId), "%s", blk::jobid::generate().c_str());
         std::snprintf(localName, sizeof(localName), "%.23s", name && name[0] ? name : "Host");
         std::snprintf(status, sizeof(status), "Server :%d · max %d · 1/%d", port, maxPlayers, maxPlayers);
         std::printf("[Net] %s\n", status);
@@ -532,6 +557,7 @@ struct LanNet {
         nextId = 1;
         gameIndex = gameIdx;
         joinPort = port;
+        std::snprintf(jobId, sizeof(jobId), "%s", blk::jobid::generate().c_str());
         std::snprintf(localName, sizeof(localName), "%.23s", title && title[0] ? title : "Server");
         std::snprintf(status, sizeof(status), "DEDICATO :%d · 0/%d · %s", port, maxPlayers, localName);
         std::printf("[Net] %s\n", status);
@@ -992,13 +1018,16 @@ struct LanNet {
             // Un server dedicato con gameIndex negativo risponde a tutti;
             // altrimenti risponde solo a chi cerca il SUO gioco.
             if (gameIndex >= 0 && (int)hdr.gameIndex != gameIndex) return;
-            if (isFull()) return;
-            NetAnnounce ann{};
-            fillMagic(ann.hdr, NetMsg::Announce, dedicated ? 0 : 1, (uint16_t)gameIndex);
-            ann.maxPlayers = (uint8_t)maxPlayers;
-            ann.curPlayers = (uint8_t)occupiedSlots();
-            ann.port = (uint16_t)joinPort;
-            std::snprintf(ann.name, sizeof(ann.name), "%.23s", localName);
+            // Anche da pieno si risponde: chi cerca QUESTO JobId deve poter
+            // sapere "pieno" invece di "non esiste". La ricerca automatica
+            // salta da sola i server con curPlayers >= maxPlayers.
+            NetAnnounceEx ann{};
+            fillMagic(ann.base.hdr, NetMsg::Announce, dedicated ? 0 : 1, (uint16_t)gameIndex);
+            ann.base.maxPlayers = (uint8_t)maxPlayers;
+            ann.base.curPlayers = (uint8_t)occupiedSlots();
+            ann.base.port = (uint16_t)joinPort;
+            std::snprintf(ann.base.name, sizeof(ann.base.name), "%.23s", localName);
+            std::snprintf(ann.jobId, sizeof(ann.jobId), "%s", jobId);
             sendTo(from, &ann, sizeof(ann));
             return;
         }
@@ -1053,7 +1082,8 @@ struct LanNet {
             }
             peers[slot].lastSeen = now;
 
-            NetWelcome wel{};
+            NetWelcomeEx welEx{};
+            NetWelcome& wel = welEx.base;
             fillMagic(wel.hdr, NetMsg::Welcome, dedicated ? 0 : 1, (uint16_t)gameIndex);
             wel.assignedId = peers[slot].id;
             wel.maxPlayers = (uint8_t)maxPlayers;
@@ -1061,7 +1091,8 @@ struct LanNet {
             wel.spawnX = (float)((peers[slot].id % 5) * 3);
             wel.spawnY = 0.f;
             wel.spawnZ = (float)((peers[slot].id / 5) * 3 + 2);
-            sendTo(from, &wel, sizeof(wel));
+            std::snprintf(welEx.jobId, sizeof(welEx.jobId), "%s", jobId);
+            sendTo(from, &welEx, sizeof(welEx));
 
             peers[slot].needsWorldSync = true;
             peers[slot].worldSyncIndex = 0;
@@ -1182,6 +1213,14 @@ struct LanNet {
             std::memcpy(&wel, buf, sizeof(wel));
             localId = wel.assignedId;
             if (wel.maxPlayers > 0) maxPlayers = wel.maxPlayers;
+            if (n >= (int)sizeof(NetWelcomeEx)) {
+                NetWelcomeEx ex{};
+                std::memcpy(&ex, buf, sizeof(ex));
+                ex.jobId[sizeof(ex.jobId) - 1] = '\0';
+                if (blk::jobid::isValid(ex.jobId))
+                    std::snprintf(jobId, sizeof(jobId), "%s", ex.jobId);
+            }
+            hostDedicated = (wel.hdr.peerId == 0);
             connected = true;
             rejected = false;
             std::snprintf(status, sizeof(status), "In gioco #%d · %d/%d @ %s:%d",
@@ -1588,9 +1627,14 @@ struct LanNet {
         worldReplAcc = 0.f;
 
         // Dirty: unanchored sempre; anchored se hash cambiato (Lua ha mosso/creato)
+        // A turno: con piu' di 48 part in movimento, il giro dopo riparte da
+        // dove si era fermato (prima le ultime part non venivano mai mandate).
         int budget = 48;
-        for (const auto& part : world.parts) {
-            if (budget <= 0) break;
+        const size_t total = world.parts.size();
+        if (worldReplCursor >= total) worldReplCursor = 0;
+        for (size_t k = 0; k < total; ++k) {
+            if (budget <= 0) { worldReplCursor = (worldReplCursor + k) % total; break; }
+            const auto& part = world.parts[(worldReplCursor + k) % total];
             if (part.netId == 0) continue;
             const uint64_t h = WorldReplication::partStateHash(part);
             auto it = worldSentCache.hashByNetId.find(part.netId);
@@ -1630,14 +1674,14 @@ struct LanNet {
     }
 
     /** Client: applica coda WorldDelta al DataModel locale. */
-    int applyIncomingWorld(DataModel& world) {
+    int applyIncomingWorld(DataModel& world, const WorldReplication::EraseFn& erase = nullptr) {
         if (role != NetRole::Client) {
             incomingWorld.clear();
             return 0;
         }
         int n = 0;
         for (const auto& pkt : incomingWorld) {
-            if (WorldReplication::applyPacket(world, pkt))
+            if (WorldReplication::applyPacket(world, pkt, erase))
                 ++n;
         }
         incomingWorld.clear();

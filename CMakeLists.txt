@@ -191,6 +191,10 @@ target_link_libraries(engine_lib INTERFACE Luau.VM Luau.Compiler)
 add_library(platform_lib INTERFACE)
 target_include_directories(platform_lib INTERFACE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(engine_lib INTERFACE platform_lib)
+# HTTPS verso il server Blocky online (engine/WebRequest.h, WinHTTP)
+if(WIN32)
+    target_link_libraries(engine_lib INTERFACE winhttp)
+endif()
 
 # ---- Dear ImGui (Studio UI OpenGL) ----
 FetchContent_Declare(
@@ -544,9 +548,10 @@ copy_to_personal_tools(export_place)
 # Server dedicato multiplayer (console)
 add_executable(BlockyServer src/blocky_servers/blocky_server.cpp)
 target_include_directories(BlockyServer PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(BlockyServer PRIVATE glm::glm)
+# Con --place esegue Luau come test_compat: stesse librerie del motore.
+target_link_libraries(BlockyServer PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw Jolt)
 if (WIN32)
-    target_link_libraries(BlockyServer PRIVATE ws2_32 psapi)
+    target_link_libraries(BlockyServer PRIVATE winmm ws2_32 psapi)
     target_link_options(BlockyServer PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 set_target_properties(BlockyServer PROPERTIES
@@ -562,7 +567,8 @@ copy_to_personal_tools(BlockyServer)
 if (WIN32)
     add_executable(BlockyRccService src/blocky_servers/blocky_rcc_service.cpp)
     target_include_directories(BlockyRccService PRIVATE ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(BlockyRccService PRIVATE glm::glm ws2_32 advapi32 psapi)
+    # Con --place esegue gli Script server come BlockyServer: stesse librerie.
+    target_link_libraries(BlockyRccService PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw Jolt winmm ws2_32 advapi32 psapi)
     target_link_options(BlockyRccService PRIVATE -static -static-libgcc -static-libstdc++)
     set_target_properties(BlockyRccService PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -591,6 +597,31 @@ target_include_directories(test_pool PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_pool PRIVATE glm::glm)
 if (WIN32)
     target_link_libraries(test_pool PRIVATE ws2_32)
+endif()
+
+# Motore di animazione (engine/anim/): solo glm, niente grafica.
+add_executable(test_animation src/tools/test_animation.cpp)
+target_include_directories(test_animation PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_animation PRIVATE glm::glm)
+if (WIN32)
+    target_link_options(test_animation PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Impostazioni dal server (ClientSettings.h): parser JSON, cache, versioni.
+add_executable(test_client_settings src/tools/test_client_settings.cpp)
+target_include_directories(test_client_settings PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if (WIN32)
+    target_link_libraries(test_client_settings PRIVATE ws2_32)
+    target_link_options(test_client_settings PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Place Launcher e JobId: stesse dipendenze di test_pool (solo LanNet.h).
+add_executable(test_place_launcher src/tools/test_place_launcher.cpp)
+target_include_directories(test_place_launcher PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_place_launcher PRIVATE glm::glm)
+if (WIN32)
+    target_link_libraries(test_place_launcher PRIVATE ws2_32 iphlpapi)
+    target_link_options(test_place_launcher PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 add_executable(test_physics src/tools/test_physics.cpp)
@@ -776,6 +807,16 @@ if(WIN32)
 endif()
 copy_to_personal_tools(test_lua)
 
+# Compatibilita' con gli script Roblox: fa girare tests/compat/*.lua e da'
+# la percentuale (vedi il commento in test_compat.cpp).
+add_executable(test_compat src/tools/test_compat.cpp)
+target_include_directories(test_compat PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_compat PRIVATE BLOCKY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_compat PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw)
+if(WIN32)
+    target_link_libraries(test_compat PRIVATE winmm ws2_32)
+endif()
+
 # DataStore: verifica che i dati sopravvivano a un riavvio (due runtime
 # separati) e che le chiavi malevole non scrivano fuori cartella.
 add_executable(test_datastore src/tools/test_datastore.cpp)
@@ -827,3 +868,41 @@ target_include_directories(test_crash_guard PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_executable(inspect src/inspect.cpp)
 target_link_libraries(inspect PRIVATE assimp::assimp)
 copy_to_personal_tools(inspect)
+
+# Server dedicato con gli Script server: place caricato, script eseguiti,
+# part replicate al client senza doppioni, FireServer — su 127.0.0.1.
+add_executable(test_server_scripts src/tools/test_server_scripts.cpp)
+target_include_directories(test_server_scripts PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_server_scripts PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw Jolt)
+if(WIN32)
+    target_link_libraries(test_server_scripts PRIVATE winmm ws2_32 psapi)
+endif()
+
+# Catalogo giochi online dal lato client contro un backend vero (si salta
+# senza BLOCKY_TEST_BACKEND / BLOCKY_TEST_TOKEN).
+add_executable(test_cloud_games src/tools/test_cloud_games.cpp
+    ${assimp_SOURCE_DIR}/contrib/zip/src/zip.c)   # RemoteGames.h usa ZipArchive (invio in rete locale)
+target_include_directories(test_cloud_games PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${assimp_SOURCE_DIR}/contrib/zip/src)
+target_link_libraries(test_cloud_games PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw)
+if(WIN32)
+    target_link_libraries(test_cloud_games PRIVATE winmm ws2_32 psapi)
+endif()
+
+# Salva/ricarica di un place con script e nomi pieni di { } [ ] " (prima
+# creavano part fantasma al caricamento).
+add_executable(test_place_roundtrip src/tools/test_place_roundtrip.cpp)
+target_include_directories(test_place_roundtrip PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_place_roundtrip PRIVATE engine_lib glm::glm)
+if(WIN32)
+    target_link_libraries(test_place_roundtrip PRIVATE ws2_32 psapi)
+    target_link_options(test_place_roundtrip PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Traduttore dell'interfaccia (ui/Loc.h) con i file assets/lang/*.json.
+add_executable(test_loc src/tools/test_loc.cpp)
+target_include_directories(test_loc PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_loc PRIVATE imgui_lib engine_lib)
+if(WIN32)
+    target_link_options(test_loc PRIVATE -static -static-libgcc -static-libstdc++)
+endif()

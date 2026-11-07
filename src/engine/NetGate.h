@@ -3,6 +3,7 @@
 
 #include "Integrity.h"
 #include "LanNet.h"
+#include "engine/ClientSettings.h"
 
 #include <string>
 
@@ -30,6 +31,16 @@ inline bool gateOfflineAllowed() {
         if (f) fclose(f);
     }
     return cached == 1;
+}
+
+/**
+ * Come Roblox: si gioca solo dentro un server dedicato (BlockyServer). Niente
+ * partite ospitate dal proprio dispositivo, niente gioco offline. Il server
+ * puo' rimettere il vecchio comportamento con FFlagServerOnlyPlay = false;
+ * blocky_dev_offline.txt (solo sviluppo) lo spegne per Studio e i test.
+ */
+inline bool gateServerOnly() {
+    return !gateOfflineAllowed() && blk::clientsettings::getBool("FFlagServerOnlyPlay", true);
 }
 
 inline bool gateLocalChecks(std::string& why) {

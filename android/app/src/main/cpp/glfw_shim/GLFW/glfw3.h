@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <EGL/egl.h>
 
 // ---- Tipi -------------------------------------------------------------
 struct GLFWwindow;
@@ -170,6 +171,10 @@ struct BlkShimState {
     GLFWscrollfun onScroll = nullptr;
     GLFWframebuffersizefun onFramebufferSize = nullptr;
     GLFWwindowclosefun onWindowClose = nullptr;
+    // Intervallo di swap chiesto dal motore (glfwSwapInterval). Va rimesso
+    // ogni volta che la superficie EGL rinasce: una superficie nuova riparte
+    // da 1 (vsync), qualunque cosa si fosse chiesto prima.
+    int swapInterval = 1;
 };
 
 inline BlkShimState& blkShim() {
@@ -199,7 +204,19 @@ inline GLFWwindow* glfwCreateWindow(int w, int h, const char*, GLFWmonitor*, GLF
 inline void glfwDestroyWindow(GLFWwindow*) {}
 inline void glfwMakeContextCurrent(GLFWwindow*) {}
 inline GLFWwindow* glfwGetCurrentContext(void) { return blkShimWindow(); }
-inline void glfwSwapInterval(int) {}
+// Prima era vuota: il profilo Android chiede vsync spento (il tetto lo fa
+// targetFps), ma restava acceso e un frame da 20 ms diventava 30 fps fissi.
+// Il motore la chiama a ogni frame: a EGL arriva solo quando cambia (la
+// superficie nuova la rimette android_entry.cpp, dopo eglMakeCurrent).
+inline void glfwSwapInterval(int n) {
+    static bool applied = false;
+    n = n < 0 ? 0 : n;
+    if (applied && n == blkShim().swapInterval) return;
+    const EGLDisplay d = eglGetCurrentDisplay();
+    if (d == EGL_NO_DISPLAY) return;
+    blkShim().swapInterval = n;
+    applied = eglSwapInterval(d, n) == EGL_TRUE;
+}
 inline void glfwSwapBuffers(GLFWwindow*) {}   // il buffer lo scambia EGL
 inline void glfwPollEvents(void) {}           // gli eventi arrivano da GameActivity
 inline void glfwSetWindowTitle(GLFWwindow*, const char*) {}

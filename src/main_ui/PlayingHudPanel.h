@@ -624,7 +624,9 @@ static void trySwordAttack() {
             g_lua.applyExplosionPlayerDamage(p.position, 8.f, 25.f);
             for (int i = 0; i < (int)g_world.parts.size(); ++i) {
                 if (&g_world.parts[i] == &p) {
-                    g_world.parts.erase(g_world.parts.begin() + i);
+                    // dal runtime: aggiorna anche script, vincoli e figlie
+                    if (g_lua.ok && g_lua.workspace == &g_world) g_lua.destroyPartNow(i);
+                    else g_world.parts.erase(g_world.parts.begin() + i);
                     if (g_selectedPart == i) selectPart(-1);
                     else if (g_selectedPart > i) --g_selectedPart;
                     break;
@@ -965,8 +967,8 @@ static void drawPlayingHud(GLFWwindow* win) {
     }
 
     if (g_playMenuOpen) {
-        ImGui::SetNextWindowPos({(float)g_w * 0.5f - 180, (float)g_h * 0.5f - 265}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({360, 530}, ImGuiCond_Always);
+        ImGui::SetNextWindowPos({(float)g_w * 0.5f - 180, (float)g_h * 0.5f - 300}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({360, 600}, ImGuiCond_Always);
         ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.08f, 0.22f, 0.48f, 0.97f});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.f);
@@ -985,6 +987,9 @@ static void drawPlayingHud(GLFWwindow* win) {
         if (ImGui::Button("Riprendi", {-1, 42}))
             setPlayMenuOpen(win, false);
         ImGui::PopStyleColor(3);
+
+        ImGui::Spacing();
+        drawJobIdSection();
 
         if (g_net.role == NetRole::Host) {
             ImGui::Spacing();

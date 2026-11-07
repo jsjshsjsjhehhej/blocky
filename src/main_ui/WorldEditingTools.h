@@ -20,9 +20,8 @@ static glm::vec3 insertPositionInFront() {
 }
 
 static void insertNewPart() {
-    int n = g_world.nextPartIndex();
-    std::string name = "Part" + std::to_string(n);
-    auto& p = g_world.addPart(name, insertPositionInFront(), {4, 1, 4}, {0.64f, 0.64f, 0.64f});
+    // Come Roblox Studio: ogni Part nuova si chiama "Part" (i nomi possono ripetersi).
+    auto& p = g_world.addPart("Part", insertPositionInFront(), {4, 1, 4}, {0.64f, 0.64f, 0.64f});
     (void)p;
     g_selectedModel = -1;
     g_selectedSound = -1;
@@ -38,10 +37,11 @@ static void insertShapedPart(PartShape shape) {
     // prima erano ripetuti qui a mano, ed erano gia sfasati dal nome che
     // partShapeName() restituiva altrove (bastava dimenticarsi una riga).
     const PartShapeInfo& info = partShapeInfo(shape);
-    const std::string base = info.name;
     const glm::vec3 size{info.sizeX, info.sizeY, info.sizeZ};
     const glm::vec3 col{info.r, info.g, info.b};
-    auto& p = g_world.addPart(base + std::to_string(n),
+    // Nomi di Roblox: sfera e cilindro sono "Part" (cambia solo Shape), il cuneo "Wedge".
+    (void)n;
+    auto& p = g_world.addPart(shape == PartShape::Wedge ? std::string("Wedge") : std::string("Part"),
                               insertPositionInFront(), size, col);
     p.shape = shape;
     p.useStud = false;

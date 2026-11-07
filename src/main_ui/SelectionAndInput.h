@@ -477,6 +477,9 @@ static float g_studioSnapMove = 0.25f;
 static float g_studioSnapRotate = 5.f;
 static float g_studioSnapScale = 0.25f;
 static bool  g_studioLocalSpace = false;
+// Clic destro fermo nel viewport: il menu lo apre drawViewportContextMenu (StudioExplorer.h).
+static bool   g_viewportCtxRequest = false;
+static ImVec2 g_viewportCtxPos{0.f, 0.f};
 static bool  g_studioGridVisible = true;
 static float g_studioGridSize = 4.f;
 static bool  g_viewIsolate = false;
@@ -520,6 +523,7 @@ static float studioSnapScaleStep() {
 // StudioFeaturesUi.h / StudioSelectionUi.h (inclusi dopo questo file).
 static void studioMultiClear();
 static void studioBeginMarquee(float mx, float my);
+static bool studioMultiContains(int i);
 
 static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
 #ifdef __ANDROID__
@@ -534,6 +538,29 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
         g_firstMouse = true;
 #endif
     if (btn == GLFW_MOUSE_BUTTON_RIGHT) {
+        // Come Roblox Studio: tasto destro trascinato = gira la camera; clic
+        // destro fermo = menu della part sotto il mouse (StudioExplorer.h).
+        {
+            static double s_x = 0, s_y = 0, s_t = 0;
+            static bool s_overUi = false;
+            double cx = 0, cy = 0;
+            glfwGetCursorPos(win, &cx, &cy);
+            if (action == GLFW_PRESS) {
+                s_x = cx; s_y = cy; s_t = glfwGetTime();
+                s_overUi = ImGui::GetIO().WantCaptureMouse;
+            } else if (action == GLFW_RELEASE && !s_overUi && g_screen == AppScreen::Studio
+                       && g_mode == CamMode::Studio && !g_studioTesting
+                       && std::hypot(cx - s_x, cy - s_y) < 6.0 && glfwGetTime() - s_t < 0.6) {
+                const ScenePick hit = pickSceneAtMouse((float)s_x, (float)s_y);
+                if (hit.kind == PickKind::Part) {
+                    if (!studioMultiContains(hit.index) && hit.index != g_selectedPart) applyScenePick(hit);
+                } else if (hit.kind != PickKind::None) {
+                    applyScenePick(hit);
+                }
+                g_viewportCtxRequest = true;
+                g_viewportCtxPos = {(float)s_x, (float)s_y};
+            }
+        }
         g_rmbLook = (action == GLFW_PRESS);
         g_firstMouse = true;
         if (g_rmbLook) endCatalogGizmo();
@@ -573,6 +600,7 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
     if (btn == GLFW_MOUSE_BUTTON_LEFT && g_screen == AppScreen::Studio
         && g_mode == CamMode::Studio && !g_rmbLook && !ImGui::GetIO().WantCaptureMouse) {
         if (action == GLFW_RELEASE) {
+            endFreeDrag();
             endScaleDrag();
             endMoveDrag();
             endRotateDrag();
@@ -609,6 +637,7 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
                         studioBeginMarquee((float)mx, (float)my);
                     } else {
                         applyScenePick(hit);
+                        if (hit.kind == PickKind::Part && !ImGui::GetIO().KeyCtrl) armFreeDrag((float)mx, (float)my);
                     }
                 }
             }

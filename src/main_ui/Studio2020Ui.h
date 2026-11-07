@@ -587,14 +587,3 @@ static void studio2020PollHotkeys() {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T) && !io.KeyShift)
         g_showTerrainEditor = true;
 }
-
-static void drawStudio2020RibbonExtras() {
-    if (studio::ribbonBigButton("terr", studio::Icon::Grid, "Terrain", g_terrainToolActive || g_showTerrainEditor)) {
-        g_showTerrainEditor = true;
-        g_terrainToolActive = !g_terrainToolActive;
-    }
-    if (studio::ribbonBigButton("weld", studio::Icon::Anchor, "Weld"))
-        studioCreateWeldFromSelection();
-    if (studio::ribbonBigButton("cgrp", studio::Icon::Package, "ColGroups", g_showCollisionGroups))
-        g_showCollisionGroups = !g_showCollisionGroups;
-}

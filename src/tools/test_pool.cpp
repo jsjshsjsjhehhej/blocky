@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     ok &= waitUntil("host riceve l'evento del client (client->host via relay)", 40,
         [](LanNet& h, LanNet&) {
             for (auto& e : h.incomingRemotes)
-                if (std::strcmp(e.name, "Ping") == 0 && std::strcmp(e.payload, "hello") == 0) return true;
+                if (std::strcmp(e.name, "Ping") == 0 && e.payload == "hello") return true;
             return false;
         }, host, client, clock);
 
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     ok &= waitUntil("client riceve l'evento dell'host (host->client via relay)", 40,
         [](LanNet&, LanNet& c) {
             for (auto& e : c.incomingRemotes)
-                if (std::strcmp(e.name, "Pong") == 0 && std::strcmp(e.payload, "world") == 0) return true;
+                if (std::strcmp(e.name, "Pong") == 0 && e.payload == "world") return true;
             return false;
         }, host, client, clock);
 

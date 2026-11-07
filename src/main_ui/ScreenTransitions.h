@@ -52,6 +52,16 @@ static void bootPlaceScript(const std::string& scriptRel) {
 
 static void finishLoading() {
     applyGamePlace(g_activeGame, g_world, &g_lighting);
+    // ID di rete 1..N alle part del place, nell'ordine del file: gli stessi
+    // che assegnano l'host e il server dedicato (blkserver::assignPlaceNetIds).
+    // Senza, il client non riconosceva le part mandate dall'host e le
+    // aggiungeva di nuovo: ogni part del place compariva due volte.
+    {
+        uint32_t nextNetId = 1;
+        for (auto& p : g_world.parts) p.netId = 0;
+        WorldReplication::ensureNetIds(g_world, nextNetId);
+        g_net.nextPartNetId = nextNetId;
+    }
     syncFriendsFromWorld();
 
     const char* uname = !g_mpTestName.empty() ? g_mpTestName.c_str()
@@ -86,6 +96,11 @@ static void finishLoading() {
         // Host del test: porta fissa e solo in locale (niente UPnP sul router).
         std::snprintf(g_net.localName, sizeof(g_net.localName), "%.23s", uname);
         g_net.startHost(g_mpTestHostPort, gi, uname, maxP);
+    } else if (gateServerOnly()) {
+        // Solo server: qui si arriva senza un server scelto (non dovrebbe
+        // succedere, il Place Launcher torna al menu prima). Niente partita
+        // aperta sul dispositivo: si resta offline e il gate riporta al menu.
+        g_net.shutdown();
     } else {
         g_net.startAutoMatch(27015, gi, uname, maxP);
         if (g_net.role == NetRole::Host)
@@ -171,8 +186,10 @@ static void enterStudio() {
 
 static void stopStudioTest(GLFWwindow* win);
 
+static double g_studioTestStartedAt = 0.0;
 static void startStudioTest(GLFWwindow* win) {
-    if (g_screen != AppScreen::Studio) return;
+    LOG_INFO("test", "Test richiesto (schermata=%d, gia' in test=%d)", (int)g_screen, (int)g_studioTesting);
+    if (g_screen != AppScreen::Studio) { LOG_WARN("test", "Test ignorato: non sei nello Studio"); return; }
     CrashHandler::note("Start Studio Test");
     commitActiveStudioGizmo();
     blk::resilience::resetSession();
@@ -223,6 +240,7 @@ static void startStudioTest(GLFWwindow* win) {
     bool okBoot = TestSessionGuard::runGuarded([&]() {
         startTestScripts();
     }, &crashReason);
+    LOG_INFO("test", "script del Test avviati: %s", okBoot ? "ok" : crashReason.c_str());
     if (!okBoot) {
         // Un crash nativo durante l'avvio degli script (bug in una delle
         // funzioni C esposte a Lua) — invece di lasciare g_studioTesting=true
@@ -241,10 +259,13 @@ static void startStudioTest(GLFWwindow* win) {
     char t[192];
     std::snprintf(t, sizeof(t), "%s — Test: %s", kAppBrand, g_world.placeName.c_str());
     glfwSetWindowTitle(win, t);
+    g_studioTestStartedAt = glfwGetTime();
+    LOG_INFO("test", "Test partito");
 }
 
 static void stopStudioTest(GLFWwindow* win) {
     if (!g_studioTesting) return;
+    LOG_INFO("test", "Test fermato dopo %.2f s", glfwGetTime() - g_studioTestStartedAt);
     g_studioTesting = false;
     g_mode = CamMode::Studio;
 
@@ -431,20 +452,26 @@ static bool launchGameEngineApp() {
     return plat::sys::launchProcess(engine, {}, plat::selfDir());
 }
 
-static bool launchDedicatedServer(int maxPlayers, const char* title) {
+// placePath: il place che il server carica per eseguire i suoi Script server
+// (vuoto = server solo ripetitore, come prima).
+static bool launchDedicatedServer(int maxPlayers, const char* title,
+                                  const std::string& placePath = {}) {
     const std::string server = siblingExePath("BlockyServer");
     if (server.empty() || !plat::fs::exists(server)) {
         g_publishMsg = "BlockyServer non trovato — ricompila il target BlockyServer";
         return false;
     }
     const int nmax = std::clamp(maxPlayers, 1, 32);
-    char args[256];
-    std::snprintf(args, sizeof(args), "--port 27015 --max %d --name \"%s\"",
-                  nmax, title && title[0] ? title : "Blocky");
+    std::string safeTitle = title && title[0] ? title : "Blocky";
+    for (char& c : safeTitle) if (c == '"') c = '\'';
+    std::string args = "--port 27015 --max " + std::to_string(nmax) + " --name \"" + safeTitle + "\"";
+    if (!placePath.empty()) args += " --place \"" + placePath + "\"";
 
     if (plat::sys::launchProcess(server, args, plat::selfDir())) {
         g_publishMsg = std::string("Server dedicato avviato (max ")
-            + std::to_string(nmax) + ") — Join da Blocky con IP di questo PC";
+            + std::to_string(nmax) + ")"
+            + (placePath.empty() ? "" : ", con gli Script server")
+            + " — Join da Blocky con IP di questo PC";
         return true;
     }
     // launchProcess dice "non fatto" invece di fingere. Su Android non e' un

@@ -18,6 +18,8 @@ struct ScriptControls {
     std::map<std::string, std::vector<int>> events;
 
     std::map<int, std::vector<int>> partTouched;
+    // ClickDetector.MouseClick: clic del mouse sulla part (prima finiva in partTouched)
+    std::map<int, std::vector<int>> partClicked;
 
     std::map<std::string, std::vector<int>> remoteServer;
     std::map<std::string, std::vector<int>> remoteClient;
@@ -102,7 +104,9 @@ struct ScriptControls {
     std::vector<ScriptAttachment> attachments;
     std::vector<ScriptBeam> beams;
 
-    float workspaceGravity = 196.2f;
+    // Gravita' vera della fisica di Blocky (bphys::kGravity), non il 196.2 di
+    // Roblox: la fisica e i salti di Blocky sono tarati su 80.
+    float workspaceGravity = 80.f;
 };
 
 inline ScriptControls& scriptControls() {

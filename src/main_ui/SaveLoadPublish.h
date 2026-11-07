@@ -155,6 +155,9 @@ static std::string suggestPlaceFileName() {
     return suggest + ".blocky";
 }
 
+// StudioDevTools.h (incluso dopo): ogni salvataggio e' anche una versione.
+static bool versionHistorySnapshot();
+
 static void doSavePlace() {
     if (g_placeFilePath.empty()) {
         std::string path;
@@ -168,6 +171,7 @@ static void doSavePlace() {
     if (writeCurrentPlaceTo(g_placeFilePath)) {
         g_exportMsg = "Salvato: " + g_placeFilePath;
         clearPlaceDirty();
+        versionHistorySnapshot();
     } else
         g_exportMsg = "Salvataggio fallito";
 }
@@ -631,9 +635,18 @@ static bool publishCurrentGame() {
             const std::string gs = g_menu.gameServer;
             const bool selfHost = gs.empty()
                 || gs.rfind("127.0.0.1", 0) == 0
-                || gs.rfind("localhost", 0) == 0;
+                || gs.rfind("localhost", 0) == 0
+                || blk::remotegames::isCloud(gs);
             if (!selfHost)
                 blk::remotegames::uploadGame(gs, id, pkgDir);
+        }
+        // Catalogo online: il gioco va sul server Blocky e lo vedono tutti,
+        // anche con questo PC spento. L'esito arriva nella chat del menu.
+        {
+            const std::string cloud = blk::cloud::catalogUrl();
+            if (!cloud.empty())
+                blk::remotegames::publishToCloud(cloud, blk::cloud::publishToken(), id, pkgDir,
+                                                 title, pkg.description, e.maxPlayers);
         }
 
         if (fileExistsPath(bbc))

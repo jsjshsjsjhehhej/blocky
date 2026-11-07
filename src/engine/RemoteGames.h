@@ -18,6 +18,8 @@
 #include <cctype>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -27,6 +29,7 @@
 
 #include "engine/GameHub.h"
 #include "engine/HttpClient.h"
+#include "engine/WebRequest.h"
 #include "engine/ZipArchive.h"
 #include "platform/Log.h"
 
@@ -79,10 +82,54 @@ inline void splitHostPort(const std::string& text, std::string& host, int& port)
  * gameId e title. Il resto del contenuto si scarica al momento di giocare, non
  * per riempire una lista.
  */
+/**
+ * Il server dei giochi e' il catalogo online ("https://..." o "http://...")
+ * e non un PC in rete locale ("192.168.1.5:8080"). I percorsi sono gli
+ * stessi (/games, /games/<id>/files, /games/<id>/<file>), cambia il trasporto.
+ */
+inline bool isCloud(const std::string& server) { return blk::web::hasScheme(server); }
+
+/** Nome breve del server per i messaggi (l'host, senza http://). */
+inline std::string serverLabel(const std::string& server) {
+    blk::web::Url u;
+    if (isCloud(server) && blk::web::parseUrl(server, u)) return u.host;
+    std::string host;
+    int port = kDefaultPort;
+    splitHostPort(server, host, port);
+    return host;
+}
+
+/** GET di un percorso sul server dei giochi, in rete locale o online. */
+inline blk::http::GetResult serverGet(const std::string& server, const std::string& path,
+                                      int timeoutMs, int attempts = 1, long long knownLocalBytes = -1) {
+    if (!isCloud(server)) {
+        std::string host;
+        int port = kDefaultPort;
+        splitHostPort(server, host, port);
+        if (attempts > 1) return blk::http::getRetryEx(host, port, path, timeoutMs, attempts, knownLocalBytes);
+        return blk::http::getEx(host, port, path, timeoutMs, 32u * 1024 * 1024, knownLocalBytes);
+    }
+    blk::http::GetResult out;
+    for (int i = 0; i < std::max(1, attempts); ++i) {
+        const blk::web::Response r = blk::web::get(blk::web::join(server, path), timeoutMs);
+        out.status = r.status;
+        if (r.ok()) {
+            out.ok = true;
+            out.body = r.body;
+            out.contentLength = (long long)r.body.size();
+            return out;
+        }
+        if (r.transport && r.status >= 400 && r.status < 500) break;   // non c'e': inutile riprovare
+        if (i + 1 < attempts) blk::http::sleepMs(400 * (i + 1));
+    }
+    return out;
+}
+
 /** Nome dei file che il server ha per un gioco, imparato leggendo il catalogo. */
 struct RemoteFiles {
     std::string thumbnail;   // es. "thumbnail.png"
     std::string place;       // es. "place.blockyplace"
+    int version = 0;         // catalogo online: sale a ogni ripubblicazione (0 = non si sa)
 };
 
 inline std::mutex& filesMutex() { static std::mutex m; return m; }
@@ -109,14 +156,16 @@ inline std::string thumbnailPath(const std::string& id) {
  * qualunque estensione avesse in origine (stb_image riconosce il formato dal
  * contenuto, non dal nome).
  */
-inline std::string ensureThumbnail(const std::string& host, int port,
+inline std::string ensureThumbnail(const std::string& server,
                                    const std::string& id, const std::string& remoteName) {
     if (remoteName.empty()) return {};
     const std::string local = thumbnailPath(id);
     if (plat::fileExists(local) && plat::fileSize(local) > 0) return local;
 
     std::string body;
-    if (!blk::http::get(host, port, "/games/" + id + "/" + remoteName, body, 8000) || body.empty())
+    const blk::http::GetResult tr = serverGet(server, "/games/" + id + "/" + remoteName, 8000);
+    body = tr.body;
+    if (!tr.ok || body.empty())
         return {};
 
     plat::makeDirs(blockyDataDir() + "/thumbs");
@@ -138,13 +187,11 @@ inline std::vector<GameEntry> fetch(const std::string& hostPort) {
     std::vector<GameEntry> out;
     if (hostPort.empty()) return out;
 
-    std::string host;
-    int port = kDefaultPort;
-    splitHostPort(hostPort, host, port);
-
-    std::string body;
-    if (!blk::http::get(host, port, "/games", body) || body.empty()) {
-        LOG_INFO("games", "nessuna risposta da %s:%d", host.c_str(), port);
+    const std::string host = serverLabel(hostPort);
+    const blk::http::GetResult lr = serverGet(hostPort, "/games", isCloud(hostPort) ? 8000 : 2500);
+    const std::string body = lr.body;
+    if (!lr.ok || body.empty()) {
+        LOG_INFO("games", "nessuna risposta da %s", hostPort.c_str());
         return out;
     }
 
@@ -156,6 +203,14 @@ inline std::vector<GameEntry> fetch(const std::string& hostPort) {
         const std::string desc = jsonFindStr(body, "description", pos);
         const std::string thumb = jsonFindStr(body, "thumbnail", pos);
         const std::string place = jsonFindStr(body, "place", pos);
+        // "version" c'e' solo nel catalogo online: cercata solo dentro questo gioco.
+        int version = 0;
+        {
+            const size_t next = body.find("\"id\"", pos + 4);
+            const size_t vk = body.find("\"version\"", pos);
+            if (vk != std::string::npos && (next == std::string::npos || vk < next))
+                version = std::max(0, jsonFindInt(body, "version", pos));
+        }
         pos += 4;
         if (e.id.empty()) continue;
 
@@ -167,9 +222,9 @@ inline std::vector<GameEntry> fetch(const std::string& hostPort) {
 
         {
             std::lock_guard<std::mutex> lock(filesMutex());
-            filesMap()[e.id] = RemoteFiles{thumb, place};
+            filesMap()[e.id] = RemoteFiles{thumb, place, version};
         }
-        e.iconPath = ensureThumbnail(host, port, e.id, thumb);
+        e.iconPath = ensureThumbnail(hostPort, e.id, thumb);
 
         out.push_back(e);
     }
@@ -255,6 +310,7 @@ inline bool isUploading() { return uploadBusy().load(); }
 inline void uploadGame(const std::string& hostPort, const std::string& gameId,
                        const std::string& packageDir) {
     if (hostPort.empty() || gameId.empty() || packageDir.empty()) return;
+    if (isCloud(hostPort)) return;   // il catalogo online passa da publishToCloud
 
     bool expected = false;
     if (!uploadBusy().compare_exchange_strong(expected, true)) {
@@ -293,6 +349,146 @@ inline void uploadGame(const std::string& hostPort, const std::string& gameId,
         // L'elenco e' cambiato: lo si richiede subito, cosi' la card compare
         // nella pagina principale da sola.
         if (ok) startFetch(hostPort);
+    }).detach();
+}
+
+
+// ---- Pubblicare sul catalogo online ------------------------------------
+
+/** Un nome di file che il catalogo accetta (backend/src/games.ts, safePath). */
+inline bool cloudSafePath(const std::string& p) {
+    if (p.empty() || p.size() > 200) return false;
+    size_t start = 0;
+    int parts = 0;
+    while (start <= p.size()) {
+        const size_t slash = p.find('/', start);
+        const std::string seg = p.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+        if (seg.empty() || seg.size() > 80 || seg == "." || seg == "..") return false;
+        for (char c : seg)
+            if (!(std::isalnum((unsigned char)c) || c == '_' || c == '.' || c == '-')) return false;
+        if (++parts > 6) return false;
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    return true;
+}
+
+inline std::string jsonQuote(const std::string& s) {
+    std::string o = "\"";
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '\t') o += "\\t";
+        else if (c < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", c); o += b; }
+        else o += (char)c;
+    }
+    return o + "\"";
+}
+
+/**
+ * Corpo JSON di una pubblicazione: scheda del gioco + tutti i file del
+ * pacchetto in base64. Vuoto + motivo in `error` se non si puo'.
+ */
+inline std::string buildCloudPublishBody(const std::string& packageDir, const std::string& title,
+                                         const std::string& description, int maxPlayers,
+                                         std::string& error, int& fileCount) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path root(packageDir);
+    std::vector<std::string> rels;
+    for (const auto& entry : fs::recursive_directory_iterator(root, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string rel = fs::relative(entry.path(), root, ec).generic_string();
+        if (ec || rel.empty() || rel[0] == '.') continue;
+        if (rel == "files.json") continue;   // lo ricostruisce il server
+        rels.push_back(rel);
+    }
+    std::sort(rels.begin(), rels.end());
+    std::string place;
+    for (const char* n : {"place.json", "place.blockyplace", "place.blocky"})
+        if (std::find(rels.begin(), rels.end(), n) != rels.end()) { place = n; break; }
+    if (place.empty()) { error = "nel pacchetto manca il place"; return {}; }
+    std::string thumb;
+    for (const char* n : {"thumbnail.png", "thumbnail.jpg", "icon.png"})
+        if (std::find(rels.begin(), rels.end(), n) != rels.end()) { thumb = n; break; }
+
+    std::string j = "{\"title\":" + jsonQuote(title.substr(0, 60))
+                  + ",\"description\":" + jsonQuote(description.substr(0, 500))
+                  + ",\"maxPlayers\":" + std::to_string(std::clamp(maxPlayers, 1, 32))
+                  + ",\"place\":" + jsonQuote(place)
+                  + ",\"thumbnail\":" + jsonQuote(thumb)
+                  + ",\"files\":[";
+    fileCount = 0;
+    for (const std::string& rel : rels) {
+        if (!cloudSafePath(rel)) {
+            error = "nome di file non accettato online: " + rel + " (solo lettere, cifre, _ . -)";
+            return {};
+        }
+        std::string data;
+        {
+            // binario: in modo testo Windows rovinerebbe immagini e mesh
+            std::ifstream in((root / rel).string(), std::ios::binary);
+            data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        if (fileCount) j += ",";
+        j += "{\"path\":" + jsonQuote(rel) + ",\"data\":\"" + blk::web::base64(data) + "\"}";
+        ++fileCount;
+    }
+    j += "]}";
+    return j;
+}
+
+/**
+ * Pubblica il pacchetto sul catalogo online (PUT /v1/games/<id>), in un
+ * thread a parte. Il risultato arriva in takeUploadMessage(); se va bene si
+ * richiede subito l'elenco, cosi' la card compare da sola.
+ */
+inline void publishToCloud(const std::string& url, const std::string& token, const std::string& gameId,
+                           const std::string& packageDir, const std::string& title,
+                           const std::string& description, int maxPlayers) {
+    if (url.empty() || gameId.empty() || packageDir.empty()) return;
+    if (token.empty()) {
+        setUploadMessage("Online: manca il token del creatore (publish_token.txt)");
+        return;
+    }
+    bool expected = false;
+    if (!uploadBusy().compare_exchange_strong(expected, true)) {
+        setUploadMessage("Invio gia' in corso, riprova tra poco");
+        return;
+    }
+    std::thread([=]() {
+        std::string error;
+        int files = 0;
+        const std::string body = buildCloudPublishBody(packageDir, title, description, maxPlayers, error, files);
+        if (body.empty()) {
+            setUploadMessage("Online: non pubblicato, " + error);
+            uploadBusy().store(false);
+            return;
+        }
+        blk::web::Request rq;
+        rq.method = "PUT";
+        rq.url = blk::web::join(url, "/v1/games/" + gameId);
+        rq.body = body;
+        rq.contentType = "application/json";
+        rq.bearer = token;
+        rq.timeoutMs = 60000;
+        const blk::web::Response r = blk::web::send(rq);
+        if (r.ok()) {
+            const int version = jsonFindInt(r.body, "version");
+            setUploadMessage("Pubblicato online su " + serverLabel(url) + " (versione "
+                             + std::to_string(version) + ", " + std::to_string(files) + " file)");
+            LOG_INFO("games", "%s pubblicato online, versione %d", gameId.c_str(), version);
+        } else if (!r.transport) {
+            setUploadMessage("Online: server non raggiungibile (" + r.error + ")");
+        } else {
+            std::string why = jsonFindStr(r.body, "error");
+            if (why.empty()) why = "errore " + std::to_string(r.status);
+            setUploadMessage("Online: non pubblicato, " + why);
+            LOG_INFO("games", "pubblicazione online di %s rifiutata: %d", gameId.c_str(), r.status);
+        }
+        uploadBusy().store(false);
+        if (r.ok()) startFetch(url);
     }).detach();
 }
 
@@ -538,7 +734,7 @@ inline bool writeDownloadedFile(const std::string& dir, const std::string& rel,
  * Scarica un singolo path relativo con cache Content-Length + retry.
  * Ritorna: 1 = scritto/nuovo, 0 = cache skip, -1 = assente/fallito.
  */
-inline int fetchGameFile(const std::string& host, int port, const std::string& gameId,
+inline int fetchGameFile(const std::string& server, const std::string& gameId,
                          const std::string& dir, const std::string& rel) {
     const std::string local = dir + "/" + rel;
     long long localBytes = -1;
@@ -546,8 +742,7 @@ inline int fetchGameFile(const std::string& host, int port, const std::string& g
         const long long sz = plat::fileSize(local);
         if (sz > 0) localBytes = sz;
     }
-    blk::http::GetResult r = blk::http::getRetryEx(
-        host, port, "/games/" + gameId + "/" + rel, 12000, 3, localBytes);
+    blk::http::GetResult r = serverGet(server, "/games/" + gameId + "/" + rel, 12000, 3, localBytes);
     if (!r.ok) return -1;
     if (r.skipped) return 0;
     if (r.body.empty()) return -1;
@@ -597,10 +792,6 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
     setDownloadProgress(0.02f, "Connessione...");
 
     std::thread([hostPort, gameId]() {
-        std::string host;
-        int port = kDefaultPort;
-        splitHostPort(hostPort, host, port);
-
         const std::string dir = localGameDir(gameId);
         plat::makeDirs(dir);
         plat::makeDirs(dir + "/scripts");
@@ -617,7 +808,11 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
         }
 
         setDownloadProgress(0.08f, "Scarico il mondo...");
-        const bool incomplete = packageLooksIncomplete(gameId);
+        // Catalogo online: una versione nuova del gioco = si riscarica il place.
+        const std::string versionFile = dir + "/.version";
+        const bool newVersion = known.version > 0
+            && readTextFile(versionFile) != std::to_string(known.version);
+        const bool incomplete = packageLooksIncomplete(gameId) || newVersion;
         bool gotPlace = isDownloaded(gameId);
         // Place incompleto (path Windows / mesh mancanti): forza riscarico
         // ignorando la cache Content-Length.
@@ -629,7 +824,7 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
                     if (plat::fileExists(local))
                         std::remove(local.c_str());
                 }
-                const int r = fetchGameFile(host, port, gameId, dir, rel);
+                const int r = fetchGameFile(hostPort, gameId, dir, rel);
                 if (r >= 0 && isDownloaded(gameId)) {
                     gotPlace = true;
                     if (!incomplete) break;
@@ -641,7 +836,7 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
             const std::string existing = localPlacePath(gameId);
             if (!existing.empty()) {
                 const std::string rel = existing.substr(dir.size() + 1);
-                fetchGameFile(host, port, gameId, dir, rel);
+                fetchGameFile(hostPort, gameId, dir, rel);
             }
         }
 
@@ -662,8 +857,9 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
         std::vector<std::string> extras;
         {
             std::string listBody;
-            if (blk::http::getRetry(host, port, "/games/" + gameId + "/files", listBody, 12000, 3)
-                && !listBody.empty()) {
+            const blk::http::GetResult fl = serverGet(hostPort, "/games/" + gameId + "/files", 12000, 3);
+            listBody = fl.ok ? fl.body : std::string();
+            if (!listBody.empty()) {
                 size_t q = 0;
                 while ((q = listBody.find('"', q)) != std::string::npos) {
                     size_t e = listBody.find('"', q + 1);
@@ -728,12 +924,16 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
             bool isPlace = false;
             for (const auto& p : placeCandidates) if (p == extras[i]) { isPlace = true; break; }
             if (isPlace) { ++cached; continue; }
-            const int r = fetchGameFile(host, port, gameId, dir, extras[i]);
+            const int r = fetchGameFile(hostPort, gameId, dir, extras[i]);
             if (r > 0) ++got;
             else if (r == 0) { ++got; ++cached; }
         }
 
         if (isDownloaded(gameId)) {
+            if (known.version > 0) {
+                std::ofstream vf(versionFile, std::ios::binary);
+                if (vf) vf << known.version;
+            }
             {
                 std::lock_guard<std::mutex> lock(dlMutex());
                 dlDoneSlot() = gameId;
@@ -800,6 +1000,10 @@ inline bool serverSeenRecently(int withinSecs = 600) {
 inline void syncAllGames(const std::string& hostPort,
                          const std::vector<std::pair<std::string, std::string>>& idAndDir) {
     if (hostPort.empty() || idAndDir.empty()) return;
+    if (isCloud(hostPort)) {
+        setUploadMessage("Il catalogo online si aggiorna pubblicando dallo Studio");
+        return;
+    }
     bool expected = false;
     if (!uploadBusy().compare_exchange_strong(expected, true)) {
         setUploadMessage("Invio gia' in corso, riprova tra poco");

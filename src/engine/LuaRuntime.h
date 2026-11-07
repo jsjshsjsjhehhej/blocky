@@ -7,6 +7,7 @@
 #include "BrickColor.h"
 #include "DataModel.h"
 #include "PartPropsLua.h"
+#include "PartConstraints.h"
 #include "DataStore.h"
 #include "GameHub.h"
 #include "Humanoid.h"
@@ -25,6 +26,9 @@
 #include "systems/Classifica.h"
 #include "systems/Prossimita.h"
 #include "engine/StudioProApis.h"
+#include "engine/LuaPrelude.h"
+#include "engine/anim/AnimIO.h"
+#include "engine/anim/CharacterAnimator.h"
 #include "platform/CrashHandler.h"
 
 #include <GLFW/glfw3.h>
@@ -33,6 +37,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -103,6 +108,204 @@ public:
     std::string lastError;
     bool ok = false;
 
+    // Script Performance: tempo speso dentro ogni script (per nome di chunk,
+    // es. "Porta.Script" o il percorso del file), misurato su ogni chiamata
+    // che il motore fa verso Lua (avvio, Heartbeat, eventi, Touched...).
+    struct ScriptCost {
+        double totalMs = 0.0;
+        double windowMs = 0.0;     // secondo in corso
+        double lastSecMs = 0.0;    // ultimo secondo completo = "attivita'" come in Roblox
+        double peakMs = 0.0;       // chiamata singola piu' lenta
+        long calls = 0;
+        long lastSecCalls = 0, windowCalls = 0;
+    };
+    std::map<std::string, ScriptCost> scriptCosts;
+
+    // Memoria usata da Lua (KB), per la Developer Console.
+    int memoryKb() const { return L ? lua_gc(L, LUA_GCCOUNT, 0) : 0; }
+
+    // game.PlaceId / game.JobId: quale gioco e quale server. Il JobId del
+    // client arriva dopo l'avvio degli script (nel Welcome), quindi si
+    // aggiorna anche a Lua gia' partito.
+    std::string placeId, jobId;
+
+    void setGameIdentity(const std::string& place, const std::string& job) {
+        placeId = place;
+        jobId = job;
+        if (!L) return;
+        lua_getglobal(L, "game");
+        if (lua_istable(L, -1)) writeGameIdentity(-1);
+        lua_pop(L, 1);
+    }
+
+    void fireTeleportFailed(const char* reason, const char* message, const char* place) {
+        studio_pro_apis::fireTeleportInitFailed(L, reason, message, place);
+    }
+
+    // ---- Animator del personaggio (Humanoid:LoadAnimation) ----
+
+    // Rig R6 sulle misure del player: le animazioni dell'Animation Studio (rig
+    // "Inserisci Rig R6") ci girano osso per osso.
+    blk::anim::CharacterAnimator charAnim;
+
+    void setupCharacterRig() {
+        if (charAnim.ready()) return;
+        std::vector<blk::anim::PartBox> body;
+        for (const auto& d : Humanoid::createR6Blocky().parts)
+            if (d.name != "HumanoidRootPart") body.push_back({d.name, d.offset, d.size, glm::quat(1.f, 0.f, 0.f, 0.f)});
+        charAnim.setupFromParts(body);
+    }
+
+    /**
+     * Mette la posa delle animazioni nelle parti del corpo del player (le
+     * disegna BlockPlayer). Le parti senza animazione restano al motore.
+     */
+    void applyCharacterAnimation(Humanoid& h) {
+        if (!charAnim.ready()) return;
+        std::vector<float> boneW;
+        const blk::anim::Pose p = charAnim.pose(&boneW);
+        const std::vector<blk::anim::Transform> parts = charAnim.partTransforms(p);
+        for (size_t i = 0; i < charAnim.binds.size() && i < parts.size(); ++i) {
+            const auto& b = charAnim.binds[i];
+            const float w = b.bone >= 0 && b.bone < (int)boneW.size() ? boneW[(size_t)b.bone] : 0.f;
+            for (auto& part : h.parts) {
+                if (part.name != b.part) continue;
+                if (w <= 1e-4f) {
+                    if (part.animWeight > 0.f) { part.anim = RigPose{}; part.animWeight = 0.f; }
+                    break;
+                }
+                glm::vec3 pos, eul;
+                blk::anim::toBlockPartPose(parts[i], part.offset, part.pivot, pos, eul);
+                part.anim.pos = pos;
+                part.anim.rot = eul;
+                part.anim.scale = glm::vec3(1.f);
+                part.animWeight = w;
+                break;
+            }
+        }
+    }
+
+    /** Ogni frame (da fireHeartbeat): tempo delle tracce ed eventi agli script. */
+    void tickCharacterAnimation(float dt) {
+        if (!L || !charAnim.ready()) return;
+        std::vector<blk::anim::TrackEvent> events;
+        charAnim.update(dt, events);
+        for (const auto& e : events) {
+            const auto it = trackRefs_.find(e.track);
+            if (it == trackRefs_.end()) continue;
+            lua_getref(L, it->second);
+            const int t = lua_gettop(L);
+            auto fire = [&](const char* sigField, const char* arg) {
+                lua_getfield(L, t, sigField);
+                if (lua_istable(L, -1)) fireLuaSignal(-1, arg);
+                lua_pop(L, 1);
+            };
+            switch (e.type) {
+            case blk::anim::TrackEventType::Stopped: fire("Stopped", nullptr); break;
+            case blk::anim::TrackEventType::Ended: fire("Ended", nullptr); break;
+            case blk::anim::TrackEventType::DidLoop: fire("DidLoop", nullptr); break;
+            case blk::anim::TrackEventType::MarkerReached:
+                fire("KeyframeReached", e.name.c_str());
+                lua_getfield(L, t, "_markers");
+                if (lua_istable(L, -1)) {
+                    lua_getfield(L, -1, e.name.c_str());
+                    if (lua_istable(L, -1)) fireLuaSignal(-1, e.param.c_str());
+                    lua_pop(L, 1);
+                }
+                lua_pop(L, 1);
+                break;
+            }
+            lua_settop(L, t - 1);
+        }
+    }
+
+    // ---- Watch (Studio): variabili degli script mentre il gioco gira ----
+
+    // Un valore Lua come testo breve: tabelle con i primi campi, il resto per tipo.
+    std::string describeValue(int idx, int depth = 0) const {
+        idx = lua_absindex(L, idx);
+        char buf[96];
+        switch (lua_type(L, idx)) {
+        case LUA_TNIL:     return "nil";
+        case LUA_TBOOLEAN: return lua_toboolean(L, idx) ? "true" : "false";
+        case LUA_TNUMBER:  std::snprintf(buf, sizeof(buf), "%.6g", lua_tonumber(L, idx)); return buf;
+        case LUA_TSTRING: {
+            std::string s = lua_tostring(L, idx);
+            if (s.size() > 60) s = s.substr(0, 57) + "...";
+            return "\"" + s + "\"";
+        }
+        case LUA_TFUNCTION: return "function";
+        case LUA_TTABLE: {
+            if (depth >= 1) return "{...}";
+            std::string out = "{";
+            int n = 0;
+            lua_pushnil(L);
+            while (lua_next(L, idx) != 0) {
+                if (n < 6) {
+                    lua_pushvalue(L, -2);
+                    out += (n ? ", " : "") + describeValue(-1, depth + 1) + "=" + describeValue(-2, depth + 1);
+                    lua_pop(L, 1);
+                }
+                ++n;
+                lua_pop(L, 1);
+            }
+            if (n > 6) out += ", ... (" + std::to_string(n) + " campi)";
+            return out + "}";
+        }
+        default: return lua_typename(L, lua_type(L, idx));
+        }
+    }
+
+    // Variabili globali create dagli script (non le API del motore), ordinate.
+    std::vector<std::pair<std::string, std::string>> userGlobals(size_t max = 200) const {
+        std::vector<std::pair<std::string, std::string>> out;
+        if (!L) return out;
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0 && out.size() < max) {
+            if (lua_type(L, -2) == LUA_TSTRING) {
+                const char* k = lua_tostring(L, -2);
+                if (!apiGlobals_.count(k) && lua_type(L, -1) != LUA_TFUNCTION)
+                    out.push_back({k, describeValue(-1)});
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    // Valuta un'espressione ("punti", "Classifica.Get('Monete')") e la
+    // restituisce come testo, o l'errore. Ha lo stesso tempo massimo degli script.
+    std::string evalWatch(const std::string& expr) {
+        if (!L || expr.empty()) return "";
+        const std::string bc = Luau::compile("return (" + expr + ")");
+        if (luau_load(L, "=Watch", bc.data(), bc.size(), 0) != 0) {
+            std::string err = safeToString(-1);
+            lua_pop(L, 1);
+            return "errore: " + err;
+        }
+        callStart_ = std::chrono::steady_clock::now();
+        if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+            std::string err = safeToString(-1);
+            lua_pop(L, 1);
+            return "errore: " + err;
+        }
+        std::string v = describeValue(-1);
+        lua_pop(L, 1);
+        return v;
+    }
+
+    // Da chiamare una volta al secondo: chiude la finestra di misura.
+    void rollScriptCosts() {
+        for (auto& kv : scriptCosts) {
+            kv.second.lastSecMs = kv.second.windowMs;
+            kv.second.lastSecCalls = kv.second.windowCalls;
+            kv.second.windowMs = 0.0;
+            kv.second.windowCalls = 0;
+        }
+    }
+
     std::vector<uint32_t> scriptHashes;
     std::vector<std::string> scriptOrigins;
     bool scriptSetChanged = false;
@@ -150,6 +353,10 @@ public:
     struct TaskWait {
         int coRef = LUA_NOREF;
         float remaining = 0.f;
+        float total = 0.f;  // per restituire a task.wait il tempo atteso
+        // -1: ripresa da task.wait (le si passa il tempo atteso). >= 0: thread
+        // nuovo di task.delay/defer, con funzione e argomenti gia' sul suo stack.
+        int nargs = -1;
     };
     // WaitForChild yield: riprende la coroutine quando il figlio esiste o al timeout.
     struct ChildWait {
@@ -194,8 +401,14 @@ public:
         if (!rt || rt->initializing_) return;
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - rt->callStart_).count();
-        if (elapsed > LuaScriptSecurity::kScriptHardTimeoutMs)
+        if (elapsed > LuaScriptSecurity::kScriptHardTimeoutMs) {
+            // L'interrupt arriva anche con lo stack pieno fino al limite del
+            // frame; luaL_error ci aggiunge "riga: " + messaggio, e senza
+            // spazio Luau si ferma con un'asserzione (SIGILL: crash di tutto
+            // il processo invece di fermare solo lo script).
+            lua_checkstack(ls, 4);
             blockyLuaError(ls, "Lua budget: troppe istruzioni (script fermato)");
+        }
     }
 
     // ---- Adattatori Luau: stesso nome/comportamento delle funzioni di
@@ -256,15 +469,25 @@ public:
         openLib(luaopen_math, LUA_MATHLIBNAME);
         openLib(luaopen_utf8, LUA_UTF8LIBNAME);
         openLib(luaopen_coroutine, LUA_COLIBNAME);
+        // Come Roblox: bit32 e os (in Luau os ha solo clock/date/time/difftime).
+        openLib(luaopen_bit32, LUA_BITLIBNAME);
+        openLib(luaopen_os, LUA_OSLIBNAME);
         lua_pushnil(L); lua_setglobal(L, "dofile");
         lua_pushnil(L); lua_setglobal(L, "loadfile");
         lua_pushnil(L); lua_setglobal(L, "load");
         blockyPushCFunction(L, luaRequire);
         lua_setglobal(L, "require");
         lua_pushnil(L); lua_setglobal(L, "collectgarbage");
-        lua_pushnil(L); lua_setglobal(L, "rawset");
-        lua_pushnil(L); lua_setglobal(L, "setmetatable");
-        lua_pushnil(L); lua_setglobal(L, "getmetatable");
+        // rawset c'e' (come Roblox) ma non sugli oggetti del motore.
+        blockyPushCFunction(L, luaSafeRawset);
+        lua_setglobal(L, "rawset");
+        // setmetatable/getmetatable servono a tutta la programmazione a oggetti
+        // degli script Roblox (Class.__index = Class): ci sono, ma non toccano
+        // le metatabelle del motore (vedi luaSafeSetmetatable).
+        blockyPushCFunction(L, luaSafeSetmetatable);
+        lua_setglobal(L, "setmetatable");
+        blockyPushCFunction(L, luaSafeGetmetatable);
+        lua_setglobal(L, "getmetatable");
         lua_getglobal(L, "string");
         if (lua_istable(L, -1)) {
             lua_pushnil(L);
@@ -277,6 +500,8 @@ public:
         CrashHandler::note("LuaRuntime::init: inizio");
         shutdown();
         workspace = ws;
+        scriptCosts.clear();
+        scriptControls().workspaceGravity = 80.f;   // ogni gioco riparte dalla gravita' normale
         L = luaL_newstate();
         if (!L) {
             lastError = "luaL_newstate fallita";
@@ -288,17 +513,33 @@ public:
         CrashHandler::note("LuaRuntime::init: post openSandboxLibs");
         lua_callbacks(L)->userdata = this;
         lua_callbacks(L)->interrupt = interruptCallback;
+        // Prelude Luau (Signal, CFrame, Random...) PRIMA di registerApi: le
+        // tabelle degli eventi create li dentro usano gia la sua Connect.
+        loadPrelude();
         CrashHandler::note("LuaRuntime::init: pre registerApi");
         if (!registerApi()) {
             shutdown();
             return false;
         }
         CrashHandler::note("LuaRuntime::init: post registerApi");
+        // La parte del prelude che usa Vector3 e i servizi, prima delle
+        // estensioni e del blocco anti-executor, che la proteggono.
+        installPrelude();
         for (const Extension& e : extensions)
             e.registerLua(L, e.ctx);
         // Metatable anti-executor PRIMA di lua_setreadonly: su Luau non si puo'
         // setmetatable su tabelle gia' readonly (crash "attempt to modify...").
         LuaScriptSecurity::lockApiSurface(L);
+        // Tutto cio' che esiste adesso e' API del motore: Watch mostra solo
+        // le globali che gli script creano dopo.
+        apiGlobals_.clear();
+        lua_pushvalue(L, LUA_GLOBALSINDEX);
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0) {
+            if (lua_type(L, -2) == LUA_TSTRING) apiGlobals_.insert(lua_tostring(L, -2));
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
         for (const Extension& e : extensions) {
             lua_getglobal(L, e.global);
             if (lua_istable(L, -1)) lua_setreadonly(L, -1, true);
@@ -314,6 +555,12 @@ public:
 
     void shutdown() {
         if (L) {
+            // Prima di chiudere: via TUTTI gli eventi collegati (Touched,
+            // MouseClick, PlayerAdded...) finche' i loro numeri di registro
+            // sono ancora di questo runtime. Prima restavano negli elenchi e,
+            // col runtime nuovo, gli stessi numeri indicavano funzioni nuove:
+            // un vecchio Touched poteva chiamare il MouseClick di un altro script.
+            clearHeartbeats();
             unrefRunServiceListeners(heartbeatRefs_);
             unrefRunServiceListeners(steppedRefs_);
             unrefRunServiceListeners(renderSteppedRefs_);
@@ -349,13 +596,33 @@ public:
             lua_pop(L, 1);
             return false;
         }
+        // Il corpo dello script gira in una coroutine, come in Roblox: cosi'
+        // task.wait(), WaitForChild e simili funzionano anche fuori da
+        // task.spawn (prima: "task.wait() va usato dentro task.spawn").
+        // Se aspetta, lo riprende lo scheduler di task (taskWaits_).
+        lua_State* co = lua_newthread(L);          // L: [fn, co]
+        lua_pushvalue(L, -2);
+        lua_xmove(L, co, 1);                       // co: [fn]
         callStart_ = std::chrono::steady_clock::now();
-        if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
-            lastError = safeToString(-1);
+        const auto t0 = callStart_;
+        const int st = lua_resume(co, L, 0);
+        {
+            ScriptCost& c = scriptCosts[chunkname.size() > 1 && chunkname[0] == '=' ? chunkname.substr(1) : chunkname];
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            c.totalMs += ms;
+            c.windowMs += ms;
+            c.peakMs = std::max(c.peakMs, ms);
+            ++c.calls;
+        }
+        if (st != LUA_OK && st != LUA_YIELD) {
+            const char* err = lua_tostring(co, -1);
+            lastError = err ? err : "errore";
             std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
-            lua_pop(L, 1);
+            lua_pop(L, 2);
             return false;
         }
+        if (st == LUA_OK) lua_settop(co, 0);       // valori restituiti: non servono
+        lua_pop(L, 2);
         return true;
     }
 
@@ -386,7 +653,9 @@ public:
             return false;
         }
         bindScriptParent(partIndex);
-        return runString(code);
+        // Nome vero nel chunk: errori e Script Performance dicono quale part.
+        noteScript(code.data(), code.size(), "part");
+        return runCompiled(code, "=" + workspace->parts[(size_t)partIndex].name + ".Script");
     }
 
     bool runModelScript(const std::string& code, int modelIndex) {
@@ -492,6 +761,7 @@ public:
             m.clear();
         };
         unrefMap(scriptControls().partTouched);
+        unrefMap(scriptControls().partClicked);
         unrefMap(scriptControls().partChildAdded);
         unrefMap(scriptControls().sharedChildAdded);
         unrefMapS(scriptControls().remoteServer);
@@ -592,7 +862,7 @@ public:
             return false;
         }
         callStart_ = std::chrono::steady_clock::now();
-        if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK) {
+        if (timedPcall(0, LUA_MULTRET) != LUA_OK) {
             lastError = safeToString(-1);
             std::fprintf(stderr, "BBC run error: %s\n", lastError.c_str());
             lua_pop(L, 1);
@@ -700,6 +970,10 @@ public:
             lua_pop(L, 1);
             lua_unref(L, ref);
             if (!co) { lua_pop(L, 1); continue; }
+            // Il risultato (oggetto trovato o nil) va sullo stack della
+            // coroutine: lua_resume prende li' i suoi argomenti. Prima restava
+            // su L e WaitForChild restituiva il thread invece dell'oggetto.
+            lua_xmove(L, co, 1);
             callStart_ = std::chrono::steady_clock::now();
             int st = lua_resume(co, L, 1);
             int nres = lua_gettop(co);
@@ -724,7 +998,7 @@ public:
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
                 lua_pushnumber(L, h.health);
                 callStart_ = std::chrono::steady_clock::now();
-                if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                if (timedPcall(1, 0) != LUA_OK) {
                     lastError = safeToString(-1);
                     std::fprintf(stderr, "HealthChanged: %s\n", lastError.c_str());
                     lua_pop(L, 1);
@@ -738,7 +1012,7 @@ public:
                 lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
                 callStart_ = std::chrono::steady_clock::now();
-                if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                if (timedPcall(0, 0) != LUA_OK) {
                     lastError = safeToString(-1);
                     std::fprintf(stderr, "Died: %s\n", lastError.c_str());
                     lua_pop(L, 1);
@@ -757,7 +1031,7 @@ public:
                 lua_pushstring(L, st);
                 lua_pushstring(L, prev.c_str());
                 callStart_ = std::chrono::steady_clock::now();
-                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                if (timedPcall(2, 0) != LUA_OK) {
                     lastError = safeToString(-1);
                     std::fprintf(stderr, "StateChanged: %s\n", lastError.c_str());
                     lua_pop(L, 1);
@@ -789,7 +1063,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             lua_pushstring(L, n.c_str());
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "ProximityPrompt: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -800,9 +1074,11 @@ public:
     void fireHeartbeat(float dt) {
         if (!L) return;
         tickPlayerLifecycle();
+        runTime_ += dt;
         fireRunServiceEvent(steppedRefs_, dt, "Stepped");
         fireRunServiceEvent(heartbeatRefs_, dt, "Heartbeat");
         fireRunServiceEvent(renderSteppedRefs_, dt, "RenderStepped");
+        tickCharacterAnimation(dt);
         tickRenderSteps(dt);
         tickDebris(dt);
         tickTaskWaits(dt);
@@ -844,6 +1120,7 @@ public:
             lua_pop(L, 1);
             lua_unref(L, ref);
             if (!co) { lua_pop(L, 1); continue; }
+            lua_xmove(L, co, 1);   // il valore va sulla coroutine (come in tickChildWaits)
             callStart_ = std::chrono::steady_clock::now();
             int st = lua_resume(co, L, 1);
             int nres = lua_gettop(co);
@@ -867,6 +1144,7 @@ public:
             lua_pop(L, 1);
             lua_unref(L, ref);
             if (!co) { lua_pop(L, 1); return; }
+            lua_xmove(L, co, 1);   // la risposta del server va sulla coroutine
             callStart_ = std::chrono::steady_clock::now();
             int st = lua_resume(co, L, 1);
             int nres = lua_gettop(co);
@@ -893,7 +1171,7 @@ public:
             lua_pushstring(L, "Humanoid");
             lua_setfield(L, -2, "ClassName");
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Touched error: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -919,7 +1197,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLivePart(L, otherIndex);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Touched(other) error: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -958,7 +1236,7 @@ public:
             lua_pushstring(L, itemId.c_str());
             lua_pushstring(L, itemName.c_str());
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+            if (timedPcall(2, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "%s error: %s\n", eventName, lastError.c_str());
                 lua_pop(L, 1);
@@ -975,7 +1253,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            if (timedPcall(0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Tool event error: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -1023,7 +1301,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLocalPlayer(L);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "PlayerAdded: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -1041,12 +1319,253 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLocalCharacter(L);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "CharacterAdded: %s\n", lastError.c_str());
                 lua_pop(L, 1);
             }
         }
+    }
+
+    // ---- Server dedicato: i giocatori collegati (blocky_servers/ServerWorld.h) ----
+    // Sul server non c'e' un LocalPlayer: ogni client e' un Player Luau del
+    // prelude (Internal.serverPlayer), con UserId = id del peer.
+
+    bool serverPlayersEnabled() const { return serverPlayers_; }
+
+    /**
+     * workspace.Gravity come la vede lo script (anche dopo workspace.Gravity = x,
+     * che scrive solo il campo): la fisica la legge ogni frame e la applica.
+     */
+    float readWorkspaceGravity() {
+        float g = scriptControls().workspaceGravity;
+        if (!L) return g;
+        lua_getglobal(L, "workspace");
+        if (lua_istable(L, -1)) {
+            lua_pushstring(L, "Gravity");
+            lua_rawget(L, -2);
+            if (lua_isnumber(L, -1)) g = std::clamp((float)lua_tonumber(L, -1), 0.f, 1000.f);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        scriptControls().workspaceGravity = g;
+        return g;
+    }
+
+    /** Part con un ClickDetector.MouseClick collegato? */
+    bool partHasClick(int idx) const {
+        auto it = scriptControls().partClicked.find(idx);
+        return it != scriptControls().partClicked.end() && !it->second.empty();
+    }
+
+    /** Clic del giocatore sulla part: MouseClick(playerWhoClicked), come Roblox. */
+    void firePartClicked(int idx) {
+        if (!L) return;
+        auto it = scriptControls().partClicked.find(idx);
+        if (it == scriptControls().partClicked.end()) return;
+        const std::vector<int> refs = it->second;
+        for (int ref : refs) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            pushLocalPlayer(L);
+            callStart_ = std::chrono::steady_clock::now();
+            if (timedPcall(1, 0) != LUA_OK) {
+                lastError = safeToString(-1);
+                std::fprintf(stderr, "MouseClick: %s\n", lastError.c_str());
+                lua_pop(L, 1);
+            }
+        }
+    }
+
+    /** Enum.<enumName>.<item> (come lo vede lo script); se manca, il nome come stringa. */
+    void pushEnumItem(const char* enumName, const char* item) {
+        lua_getglobal(L, "Enum");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, enumName);
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, item);
+                if (!lua_isnil(L, -1)) {
+                    lua_remove(L, -2);
+                    lua_remove(L, -2);
+                    return;
+                }
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        lua_pushstring(L, item);
+    }
+
+    /**
+     * Un tasto o un pulsante del mouse premuto/rilasciato (da main.cpp):
+     * UserInputService.InputBegan / InputEnded(input, gameProcessedEvent)
+     * come Roblox. Prima le funzioni collegate non venivano mai chiamate.
+     *   keyName    nome in Enum.KeyCode ("E", "Space", ... "Unknown" per il mouse)
+     *   inputType  nome in Enum.UserInputType ("Keyboard", "MouseButton1", ...)
+     *   gameProcessed  vero se l'input l'ha gia' preso l'interfaccia (chat, menu)
+     */
+    void fireInput(bool began, const char* keyName, const char* inputType,
+                   float mouseX, float mouseY, bool gameProcessed) {
+        auto& refs = began ? scriptControls().inputBegan : scriptControls().inputEnded;
+        if (!L || refs.empty()) return;
+        lua_newtable(L);
+        pushEnumItem("KeyCode", keyName);
+        lua_setfield(L, -2, "KeyCode");
+        pushEnumItem("UserInputType", inputType);
+        lua_setfield(L, -2, "UserInputType");
+        pushEnumItem("UserInputState", began ? "Begin" : "End");
+        lua_setfield(L, -2, "UserInputState");
+        pushVec3(L, mouseX, mouseY, 0.f);
+        lua_setfield(L, -2, "Position");
+        pushVec3(L, 0.f, 0.f, 0.f);
+        lua_setfield(L, -2, "Delta");
+        lua_pushstring(L, "InputObject");
+        lua_setfield(L, -2, "ClassName");
+        const int obj = lua_ref(L, -1);
+        lua_pop(L, 1);
+        const std::vector<int> list = refs;   // copia: una callback puo' collegarne altre
+        for (int ref : list) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            lua_rawgeti(L, LUA_REGISTRYINDEX, obj);
+            lua_pushboolean(L, gameProcessed ? 1 : 0);
+            callStart_ = std::chrono::steady_clock::now();
+            if (timedPcall(2, 0) != LUA_OK) {
+                lastError = safeToString(-1);
+                std::fprintf(stderr, "%s: %s\n", began ? "InputBegan" : "InputEnded", lastError.c_str());
+                lua_pop(L, 1);
+            }
+        }
+        lua_unref(L, obj);
+    }
+
+    /**
+     * Toglie subito la part idx dal mondo E aggiorna tutto quello che la
+     * ricorda per indice (script, vincoli, figlie, etichette...). Chi toglie
+     * part durante il gioco (esplosioni, spada, rete) deve passare da qui,
+     * non da parts.erase.
+     */
+    void destroyPartNow(int idx) {
+        if (workspace && idx >= 0 && idx < (int)workspace->parts.size()) destroyPartImmediate(idx);
+    }
+
+    void enableServerPlayers() {
+        if (!L) return;
+        serverPlayers_ = true;
+        playerLifecycleFired_ = true;   // niente PlayerAdded del giocatore locale
+        if (pushPreludeField(L, "enableServerPlayers")) {
+            if (lua_pcall(L, 0, 0, 0) != LUA_OK) lua_pop(L, 1);
+        }
+    }
+
+    /** Chiama ogni funzione in refs con l'oggetto in registry objRef come argomento. */
+    void callRefsWith(const std::vector<int>& refs, int objRef, const char* what) {
+        for (int ref : refs) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            lua_rawgeti(L, LUA_REGISTRYINDEX, objRef);
+            callStart_ = std::chrono::steady_clock::now();
+            if (timedPcall(1, 0) != LUA_OK) {
+                lastError = safeToString(-1);
+                std::fprintf(stderr, "%s: %s\n", what, lastError.c_str());
+                lua_pop(L, 1);
+            }
+        }
+    }
+
+    /** Mette in cima allo stack il risultato di Internal.<fn>(id[, name]); falso se nil/errore. */
+    bool pushServerPlayerCall(const char* fn, int id, const char* name = nullptr) {
+        if (!pushPreludeField(L, fn)) return false;
+        lua_pushinteger(L, id);
+        int nargs = 1;
+        if (name) { lua_pushstring(L, name); nargs = 2; }
+        if (lua_pcall(L, nargs, 1, 0) != LUA_OK) { lua_pop(L, 1); return false; }
+        if (lua_isnil(L, -1)) { lua_pop(L, 1); return false; }
+        return true;
+    }
+
+    void serverPlayerJoined(int id, const char* name) {
+        if (!L || !serverPlayers_) return;
+        if (!pushServerPlayerCall("serverPlayer", id, name)) return;
+        const int ref = lua_ref(L, -1);
+        lua_pop(L, 1);
+        callRefsWith(scriptControls().playerAdded, ref, "PlayerAdded");
+        notifyPrelude(L, "serverCharacterAdded", id, nullptr);
+        lua_unref(L, ref);
+    }
+
+    void serverPlayerLeft(int id) {
+        if (!L || !serverPlayers_) return;
+        if (pushServerPlayerCall("serverPlayerById", id)) {
+            const int ref = lua_ref(L, -1);
+            lua_pop(L, 1);
+            callRefsWith(scriptControls().playerRemoving, ref, "PlayerRemoving");
+            lua_unref(L, ref);
+        }
+        notifyPrelude(L, "serverPlayerRemoved", id, nullptr);
+        for (auto it = serverTouching_.begin(); it != serverTouching_.end();)
+            it = (it->first == id) ? serverTouching_.erase(it) : std::next(it);
+    }
+
+    void serverPlayerMoved(int id, const glm::vec3& feet) {
+        if (!L || !serverPlayers_) return;
+        if (!pushPreludeField(L, "serverPlayerMoved")) return;
+        lua_pushinteger(L, id);
+        lua_pushnumber(L, feet.x);
+        lua_pushnumber(L, feet.y);
+        lua_pushnumber(L, feet.z);
+        if (lua_pcall(L, 4, 0, 0) != LUA_OK) lua_pop(L, 1);
+        serverPlayerTouches(id, feet);
+    }
+
+    // Il server non ha i corpi dei giocatori: Touched lo calcola qui, con una
+    // scatola come il personaggio (2 x 5 x 2 sopra i piedi) contro le part
+    // che hanno un Touched collegato. Scatta all'ingresso, come in Roblox.
+    void serverPlayerTouches(int id, const glm::vec3& feet) {
+        if (!workspace) return;
+        const glm::vec3 c = feet + glm::vec3(0.f, 2.5f, 0.f);
+        const glm::vec3 h(1.f, 2.5f, 1.f);
+        for (const auto& kv : scriptControls().partTouched) {
+            const int idx = kv.first;
+            if (idx < 0 || idx >= (int)workspace->parts.size() || kv.second.empty()) continue;
+            const WorkspacePart& p = workspace->parts[(size_t)idx];
+            if (!p.canTouch || p.destroyPending) continue;
+            // Mezze misure della part ruotata, in assi del mondo.
+            const glm::mat3 r(partRotationMatrix(p.rotation));
+            const glm::vec3 ph = p.size * 0.5f;
+            const glm::vec3 ext(std::fabs(r[0][0]) * ph.x + std::fabs(r[1][0]) * ph.y + std::fabs(r[2][0]) * ph.z,
+                                std::fabs(r[0][1]) * ph.x + std::fabs(r[1][1]) * ph.y + std::fabs(r[2][1]) * ph.z,
+                                std::fabs(r[0][2]) * ph.x + std::fabs(r[1][2]) * ph.y + std::fabs(r[2][2]) * ph.z);
+            const glm::vec3 d = glm::abs(c - p.position);
+            const bool overlap = d.x <= h.x + ext.x && d.y <= h.y + ext.y && d.z <= h.z + ext.z;
+            const auto key = std::make_pair(id, idx);
+            if (!overlap) { serverTouching_.erase(key); continue; }
+            if (!serverTouching_.insert(key).second) continue;
+            if (!pushServerPlayerCall("serverRootPart", id)) continue;
+            const int ref = lua_ref(L, -1);
+            lua_pop(L, 1);
+            const std::vector<int> refs = kv.second;   // copia: lo script puo' scollegare
+            callRefsWith(refs, ref, "Touched");
+            lua_unref(L, ref);
+        }
+    }
+
+    /** Chi ha mandato un evento al server: il Player sul server dedicato, altrimenti il nome. */
+    void pushRemoteSender(const IncomingRemoteEvent& in) {
+        if (serverPlayers_ && pushPreludeField(L, "serverPlayerByName")) {
+            lua_pushstring(L, in.fromName);
+            if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+                if (!lua_isnil(L, -1)) return;
+                lua_pop(L, 1);
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+        lua_pushstring(L, in.fromName);
     }
 
     void firePartChildAdded(int parentIdx, int childIdx) {
@@ -1059,7 +1578,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLivePart(L, childIdx);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "ChildAdded: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -1077,7 +1596,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushSharedInstance(L, childIdx);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "Shared ChildAdded: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -1086,6 +1605,8 @@ public:
     }
 
     bool playerLifecycleFired_ = false;
+    bool serverPlayers_ = false;                    // server dedicato: Player per peer
+    std::set<std::pair<int, int>> serverTouching_;  // (peer, part) gia' a contatto
     void tickPlayerLifecycle() {
         if (playerLifecycleFired_ || !L) return;
         playerLifecycleFired_ = true;
@@ -1103,7 +1624,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            if (timedPcall(0, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "TextButton Activated error: %s\n", lastError.c_str());
                 lua_pop(L, 1);
@@ -1130,10 +1651,10 @@ public:
                 if (it != scriptControls().remoteInvoke.end() && it->second != LUA_NOREF) {
                     lua_rawgeti(L, LUA_REGISTRYINDEX, it->second);
                     if (lua_isfunction(L, -1)) {
-                        lua_pushstring(L, in.fromName);
+                        pushRemoteSender(in);   // InvokeServer: il Player sul server dedicato
                         lua_pushstring(L, data.c_str());
                         callStart_ = std::chrono::steady_clock::now();
-                        if (lua_pcall(L, 2, 1, 0) == LUA_OK) {
+                        if (timedPcall(2, 1) == LUA_OK) {
                             if (lua_isstring(L, -1)) result = lua_tostring(L, -1);
                             else if (lua_isnumber(L, -1)) {
                                 char buf[64];
@@ -1171,10 +1692,10 @@ public:
                 if (ref == LUA_NOREF) continue;
                 lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-                lua_pushstring(L, in.fromName);
+                if (in.toServer) pushRemoteSender(in); else lua_pushstring(L, in.fromName);
                 lua_pushlstring(L, in.payload.data(), in.payload.size());
                 callStart_ = std::chrono::steady_clock::now();
-                if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                if (timedPcall(2, 0) != LUA_OK) {
                     lastError = safeToString(-1);
                     std::fprintf(stderr, "RemoteEvent error: %s\n", lastError.c_str());
                     lua_pop(L, 1);
@@ -1186,6 +1707,476 @@ public:
 
 private:
     lua_State* L = nullptr;
+    std::set<std::string> apiGlobals_;
+    int preludeRef_ = LUA_NOREF; // tabella interna del prelude (LuaPrelude.h)
+    double runTime_ = 0.0;       // tempo di gioco per RunService.Stepped(tempo, dt)
+
+    // ---- setmetatable / getmetatable per gli script ----
+
+    /**
+     * Metatabella del motore = ha almeno una funzione C dentro (__index,
+     * __newindex, __add... scritti in C++). Quelle degli script e del
+     * prelude sono tutte Luau. Per uno script sono bloccate come in Roblox.
+     */
+    static bool isEngineMetatable(lua_State* ls, int mtIdx) {
+        if (mtIdx < 0) mtIdx = lua_gettop(ls) + 1 + mtIdx;
+        bool engine = false;
+        lua_pushnil(ls);
+        while (lua_next(ls, mtIdx) != 0) {
+            if (lua_iscfunction(ls, -1)) engine = true;
+            lua_pop(ls, 1);
+            if (engine) { lua_pop(ls, 1); break; }
+        }
+        return engine;
+    }
+
+    static int luaSafeGetmetatable(lua_State* ls) {
+        luaL_checkany(ls, 1);
+        if (!lua_getmetatable(ls, 1)) { lua_pushnil(ls); return 1; }
+        lua_pushstring(ls, "__metatable");
+        lua_rawget(ls, -2);
+        if (!lua_isnil(ls, -1)) return 1; // il valore protetto, come Lua standard
+        lua_pop(ls, 1);
+        if (isEngineMetatable(ls, -1)) { lua_pushstring(ls, "The metatable is locked"); return 1; }
+        return 1;
+    }
+
+    static int luaSafeSetmetatable(lua_State* ls) {
+        luaL_checktype(ls, 1, LUA_TTABLE);
+        const int t = lua_type(ls, 2);
+        if (t != LUA_TNIL && t != LUA_TTABLE) return blockyLuaError(ls, "setmetatable: il secondo argomento deve essere una tabella o nil");
+        if (lua_getmetatable(ls, 1)) {
+            lua_pushstring(ls, "__metatable");
+            lua_rawget(ls, -2);
+            const bool locked = !lua_isnil(ls, -1);
+            lua_pop(ls, 1);
+            if (locked || isEngineMetatable(ls, -1))
+                return blockyLuaError(ls, "cannot change a protected metatable");
+            lua_pop(ls, 1);
+        }
+        lua_settop(ls, 2);
+        lua_setmetatable(ls, 1);
+        return 1;
+    }
+
+    /** rawset per il solo prelude (passato come argomento del chunk). */
+    static int luaPreludeRawset(lua_State* ls) {
+        luaL_checktype(ls, 1, LUA_TTABLE);
+        lua_settop(ls, 3);
+        lua_rawset(ls, 1);
+        lua_settop(ls, 1);
+        return 1;
+    }
+
+    // ---- Prelude Luau (LuaPrelude.h) ----
+
+    /** Compila ed esegue il prelude; installa CFrame, Random e i metodi nuovi di Vector3. */
+    bool loadPrelude() {
+        preludeRef_ = LUA_NOREF;
+        // Stato Lua nuovo: le tracce degli script di prima non esistono piu'.
+        charAnim.clear();
+        trackRefs_.clear();
+        setupCharacterRig();
+        const std::string bc = Luau::compile(blk::luaprelude::source());
+        bool loaded = luau_load(L, "=BlockyPrelude", bc.data(), bc.size(), 0) == 0;
+        if (loaded) {
+            blockyPushCFunction(L, luaPreludeRawset); // solo per il prelude: gli script non hanno rawset
+            loaded = lua_pcall(L, 1, 1, 0) == LUA_OK;
+        }
+        if (!loaded) {
+            std::fprintf(stderr, "[Lua] prelude non caricato: %s\n", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+            lua_pop(L, 1);
+            return false;
+        }
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; }
+        preludeRef_ = lua_ref(L, -1);
+        lua_pop(L, 1);
+        return true;
+    }
+
+    /** Dopo registerApi: CFrame/Random globali, Vector3 completato, Internal.install(). */
+    void installPrelude() {
+        if (preludeRef_ == LUA_NOREF) return;
+        lua_getref(L, preludeRef_);
+        const int pre = lua_gettop(L);
+        lua_getfield(L, pre, "install");
+        if (lua_isfunction(L, -1) && lua_pcall(L, 0, 0, 0) != LUA_OK) {
+            std::fprintf(stderr, "[Lua] prelude install: %s\n", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+            lua_pop(L, 1);
+        } else if (!lua_isfunction(L, -1) && lua_gettop(L) > pre) {
+            lua_pop(L, 1);
+        }
+        lua_getfield(L, pre, "CFrame");
+        lua_setglobal(L, "CFrame");
+        lua_getfield(L, pre, "Random");
+        lua_setglobal(L, "Random");
+        ensureVec3Meta(L);
+        lua_getfield(L, LUA_REGISTRYINDEX, "BlockyVec3MT");
+        const int mt = lua_gettop(L);
+        lua_getfield(L, pre, "vec3Index");
+        lua_getfield(L, mt, "__index");
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK) lua_setfield(L, mt, "__index");
+        else lua_pop(L, 1);
+        lua_getfield(L, pre, "vec3Div"); lua_setfield(L, mt, "__div");
+        lua_getfield(L, pre, "vec3Eq"); lua_setfield(L, mt, "__eq");
+        lua_getfield(L, pre, "vec3ToString"); lua_setfield(L, mt, "__tostring");
+        lua_pop(L, 2); // mt, prelude
+
+        // Enum.AnimationPriority (Core 0 ... Action4 6), come Roblox.
+        lua_getglobal(L, "Enum");
+        if (lua_istable(L, -1) && !lua_getreadonly(L, -1)) {
+            lua_getfield(L, -1, "AnimationPriority");
+            const bool has = !lua_isnil(L, -1);
+            lua_pop(L, 1);
+            if (!has) {
+                static const char* names[] = {"Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4"};
+                lua_newtable(L);
+                for (int i = 0; i < 7; ++i) {
+                    lua_newtable(L);
+                    lua_pushstring(L, names[i]); lua_setfield(L, -2, "Name");
+                    lua_pushinteger(L, i); lua_setfield(L, -2, "Value");
+                    lua_pushstring(L, "AnimationPriority"); lua_setfield(L, -2, "EnumType");
+                    lua_setfield(L, -2, names[i]);
+                }
+                lua_pushstring(L, "AnimationPriority");
+                lua_insert(L, -2);
+                lua_rawset(L, -3);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    /** Mette sullo stack un campo della tabella interna del prelude; falso (e niente sullo stack) se manca. */
+    static bool pushPreludeField(lua_State* ls, const char* name) {
+        auto* rt = fromState(ls);
+        if (!rt || rt->preludeRef_ == LUA_NOREF) return false;
+        lua_getref(ls, rt->preludeRef_);
+        if (!lua_istable(ls, -1)) { lua_pop(ls, 1); return false; }
+        lua_getfield(ls, -1, name);
+        lua_remove(ls, -2);
+        if (lua_isnil(ls, -1)) { lua_pop(ls, 1); return false; }
+        return true;
+    }
+
+    /**
+     * Connect (o Once) di un evento del C++ con oggetto connessione vero:
+     * conn = evento:Connect(f); conn:Disconnect(); conn.Connected.
+     * Senza prelude resta la Connect originale.
+     */
+    static void pushSignalMethod(lua_State* ls, lua_CFunction fn, const char* debugName, int mode) {
+        if (!pushPreludeField(ls, "makeConnect")) {
+            lua_pushcfunction(ls, fn, debugName);
+            return;
+        }
+        lua_pushcfunction(ls, fn, debugName);
+        lua_pushinteger(ls, mode);
+        if (lua_pcall(ls, 2, 1, 0) != LUA_OK) {
+            lua_pop(ls, 1);
+            lua_pushcfunction(ls, fn, debugName);
+        }
+    }
+
+    // ---- AnimationTrack (Lua) ----
+
+    std::map<int, int> trackRefs_; // id traccia -> tabella AnimationTrack (per gli eventi)
+
+    /** signal:Fire(arg) su un Signal del prelude. */
+    void fireLuaSignal(int idx, const char* arg) {
+        if (idx < 0) idx = lua_gettop(L) + 1 + idx;
+        lua_getfield(L, idx, "Fire");
+        if (!lua_isfunction(L, -1)) { lua_pop(L, 1); return; }
+        lua_pushvalue(L, idx);
+        int n = 1;
+        if (arg) { lua_pushstring(L, arg); ++n; }
+        if (lua_pcall(L, n, 0, 0) != LUA_OK) {
+            std::fprintf(stderr, "[Lua] evento animazione: %s\n", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+            lua_pop(L, 1);
+        }
+    }
+
+    static void pushNewSignal(lua_State* ls) {
+        if (pushPreludeField(ls, "Signal")) {
+            lua_getfield(ls, -1, "new");
+            lua_remove(ls, -2);
+            if (lua_pcall(ls, 0, 1, 0) == LUA_OK) return;
+            lua_pop(ls, 1);
+        }
+        lua_newtable(ls);
+    }
+
+    /**
+     * AnimationId -> Action. Formati:
+     *   blkanim://nome           prima Action di animations/nome.blkanim
+     *   blkanim://nome/Action    l'Action con quel nome
+     *   nome                     come blkanim://nome
+     * Si cerca nella cartella dati (animazioni salvate dall'Animation Studio)
+     * e negli asset del gioco. rbxassetid:// non si puo' scaricare.
+     */
+    static bool resolveAnimation(const std::string& idIn, blk::anim::Action& out, std::string& err) {
+        std::string id = idIn;
+        if (id.rfind("rbxassetid://", 0) == 0 || id.rfind("http", 0) == 0) {
+            err = "le animazioni di Roblox non si scaricano: salvala dall'Animation Studio e usa \"blkanim://nome\"";
+            return false;
+        }
+        if (id.rfind("blkanim://", 0) == 0) id = id.substr(10);
+        std::string file = id, actionName;
+        const size_t slash = id.find('/');
+        if (slash != std::string::npos) { file = id.substr(0, slash); actionName = id.substr(slash + 1); }
+        bool okName = !file.empty() && file.size() <= 64 && file.find("..") == std::string::npos;
+        for (char c : file)
+            if (!(std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == ' ' || c == '.')) okName = false;
+        if (!okName) { err = "AnimationId non valido: \"" + idIn + "\""; return false; }
+        const std::string candidates[] = {blockyDataDir() + "/animations/" + file + ".blkanim",
+                                          resolveScriptPath("animations/" + file + ".blkanim")};
+        for (const auto& path : candidates) {
+            blk::anim::Armature arm;
+            std::vector<blk::anim::Action> acts;
+            std::string e;
+            if (!blk::anim::loadFile(path, arm, acts, nullptr, e)) continue;
+            for (const auto& a : acts)
+                if (actionName.empty() || a.name == actionName) { out = a; return true; }
+            err = "nel file \"" + file + "\" non c'e' l'animazione \"" + actionName + "\"";
+            return false;
+        }
+        err = "animazione \"" + file + "\" non trovata (salvala dall'Animation Studio)";
+        return false;
+    }
+
+    static int charTrackId(lua_State* ls, int idx) { return intField(ls, idx, "__trackId"); }
+
+    static int luaCharTrackPlay(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt) return 0;
+        rt->charAnim.play(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1), (float)luaL_optnumber(ls, 3, 1.0),
+                          (float)luaL_optnumber(ls, 4, 1.0));
+        return 0;
+    }
+    static int luaCharTrackStop(lua_State* ls) {
+        if (auto* rt = fromState(ls)) rt->charAnim.stop(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1));
+        return 0;
+    }
+    static int luaCharTrackAdjustSpeed(lua_State* ls) {
+        if (auto* rt = fromState(ls)) rt->charAnim.adjustSpeed(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0));
+        return 0;
+    }
+    static int luaCharTrackAdjustWeight(lua_State* ls) {
+        if (auto* rt = fromState(ls))
+            rt->charAnim.adjustWeight(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0), (float)luaL_optnumber(ls, 3, 0.1));
+        return 0;
+    }
+    /** track:GetMarkerReachedSignal("Passo") — un Signal per nome, creato al primo uso. */
+    static int luaCharTrackMarkerSignal(lua_State* ls) {
+        const char* name = luaL_checkstring(ls, 2);
+        lua_getfield(ls, 1, "_markers");
+        if (!lua_istable(ls, -1)) return 0;
+        lua_getfield(ls, -1, name);
+        if (lua_istable(ls, -1)) return 1;
+        lua_pop(ls, 1);
+        pushNewSignal(ls);
+        lua_pushvalue(ls, -1);
+        lua_setfield(ls, -3, name);
+        return 1;
+    }
+    static int luaCharTrackTimeOfKeyframe(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* name = luaL_checkstring(ls, 2);
+        const blk::anim::CharTrack* t = rt ? rt->charAnim.track(charTrackId(ls, 1)) : nullptr;
+        if (t) {
+            for (const auto& m : t->action->markers)
+                if (m.name == name) { lua_pushnumber(ls, (m.frame - t->action->frameStart) / t->action->fps); return 1; }
+            for (const auto& e : t->action->events)
+                if (e.name == name) { lua_pushnumber(ls, (e.frame - t->action->frameStart) / t->action->fps); return 1; }
+        }
+        return blockyLuaError(ls, "GetTimeOfKeyframe: marker \"%s\" non trovato", name);
+    }
+
+    static int parsePriority(lua_State* ls, int idx) {
+        static const char* names[] = {"Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4"};
+        if (lua_isnumber(ls, idx)) return std::clamp((int)lua_tointeger(ls, idx), 0, 6);
+        if (lua_istable(ls, idx)) {
+            lua_getfield(ls, idx, "Value");
+            const int v = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+            lua_pop(ls, 1);
+            if (v >= 0) return std::clamp(v, 0, 6);
+            lua_getfield(ls, idx, "Name");
+            const char* n = lua_tostring(ls, -1);
+            lua_pop(ls, 1);
+            for (int i = 0; n && i < 7; ++i) if (std::strcmp(n, names[i]) == 0) return i;
+        }
+        if (const char* n = lua_tostring(ls, idx))
+            for (int i = 0; i < 7; ++i) if (std::strcmp(n, names[i]) == 0) return i;
+        return -1;
+    }
+
+    static int luaCharTrackIndex(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* k = lua_tostring(ls, 2);
+        const blk::anim::CharTrack* t = rt ? rt->charAnim.track(charTrackId(ls, 1)) : nullptr;
+        if (!t || !k) return 0;
+        if (!std::strcmp(k, "IsPlaying")) { lua_pushboolean(ls, t->playing); return 1; }
+        if (!std::strcmp(k, "Length")) { lua_pushnumber(ls, t->action->durationSeconds()); return 1; }
+        if (!std::strcmp(k, "Looped")) { lua_pushboolean(ls, t->looped); return 1; }
+        if (!std::strcmp(k, "Speed")) { lua_pushnumber(ls, t->speed); return 1; }
+        if (!std::strcmp(k, "TimePosition")) { lua_pushnumber(ls, t->time); return 1; }
+        if (!std::strcmp(k, "WeightCurrent")) { lua_pushnumber(ls, t->weight); return 1; }
+        if (!std::strcmp(k, "WeightTarget")) { lua_pushnumber(ls, t->targetWeight); return 1; }
+        if (!std::strcmp(k, "Priority")) {
+            lua_getglobal(ls, "Enum");
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "AnimationPriority");
+                if (lua_istable(ls, -1)) {
+                    static const char* names[] = {"Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4"};
+                    lua_getfield(ls, -1, names[std::clamp(t->priority, 0, 6)]);
+                    return 1;
+                }
+            }
+            lua_pushinteger(ls, t->priority);
+            return 1;
+        }
+        return 0;
+    }
+
+    static int luaCharTrackNewIndex(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* k = lua_tostring(ls, 2);
+        blk::anim::CharTrack* t = rt ? rt->charAnim.track(charTrackId(ls, 1)) : nullptr;
+        if (!t || !k) return 0;
+        if (!std::strcmp(k, "Looped")) { t->looped = lua_toboolean(ls, 3) != 0; return 0; }
+        if (!std::strcmp(k, "TimePosition")) { rt->charAnim.setTimePosition(t->id, (float)luaL_checknumber(ls, 3)); return 0; }
+        if (!std::strcmp(k, "Priority")) {
+            const int p = parsePriority(ls, 3);
+            if (p < 0) return blockyLuaError(ls, "Priority: Enum.AnimationPriority.Core/Idle/Movement/Action...");
+            t->priority = p;
+            return 0;
+        }
+        return blockyLuaError(ls, "AnimationTrack.%s non si puo' cambiare", k);
+    }
+
+    static void pushCharTrack(lua_State* ls, int id, const std::string& name) {
+        auto* rt = fromState(ls);
+        if (rt) {
+            const auto it = rt->trackRefs_.find(id);
+            if (it != rt->trackRefs_.end()) { lua_getref(ls, it->second); return; }
+        }
+        lua_newtable(ls);
+        lua_pushinteger(ls, id); lua_setfield(ls, -2, "__trackId");
+        lua_pushstring(ls, name.c_str()); lua_setfield(ls, -2, "Name");
+        lua_pushstring(ls, "AnimationTrack"); lua_setfield(ls, -2, "ClassName");
+        blockyPushCFunction(ls, luaCharTrackPlay); lua_setfield(ls, -2, "Play");
+        blockyPushCFunction(ls, luaCharTrackStop); lua_setfield(ls, -2, "Stop");
+        blockyPushCFunction(ls, luaCharTrackAdjustSpeed); lua_setfield(ls, -2, "AdjustSpeed");
+        blockyPushCFunction(ls, luaCharTrackAdjustWeight); lua_setfield(ls, -2, "AdjustWeight");
+        blockyPushCFunction(ls, luaCharTrackMarkerSignal); lua_setfield(ls, -2, "GetMarkerReachedSignal");
+        blockyPushCFunction(ls, luaCharTrackTimeOfKeyframe); lua_setfield(ls, -2, "GetTimeOfKeyframe");
+        for (const char* s : {"Stopped", "Ended", "DidLoop", "KeyframeReached"}) {
+            pushNewSignal(ls);
+            lua_setfield(ls, -2, s);
+        }
+        lua_newtable(ls); lua_setfield(ls, -2, "_markers");
+        lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyCharTrackMT");
+        if (!lua_istable(ls, -1)) {
+            lua_pop(ls, 1);
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaCharTrackIndex); lua_setfield(ls, -2, "__index");
+            blockyPushCFunction(ls, luaCharTrackNewIndex); lua_setfield(ls, -2, "__newindex");
+            lua_pushstring(ls, "AnimationTrack"); lua_setfield(ls, -2, "__metatable");
+            lua_pushvalue(ls, -1);
+            lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyCharTrackMT");
+        }
+        lua_setmetatable(ls, -2);
+        if (rt) {
+            lua_pushvalue(ls, -1);
+            rt->trackRefs_[id] = lua_ref(ls, -1);
+            lua_pop(ls, 1);
+        }
+    }
+
+    /** Humanoid:LoadAnimation(animation) / Animator:LoadAnimation(animation). */
+    static int luaLoadCharAnimation(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt) return 0;
+        // L'Animation (tabella con AnimationId) o direttamente la stringa.
+        std::string id;
+        for (int i = 1; i <= lua_gettop(ls) && id.empty(); ++i) {
+            if (lua_type(ls, i) == LUA_TSTRING) id = lua_tostring(ls, i);
+            else if (lua_istable(ls, i)) {
+                lua_getfield(ls, i, "AnimationId");
+                if (lua_isstring(ls, -1)) id = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+            }
+        }
+        if (id.empty()) return blockyLuaError(ls, "LoadAnimation(animation): serve un Animation con AnimationId");
+        if (rt->trackRefs_.size() >= 256) return blockyLuaError(ls, "LoadAnimation: troppe animazioni caricate (max 256)");
+        rt->setupCharacterRig();
+        blk::anim::Action a;
+        std::string err;
+        if (!resolveAnimation(id, a, err)) return blockyLuaError(ls, "LoadAnimation: %s", err.c_str());
+        const int tid = rt->charAnim.load(a);
+        pushCharTrack(ls, tid, a.name);
+        return 1;
+    }
+
+    static int luaGetPlayingCharTracks(lua_State* ls) {
+        auto* rt = fromState(ls);
+        lua_newtable(ls);
+        if (!rt) return 1;
+        int n = 1;
+        for (int id : rt->charAnim.playingTracks()) {
+            const blk::anim::CharTrack* t = rt->charAnim.track(id);
+            pushCharTrack(ls, id, t ? t->action->name : std::string());
+            lua_rawseti(ls, -2, n++);
+        }
+        return 1;
+    }
+
+    // rawset: la tabella game ha gia' il blocco anti-executor su __newindex.
+    void writeGameIdentity(int gameIdx) {
+        if (gameIdx < 0) gameIdx = lua_gettop(L) + 1 + gameIdx;
+        lua_pushstring(L, "PlaceId");
+        lua_pushstring(L, placeId.c_str());
+        lua_rawset(L, gameIdx);
+        lua_pushstring(L, "JobId");
+        lua_pushstring(L, jobId.c_str());
+        lua_rawset(L, gameIdx);
+    }
+
+    // lua_pcall misurato: la funzione da chiamare e' sotto gli argomenti, da
+    // li' si legge il chunk (lo script) a cui appartiene.
+    int timedPcall(int nargs, int nresults) {
+        lua_Debug ar{};
+        std::string who = "(C)";
+        if (lua_getinfo(L, -(nargs + 1), "s", &ar) && ar.short_src[0]) who = ar.short_src;
+        if (who == "BlockyPrelude") {
+            // La guardia di Connect (LuaPrelude.h): il costo e' della funzione
+            // dello script che avvolge, non del prelude.
+            const int fidx = lua_gettop(L) - nargs;
+            for (int u = 1; u <= 8; ++u) {
+                const char* name = lua_getupvalue(L, fidx, u);
+                if (!name) break;
+                const bool fn = lua_isfunction(L, -1);
+                lua_Debug inner{};
+                if (fn && lua_getinfo(L, -1, "s", &inner) && inner.short_src[0]
+                    && std::strcmp(inner.short_src, "BlockyPrelude") != 0) {
+                    who = inner.short_src;
+                    lua_pop(L, 1);
+                    break;
+                }
+                lua_pop(L, 1);
+            }
+        }
+        callStart_ = std::chrono::steady_clock::now();
+        const auto t0 = std::chrono::steady_clock::now();
+        const int r = lua_pcall(L, nargs, nresults, 0);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ScriptCost& c = scriptCosts[who];
+        c.totalMs += ms;
+        c.windowMs += ms;
+        c.peakMs = std::max(c.peakMs, ms);
+        ++c.calls;
+        ++c.windowCalls;
+        return r;
+    }
+
     std::vector<int> heartbeatRefs_;
     std::vector<int> steppedRefs_;
     std::vector<int> renderSteppedRefs_;
@@ -1211,9 +2202,12 @@ private:
                 lua_pop(L, 1);
                 continue;
             }
+            // Stepped riceve (tempo di gioco, dt), gli altri solo dt.
+            const bool stepped = std::strcmp(label, "Stepped") == 0;
+            if (stepped) lua_pushnumber(L, runTime_);
             lua_pushnumber(L, dt);
             callStart_ = std::chrono::steady_clock::now();
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            if (timedPcall(stepped ? 2 : 1, 0) != LUA_OK) {
                 lastError = safeToString(-1);
                 std::fprintf(stderr, "%s error: %s\n", label, lastError.c_str());
                 lua_pop(L, 1);
@@ -1246,18 +2240,24 @@ private:
                 ++i;
                 continue;
             }
-            int ref = taskWaits_[i].coRef;
+            const TaskWait w = taskWaits_[i];
             taskWaits_.erase(taskWaits_.begin() + (int)i);
-            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            lua_rawgeti(L, LUA_REGISTRYINDEX, w.coRef);
             lua_State* co = lua_tothread(L, -1);
             lua_pop(L, 1);
-            lua_unref(L,ref);
+            lua_unref(L, w.coRef);
             if (!co) continue;
             callStart_ = std::chrono::steady_clock::now();
+            int nargs = w.nargs;
+            if (nargs < 0) {
+                // task.wait() restituisce quanto si e' aspettato davvero, come Roblox.
+                lua_pushnumber(co, w.total - w.remaining); // remaining <= 0: anche lo sforamento
+                nargs = 1;
+            }
             // Luau non ha il 4o parametro d'uscita "nres" di Lua 5.4:
             // lo ricaviamo con lua_gettop dopo la resume (i valori
             // restituiti/yieldati restano comunque sullo stack di co).
-            int st = lua_resume(co, L, 0);
+            int st = lua_resume(co, L, nargs);
             int nres = lua_gettop(co);
             if (st != LUA_OK && st != LUA_YIELD) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "task resume error";
@@ -1288,7 +2288,121 @@ private:
                 remapped[kv.first] = std::move(kv.second);
         }
         touched.swap(remapped);
+        if (!serverTouching_.empty()) {
+            std::set<std::pair<int, int>> moved;
+            for (const auto& k : serverTouching_)
+                if (k.second != idx) moved.insert({k.first, k.second > idx ? k.second - 1 : k.second});
+            serverTouching_.swap(moved);
+        }
+        if (L) notifyPrelude(L, "partRemoved", idx, nullptr);
         workspace->parts.erase(workspace->parts.begin() + idx);
+        remapAfterErase(idx);
+    }
+
+    // ---- Indici delle part dopo un Destroy ----
+    //
+    // Il motore conosce le part per posizione nell'elenco: togliere la part
+    // idx fa scalare di uno tutte quelle dopo. Tutto cio' che le ricorda per
+    // numero va aggiornato, altrimenti punta alla part sbagliata (prima:
+    // variabili degli script, vincoli, part figlie, etichette...).
+
+    /** Tabelle Lua che puntano a una part per indice. Elenco "weak": non le tiene vive. */
+    static void trackPartTable(lua_State* ls, int tidx) {
+        tidx = lua_absindex(ls, tidx);
+        lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyLiveParts");
+        if (!lua_istable(ls, -1)) {
+            lua_pop(ls, 1);
+            lua_newtable(ls);
+            lua_newtable(ls);
+            lua_pushstring(ls, "k");
+            lua_setfield(ls, -2, "__mode");
+            lua_setmetatable(ls, -2);
+            lua_pushvalue(ls, -1);
+            lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyLiveParts");
+        }
+        lua_pushvalue(ls, tidx);
+        lua_pushboolean(ls, 1);
+        lua_rawset(ls, -3);
+        lua_pop(ls, 1);
+    }
+
+    void remapPartTables(int removed) {
+        if (!L) return;
+        lua_getfield(L, LUA_REGISTRYINDEX, "BlockyLiveParts");
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0) {
+            lua_pop(L, 1);   // resta la chiave: la tabella
+            if (lua_istable(L, -1)) {
+                lua_pushstring(L, "__partIndex");
+                lua_rawget(L, -2);
+                const bool num = lua_isnumber(L, -1);
+                const int i = num ? (int)lua_tointeger(L, -1) : -1;
+                lua_pop(L, 1);
+                if (num && i >= removed) {
+                    lua_pushstring(L, "__partIndex");
+                    lua_pushinteger(L, i == removed ? -1 : i - 1);
+                    lua_rawset(L, -3);
+                }
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    void remapAfterErase(int idx) {
+        auto shift = [idx](int& i) {
+            if (i == idx) i = -1;
+            else if (i > idx) --i;
+        };
+        for (auto& p : workspace->parts) shift(p.parentIndex);
+        partconstraints::onPartErased(*workspace, idx);
+        for (auto& l : workspace->labels) shift(l.adorneePart);
+        auto& sc = scriptControls();
+        {
+            std::map<int, std::vector<int>> moved;
+            for (auto& kv : sc.partChildAdded) {
+                if (kv.first == idx) {
+                    if (L) for (int ref : kv.second) if (ref != LUA_NOREF) lua_unref(L, ref);
+                    continue;
+                }
+                moved[kv.first > idx ? kv.first - 1 : kv.first] = std::move(kv.second);
+            }
+            sc.partChildAdded.swap(moved);
+        }
+        {
+            std::map<int, std::vector<int>> moved;
+            for (auto& kv : sc.partClicked) {
+                if (kv.first == idx) {
+                    if (L) for (int ref : kv.second) if (ref != LUA_NOREF) lua_unref(L, ref);
+                    continue;
+                }
+                moved[kv.first > idx ? kv.first - 1 : kv.first] = std::move(kv.second);
+            }
+            sc.partClicked.swap(moved);
+        }
+        for (auto it = sc.debris.begin(); it != sc.debris.end();) {
+            shift(it->partIndex);
+            it = it->partIndex < 0 ? sc.debris.erase(it) : std::next(it);
+        }
+        for (auto& a : sc.attachments) shift(a.partIndex);
+        for (auto& e : scriptEmitters_) shift(e.partIndex);
+        if (proximity) proximity->onPartErased(idx);
+        // Attributi e loro listener: chiave "indicePart:nome".
+        auto remapKeys = [idx](auto& m) {
+            std::remove_reference_t<decltype(m)> moved;
+            for (auto& kv : m) {
+                const size_t colon = kv.first.find(':');
+                if (colon == std::string::npos) { moved.emplace(kv.first, std::move(kv.second)); continue; }
+                const int pi = std::atoi(kv.first.c_str());
+                if (pi == idx) continue;
+                const int ni = pi > idx ? pi - 1 : pi;
+                moved.emplace(std::to_string(ni) + kv.first.substr(colon), std::move(kv.second));
+            }
+            m.swap(moved);
+        };
+        remapKeys(studio_pro_apis::attributes());
+        remapKeys(sc.attributeChanged);
+        remapPartTables(idx);
     }
 
     std::string safeToString(int idx) {
@@ -1512,6 +2626,153 @@ private:
         lua_setfield(ls, -2, "Health");
     }
 
+    // ---- Segnali delle part vere (Changed, GetPropertyChangedSignal, Destroying) ----
+    //
+    // Vivono nel prelude per indice di part (le tabelle delle part si ricreano
+    // a ogni accesso, l'indice no); il C++ li fa scattare quando una proprieta'
+    // cambia, quando la part viene distrutta e quando gli indici scalano.
+
+    static void pushPartSignal(lua_State* ls, int idx, const char* kind) {
+        if (idx < 0 || !pushPreludeField(ls, "partSignal")) { lua_pushnil(ls); return; }
+        lua_pushinteger(ls, idx);
+        if (kind) lua_pushstring(ls, kind); else lua_pushnil(ls);
+        if (lua_pcall(ls, 2, 1, 0) != LUA_OK) { lua_pop(ls, 1); lua_pushnil(ls); }
+    }
+
+    static void notifyPrelude(lua_State* ls, const char* fn, int idx, const char* str) {
+        if (!pushPreludeField(ls, fn)) return;
+        lua_pushinteger(ls, idx);
+        if (str) lua_pushstring(ls, str); else lua_pushnil(ls);
+        if (lua_pcall(ls, 2, 0, 0) != LUA_OK) lua_pop(ls, 1);
+    }
+
+    /** part ha ricevuto un Parent: il prelude la mette tra i figli se il parent e' un Instance Luau. */
+    static void notifyPartParented(lua_State* ls, int partTableIdx, int parentIdx) {
+        if (partTableIdx < 0) partTableIdx = lua_gettop(ls) + 1 + partTableIdx;
+        if (parentIdx < 0) parentIdx = lua_gettop(ls) + 1 + parentIdx;
+        if (!pushPreludeField(ls, "partParented")) return;
+        lua_pushvalue(ls, partTableIdx);
+        lua_pushvalue(ls, parentIdx);
+        if (lua_pcall(ls, 2, 0, 0) != LUA_OK) lua_pop(ls, 1);
+    }
+
+    static int luaLivePartPropSignal(lua_State* ls) {
+        pushPartSignal(ls, partIndexFromSelf(ls, 1), luaL_checkstring(ls, 2));
+        return 1;
+    }
+
+    // rawset per gli script: come in Roblox, ma non sugli oggetti del motore
+    // (aggirerebbe la protezione anti-executor). Stesse regole di setmetatable.
+    static int luaSafeRawset(lua_State* ls) {
+        luaL_checktype(ls, 1, LUA_TTABLE);
+        luaL_checkany(ls, 2);
+        if (lua_getreadonly(ls, 1)) return blockyLuaError(ls, "rawset: tabella in sola lettura");
+        if (lua_getmetatable(ls, 1)) {
+            lua_pushstring(ls, "__metatable");
+            lua_rawget(ls, -2);
+            const bool locked = !lua_isnil(ls, -1);
+            lua_pop(ls, 1);
+            if (locked || isEngineMetatable(ls, -1)) return blockyLuaError(ls, "rawset su un oggetto protetto");
+            lua_pop(ls, 1);
+        }
+        lua_settop(ls, 3);
+        lua_rawset(ls, 1);
+        lua_settop(ls, 1);
+        return 1;
+    }
+
+    // ---- Part creata con Instance.new, non ancora nel mondo ----
+    //
+    // Roblox: local p = Instance.new("Part"); p.CFrame = ...; p.Parent = workspace.
+    // Finche' non ha un Parent e' una tabella di valori; dare il Parent la
+    // aggiunge al mondo e LA STESSA tabella diventa la part viva (gli script
+    // continuano a usare la loro variabile).
+
+    static int luaPendingPartNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (key && std::strcmp(key, "CFrame") == 0) {
+            glm::vec3 pos{0.f};
+            if (readVec3Arg(ls, 3, pos)) {
+                pushVec3(ls, pos.x, pos.y, pos.z);
+                lua_setfield(ls, 1, "Position");
+            }
+            if (pushPreludeField(ls, "cframeToEulerYXZ")) {
+                lua_pushvalue(ls, 3);
+                if (lua_pcall(ls, 1, 3, 0) == LUA_OK) {
+                    if (lua_isnumber(ls, -3)) {
+                        pushVec3(ls, (float)lua_tonumber(ls, -3), (float)lua_tonumber(ls, -2), (float)lua_tonumber(ls, -1));
+                        lua_setfield(ls, 1, "Orientation");
+                    }
+                    lua_pop(ls, 3);
+                } else {
+                    lua_pop(ls, 1);
+                }
+            }
+            return 0;
+        }
+        if (key && std::strcmp(key, "Parent") == 0 && !lua_isnil(ls, 3)) {
+            // Nel mondo con i valori messi finora...
+            lua_pushcfunction(ls, luaWorkspaceAdd, "luaWorkspaceAdd");
+            lua_pushvalue(ls, 1);
+            lua_call(ls, 1, 1);
+            if (!lua_istable(ls, -1)) { lua_pop(ls, 1); return 0; }
+            const int live = lua_gettop(ls);
+            // ...poi la tabella dello script prende il posto della part viva:
+            // 1) via i valori vecchi (altrimenti, letti per primi, nasconderebbero quelli veri)
+            std::vector<std::string> keys;
+            lua_pushnil(ls);
+            while (lua_next(ls, 1) != 0) {
+                lua_pop(ls, 1);
+                if (lua_type(ls, -1) == LUA_TSTRING) keys.push_back(lua_tostring(ls, -1));
+            }
+            for (const auto& k : keys) { lua_pushstring(ls, k.c_str()); lua_pushnil(ls); lua_rawset(ls, 1); }
+            // 2) i campi della part viva (__partIndex e metodi)
+            lua_pushnil(ls);
+            while (lua_next(ls, live) != 0) {
+                lua_pushvalue(ls, -2);
+                lua_insert(ls, -2);
+                lua_rawset(ls, 1);
+            }
+            // 3) la sua metatabella (Position, CFrame... letti dal mondo)
+            if (!lua_getmetatable(ls, live)) lua_pushnil(ls);
+            lua_setmetatable(ls, 1);
+            trackPartTable(ls, 1);
+            notifyPartParented(ls, 1, 3);
+            lua_settop(ls, 3);
+            return 0;
+        }
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    static int luaPendingPartIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (key && std::strcmp(key, "CFrame") == 0) {
+            glm::vec3 pos{0.f}, rot{0.f};
+            readVec3Field(ls, 1, "Position", pos);
+            readVec3Field(ls, 1, "Orientation", rot);
+            pushCFrameRot(ls, pos.x, pos.y, pos.z, rot.x, rot.y, rot.z);
+            return 1;
+        }
+        return 0;
+    }
+
+    static void setPendingPartMeta(lua_State* ls, int idx) {
+        if (idx < 0) idx = lua_gettop(ls) + 1 + idx;
+        lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyPendingPartMT");
+        if (!lua_istable(ls, -1)) {
+            lua_pop(ls, 1);
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaPendingPartNewIndex);
+            lua_setfield(ls, -2, "__newindex");
+            blockyPushCFunction(ls, luaPendingPartIndex);
+            lua_setfield(ls, -2, "__index");
+            lua_pushvalue(ls, -1);
+            lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyPendingPartMT");
+        }
+        lua_setmetatable(ls, idx);
+    }
+
     static int partIndexFromSelf(lua_State* ls, int selfIdx) {
         lua_getfield(ls, selfIdx, "__partIndex");
         int i = (int)lua_tointeger(ls, -1);
@@ -1615,8 +2876,12 @@ private:
         lua_newtable(ls);
         lua_pushinteger(ls, labelIndex);
         lua_setfield(ls, -2, "__labelIndex");
-        blockyPushCFunction(ls, luaLiveLabelConnect);
+        pushSignalMethod(ls, luaLiveLabelConnect, "luaLiveLabelConnect", 0);
         lua_setfield(ls, -2, "Connect");
+        pushSignalMethod(ls, luaLiveLabelConnect, "luaLiveLabelConnect", 1);
+        lua_setfield(ls, -2, "Once");
+        pushSignalMethod(ls, luaLiveLabelConnect, "luaLiveLabelConnect", 2);
+        lua_setfield(ls, -2, "Wait");
 
         auto* rt = fromState(ls);
             if (rt && rt->workspace && labelIndex >= 0
@@ -1668,6 +2933,7 @@ private:
         lua_newtable(ls);
         lua_pushinteger(ls, partIndex);
         lua_setfield(ls, -2, "__partIndex");
+        trackPartTable(ls, -1);
         blockyPushCFunction(ls, luaLivePartSetPosition);
         lua_setfield(ls, -2, "SetPosition");
         blockyPushCFunction(ls, luaLivePartGetPosition);
@@ -1712,13 +2978,14 @@ private:
         lua_setfield(ls, -2, "PivotTo");
         blockyPushCFunction(ls, luaPartGetAttributeChangedSignal);
         lua_setfield(ls, -2, "GetAttributeChangedSignal");
+        blockyPushCFunction(ls, luaLivePartPropSignal);
+        lua_setfield(ls, -2, "GetPropertyChangedSignal");
 
         auto* rt = fromState(ls);
         if (rt && rt->workspace && partIndex >= 0
             && partIndex < (int)rt->workspace->parts.size()) {
-            const auto& p = rt->workspace->parts[partIndex];
-            lua_pushstring(ls, p.name.c_str());
-            lua_setfield(ls, -2, "Name");
+            // Name NON va messo raw: passa da __index/__newindex, cosi' p.Name = x
+            // rinomina davvero la part e accende Changed.
             lua_pushstring(ls, "Part");
             lua_setfield(ls, -2, "ClassName");
         }
@@ -1761,6 +3028,15 @@ private:
 
         WorkspacePart* p = livePart(ls, 1);
         if (!p) return 0;
+        if (std::strcmp(key, "Changed") == 0) { pushPartSignal(ls, partIndexFromSelf(ls, 1), nullptr); return 1; }
+        if (std::strcmp(key, "Destroying") == 0) { pushPartSignal(ls, partIndexFromSelf(ls, 1), "\x01" "destroying"); return 1; }
+        if (std::strcmp(key, "Parent") == 0 && pushPreludeField(ls, "luaParentOfPart")) {
+            lua_pushinteger(ls, partIndexFromSelf(ls, 1));
+            if (lua_pcall(ls, 1, 1, 0) == LUA_OK) {
+                if (!lua_isnil(ls, -1)) return 1;
+            }
+            lua_pop(ls, 1);
+        }
         if (std::strcmp(key, "Position") == 0) {
             pushVec3(ls, p->position.x, p->position.y, p->position.z);
             return 1;
@@ -1771,6 +3047,10 @@ private:
         }
         if (std::strcmp(key, "Orientation") == 0 || std::strcmp(key, "Rotation") == 0) {
             pushVec3(ls, p->rotation.x, p->rotation.y, p->rotation.z);
+            return 1;
+        }
+        if (std::strcmp(key, "CFrame") == 0) {
+            pushCFrameRot(ls, p->position.x, p->position.y, p->position.z, p->rotation.x, p->rotation.y, p->rotation.z);
             return 1;
         }
         if (std::strcmp(key, "Name") == 0) {
@@ -1819,16 +3099,24 @@ private:
             lua_newtable(ls);
             lua_pushinteger(ls, partIndexFromSelf(ls, 1));
             lua_setfield(ls, -2, "__partIndex");
-            blockyPushCFunction(ls, luaPartTouchedConnect);
+            pushSignalMethod(ls, luaPartTouchedConnect, "luaPartTouchedConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaPartTouchedConnect, "luaPartTouchedConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaPartTouchedConnect, "luaPartTouchedConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             return 1;
         }
         if (std::strcmp(key, "ChildAdded") == 0) {
             lua_newtable(ls);
             lua_pushinteger(ls, partIndexFromSelf(ls, 1));
             lua_setfield(ls, -2, "__partIndex");
-            blockyPushCFunction(ls, luaPartChildAddedConnect);
+            pushSignalMethod(ls, luaPartChildAddedConnect, "luaPartChildAddedConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaPartChildAddedConnect, "luaPartChildAddedConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaPartChildAddedConnect, "luaPartChildAddedConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             return 1;
         }
         if (std::strcmp(key, "Velocity") == 0 || std::strcmp(key, "AssemblyLinearVelocity") == 0) {
@@ -1874,6 +3162,17 @@ private:
     }
 
     static int luaLivePartNewIndex(lua_State* ls) {
+        const int idx = partIndexFromSelf(ls, 1);
+        const std::string k = lua_tostring(ls, 2) ? lua_tostring(ls, 2) : "";
+        const int r = luaLivePartNewIndexImpl(ls);
+        if (!k.empty() && idx >= 0) {
+            if (k == "Parent") notifyPartParented(ls, 1, 3);
+            notifyPrelude(ls, "firePartChanged", idx, k.c_str());
+        }
+        return r;
+    }
+
+    static int luaLivePartNewIndexImpl(lua_State* ls) {
         const char* key = lua_tostring(ls, 2);
         WorkspacePart* p = livePart(ls, 1);
         if (!p || !key) return 0;
@@ -1893,6 +3192,23 @@ private:
             glm::vec3 rot = p->rotation;
             readVec3Arg(ls, 3, rot);
             p->rotation = rot;
+            return 0;
+        }
+        if (std::strcmp(key, "CFrame") == 0) {
+            // Posizione dai campi X/Y/Z, rotazione dalla matrice (gradi YXZ come le Part).
+            glm::vec3 pos = p->position;
+            readVec3Arg(ls, 3, pos);
+            p->position = pos;
+            if (pushPreludeField(ls, "cframeToEulerYXZ")) {
+                lua_pushvalue(ls, 3);
+                if (lua_pcall(ls, 1, 3, 0) == LUA_OK) {
+                    if (lua_isnumber(ls, -3))
+                        p->rotation = {(float)lua_tonumber(ls, -3), (float)lua_tonumber(ls, -2), (float)lua_tonumber(ls, -1)};
+                    lua_pop(ls, 3);
+                } else {
+                    lua_pop(ls, 1);
+                }
+            }
             return 0;
         }
         if (partprops::luaSet(ls, key, 3, *p))
@@ -2073,7 +3389,27 @@ private:
         if (idx < 0 || !rt->workspace) return 0;
         if (idx >= (int)rt->workspace->parts.size()) return 0;
         if (!rt->workspace->parts[idx].canDestroy) return 0;
+        notifyPrelude(ls, "partDestroying", idx, nullptr);
+        rt->workspace->parts[idx].destroyPending = true;
         rt->pendingDestroy_.push_back(idx);
+        // Come Roblox: Destroy toglie anche tutti i discendenti.
+        for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
+            if (i == idx || rt->workspace->parts[(size_t)i].destroyPending) continue;
+            int walk = rt->workspace->parts[(size_t)i].parentIndex;
+            for (int guard = 0; walk >= 0 && walk < (int)rt->workspace->parts.size() && guard < 64; ++guard) {
+                if (walk == idx) {
+                    notifyPrelude(ls, "partDestroying", i, nullptr);
+                    rt->workspace->parts[(size_t)i].destroyPending = true;
+                    rt->pendingDestroy_.push_back(i);
+                    break;
+                }
+                walk = rt->workspace->parts[(size_t)walk].parentIndex;
+            }
+        }
+        // Dopo Destroy: p.Parent == nil e niente piu' accessi alla part (gli indici scaleranno).
+        lua_pushstring(ls, "__partIndex");
+        lua_pushinteger(ls, -1);
+        lua_rawset(ls, 1);
         return 0;
     }
 
@@ -2242,8 +3578,12 @@ private:
         lua_newtable(L);
         blockyPushCFunction(L, luaEventCreate);
         lua_setfield(L, -2, "Create");
-        blockyPushCFunction(L, luaEventConnect);
+        pushSignalMethod(L, luaEventConnect, "luaEventConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaEventConnect, "luaEventConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaEventConnect, "luaEventConnect", 2);
+        lua_setfield(L, -2, "Wait");
         blockyPushCFunction(L, luaEventFire);
         lua_setfield(L, -2, "Fire");
         blockyPushCFunction(L, luaEventClear);
@@ -2274,16 +3614,28 @@ private:
         blockyPushCFunction(L, luaHumGetState);
         lua_setfield(L, -2, "GetState");
         lua_newtable(L);
-        blockyPushCFunction(L, luaHumDiedConnect);
+        pushSignalMethod(L, luaHumDiedConnect, "luaHumDiedConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaHumDiedConnect, "luaHumDiedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaHumDiedConnect, "luaHumDiedConnect", 2);
+        lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "Died");
         lua_newtable(L);
-        blockyPushCFunction(L, luaHumHealthChangedConnect);
+        pushSignalMethod(L, luaHumHealthChangedConnect, "luaHumHealthChangedConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaHumHealthChangedConnect, "luaHumHealthChangedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaHumHealthChangedConnect, "luaHumHealthChangedConnect", 2);
+        lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "HealthChanged");
         lua_newtable(L);
-        blockyPushCFunction(L, luaHumStateChangedConnect);
+        pushSignalMethod(L, luaHumStateChangedConnect, "luaHumStateChangedConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaHumStateChangedConnect, "luaHumStateChangedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaHumStateChangedConnect, "luaHumStateChangedConnect", 2);
+        lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "StateChanged");
         // Proprieta' vere (Health/MaxHealth/WalkSpeed/JumpPower) accanto ai
         // vecchi Get*/Set* — stessa convenzione di Part (Part.Position),
@@ -2296,13 +3648,26 @@ private:
         blockyPushCFunction(L, luaHumNewIndex);
         lua_setfield(L, -2, "__newindex");
         lua_setmetatable(L, -2);
+        // Animazioni (Humanoid:LoadAnimation e Humanoid.Animator come Roblox).
+        blockyPushCFunction(L, luaLoadCharAnimation);
+        lua_setfield(L, -2, "LoadAnimation");
+        blockyPushCFunction(L, luaGetPlayingCharTracks);
+        lua_setfield(L, -2, "GetPlayingAnimationTracks");
+        lua_newtable(L);
+        lua_pushstring(L, "Animator");
+        lua_setfield(L, -2, "ClassName");
+        lua_pushstring(L, "Animator");
+        lua_setfield(L, -2, "Name");
+        blockyPushCFunction(L, luaLoadCharAnimation);
+        lua_setfield(L, -2, "LoadAnimation");
+        blockyPushCFunction(L, luaGetPlayingCharTracks);
+        lua_setfield(L, -2, "GetPlayingAnimationTracks");
+        lua_setfield(L, -2, "Animator");
         lua_setglobal(L, "Humanoid");
         CrashHandler::note("registerApi: post Humanoid");
 
         studio_pro_apis::registerApis(L);
         CrashHandler::note("registerApi: post StudioProApis");
-        registerExpandApis(L);
-        CrashHandler::note("registerApi: post ExpandApis");
 
         lua_newtable(L);
         blockyPushCFunction(L, luaBackpackGive);
@@ -2363,6 +3728,10 @@ private:
         lua_setfield(L, -2, "spawn");
         blockyPushCFunction(L, luaTaskDelay);
         lua_setfield(L, -2, "delay");
+        blockyPushCFunction(L, luaTaskDefer);
+        lua_setfield(L, -2, "defer");
+        blockyPushCFunction(L, luaTaskCancel);
+        lua_setfield(L, -2, "cancel");
         lua_setglobal(L, "task");
         blockyPushCFunction(L, luaTaskWait);
         lua_setglobal(L, "wait");
@@ -2379,8 +3748,12 @@ private:
         lua_setfield(L, -2, "IsServer");
         auto pushRunEvent = [&](lua_CFunction connectFn, const char* evName) {
             lua_newtable(L);
-            blockyPushCFunction(L, connectFn);
+            pushSignalMethod(L, connectFn, "connectFn", 0);
             lua_setfield(L, -2, "Connect");
+            pushSignalMethod(L, connectFn, "connectFn", 1);
+            lua_setfield(L, -2, "Once");
+            pushSignalMethod(L, connectFn, "connectFn", 2);
+            lua_setfield(L, -2, "Wait");
             lua_setfield(L, -2, evName);
         };
         pushRunEvent(luaHeartbeatConnect, "Heartbeat");
@@ -2520,8 +3893,12 @@ private:
         lua_setfield(L, -2, "Character");
         // CharacterAdded su LocalPlayer
         lua_newtable(L);
-        blockyPushCFunction(L, luaCharacterAddedConnect);
+        pushSignalMethod(L, luaCharacterAddedConnect, "luaCharacterAddedConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaCharacterAddedConnect, "luaCharacterAddedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaCharacterAddedConnect, "luaCharacterAddedConnect", 2);
+        lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "CharacterAdded");
         // leaderstats — wrapper su Classifica (Monete, Kills, …)
         lua_newtable(L);
@@ -2538,8 +3915,12 @@ private:
         lua_setfield(L, -2, "leaderstats");
         lua_setfield(L, -2, "LocalPlayer");
         lua_newtable(L);
-        blockyPushCFunction(L, luaPlayerAddedConnect);
+        pushSignalMethod(L, luaPlayerAddedConnect, "luaPlayerAddedConnect", 0);
         lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaPlayerAddedConnect, "luaPlayerAddedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaPlayerAddedConnect, "luaPlayerAddedConnect", 2);
+        lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "PlayerAdded");
         blockyPushCFunction(L, luaPlayersGetPlayers);
         lua_setfield(L, -2, "GetPlayers");
@@ -2555,6 +3936,7 @@ private:
 
         blockyPushCFunction(L, luaGetService);
         lua_setfield(L, -2, "GetService");
+        writeGameIdentity(-1);
 
         lua_newtable(L);
         blockyPushCFunction(L, luaCollectionAddTag);
@@ -2577,6 +3959,12 @@ private:
         lua_setfield(L, -2, "StarterPlayer");
 
         lua_setglobal(L, "game");
+
+        // Alla fine: aggiunge a UserInputService, game, workspace... che prima
+        // di qui non esistevano ancora (chiamata piu' in alto non faceva nulla:
+        // InputBegan, PlayerRemoving, Debris:AddItem non c'erano mai).
+        registerExpandApis(L);
+        CrashHandler::note("registerApi: post ExpandApis");
 
         return true;
     }
@@ -2610,7 +3998,16 @@ private:
         return 1;
     }
 
-    static void pushCFrame(lua_State* ls, float x, float y, float z) {
+    static void pushCFrame(lua_State* ls, float x, float y, float z) { pushCFrameRot(ls, x, y, z, 0.f, 0.f, 0.f); }
+
+    /** CFrame vero (prelude) da posizione e gradi YXZ come le Part; senza prelude solo posizione. */
+    static void pushCFrameRot(lua_State* ls, float x, float y, float z, float rxDeg, float ryDeg, float rzDeg) {
+        if (pushPreludeField(ls, "cframe")) {
+            lua_pushnumber(ls, x); lua_pushnumber(ls, y); lua_pushnumber(ls, z);
+            lua_pushnumber(ls, rxDeg); lua_pushnumber(ls, ryDeg); lua_pushnumber(ls, rzDeg);
+            if (lua_pcall(ls, 6, 1, 0) == LUA_OK) return;
+            lua_pop(ls, 1);
+        }
         lua_newtable(ls);
         pushVec3(ls, x, y, z);
         lua_setfield(ls, -2, "Position");
@@ -2742,6 +4139,10 @@ private:
         if (!rt || !rt->workspace)
             return blockyLuaError(ls, "Instance.new: engine non pronto");
 
+        // Argomenti 2 (nome) e 3 (parent) sempre presenti, anche nil: alcuni
+        // rami creano la tabella e POI leggono l'argomento 2, che senza questo
+        // era la tabella appena creata (Instance.new("Configuration") falliva).
+        lua_settop(ls, std::max(lua_gettop(ls), 3));
         const char* className = luaL_optstring(ls, 1, "Part");
         if (std::strcmp(className, "Part") == 0
             || std::strcmp(className, "Ball") == 0
@@ -2767,6 +4168,16 @@ private:
                 p.useStud = false;
             }
             pushPart(ls, p);
+            setPendingPartMeta(ls, -1); // part.CFrame / part.Parent = workspace come Roblox
+            lua_pushstring(ls, className);
+            lua_setfield(ls, -2, "ClassName");
+            return 1;
+        }
+        if (std::strcmp(className, "Animation") == 0) {
+            lua_newtable(ls);
+            lua_pushstring(ls, "Animation"); lua_setfield(ls, -2, "ClassName");
+            lua_pushstring(ls, "Animation"); lua_setfield(ls, -2, "Name");
+            lua_pushstring(ls, ""); lua_setfield(ls, -2, "AnimationId");
             return 1;
         }
         if (std::strcmp(className, "Sound") == 0) {
@@ -2837,14 +4248,22 @@ private:
             lua_setfield(ls, -2, "Name");
             lua_pushinteger(ls, partIdx);
             lua_setfield(ls, -2, "__partIndex");
+            trackPartTable(ls, -1);
             lua_pushnumber(ls, 32.0);
             lua_setfield(ls, -2, "MaxActivationDistance");
-            // MouseClick ≈ Touched Connect sullo stesso part
+            // MouseClick: un clic del mouse sulla part (main.cpp fa il raggio
+            // dal cursore). Prima era lo stesso elenco di Touched: scattava
+            // passandoci sopra, non cliccando.
             lua_newtable(ls);
             lua_pushinteger(ls, partIdx);
             lua_setfield(ls, -2, "__partIndex");
-            blockyPushCFunction(ls, luaPartTouchedConnect);
+            trackPartTable(ls, -1);
+            pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "MouseClick");
             return 1;
         }
@@ -2868,24 +4287,36 @@ private:
             lua_setfield(ls, -2, "_toolName");
             lua_pushstring(ls, "Equipped");
             lua_setfield(ls, -2, "_toolEvent");
-            blockyPushCFunction(ls, luaToolEventConnect);
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Equipped");
             lua_newtable(ls);
             lua_pushstring(ls, it.name.c_str());
             lua_setfield(ls, -2, "_toolName");
             lua_pushstring(ls, "Unequipped");
             lua_setfield(ls, -2, "_toolEvent");
-            blockyPushCFunction(ls, luaToolEventConnect);
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Unequipped");
             lua_newtable(ls);
             lua_pushstring(ls, it.name.c_str());
             lua_setfield(ls, -2, "_toolName");
             lua_pushstring(ls, "Activated");
             lua_setfield(ls, -2, "_toolEvent");
-            blockyPushCFunction(ls, luaToolEventConnect);
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Activated");
             blockyPushCFunction(ls, luaToolActivate);
             lua_setfield(ls, -2, "Activate");
@@ -2962,8 +4393,12 @@ private:
             lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "_eventName");
-            blockyPushCFunction(ls, luaBindableConnect);
+            pushSignalMethod(ls, luaBindableConnect, "luaBindableConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaBindableConnect, "luaBindableConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaBindableConnect, "luaBindableConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Event");
             return 1;
         }
@@ -3016,8 +4451,12 @@ private:
             lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "_promptName");
-            blockyPushCFunction(ls, luaProximityTriggeredConnect);
+            pushSignalMethod(ls, luaProximityTriggeredConnect, "luaProximityTriggeredConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaProximityTriggeredConnect, "luaProximityTriggeredConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaProximityTriggeredConnect, "luaProximityTriggeredConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Triggered");
             return 1;
         }
@@ -4155,6 +5594,14 @@ private:
         LuaRuntime* rt = fromState(ls);
         glm::vec3 o, d;
         fillAimRay(rt, o, d);
+        if (pushPreludeField(ls, "CFrame")) {
+            lua_getfield(ls, -1, "lookAt");
+            lua_remove(ls, -2);
+            pushVec3(ls, o.x, o.y, o.z);
+            pushVec3(ls, o.x + d.x, o.y + d.y, o.z + d.z);
+            if (lua_pcall(ls, 2, 1, 0) == LUA_OK) return 1;
+            lua_pop(ls, 1);
+        }
         lua_newtable(ls);
         pushVec3(ls, o.x, o.y, o.z);
         lua_setfield(ls, -2, "Position");
@@ -5012,14 +6459,14 @@ private:
         if (!rt || !rt->workspace) return 0;
         int selfOff = lua_istable(ls, 1) ? 1 : 0;
         float life = (float)luaL_optnumber(ls, selfOff + 2, 1.0);
-        (void)life;
         if (lua_istable(ls, selfOff + 1)) {
             lua_getfield(ls, selfOff + 1, "_partIdx");
             if (lua_isnumber(ls, -1)) {
                 int idx = (int)lua_tointeger(ls, -1);
-                if (idx >= 0 && idx < (int)rt->workspace->parts.size()) {
-                    rt->workspace->parts.erase(rt->workspace->parts.begin() + idx);
-                }
+                // Prima cancellava subito, ignorando il tempo e senza
+                // aggiornare gli indici: ora come Debris normale.
+                if (idx >= 0 && idx < (int)rt->workspace->parts.size())
+                    scriptControls().debris.push_back({idx, std::max(0.f, life)});
             }
             lua_pop(ls, 1);
         }
@@ -5250,7 +6697,7 @@ private:
         const char* name = luaL_checkstring(ls, lua_istable(ls, 1) ? 2 : 1);
         // Solo figli diretti di Workspace (parentIndex < 0).
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
-            if (rt->workspace->parts[i].parentIndex < 0
+            if (rt->workspace->parts[i].parentIndex < 0 && !rt->workspace->parts[i].destroyPending
                 && rt->workspace->parts[i].name == name) {
                 pushLivePart(ls, i);
                 return 1;
@@ -5271,7 +6718,7 @@ private:
         if (!rt || !rt->workspace) return 1;
         int i = 1;
         for (int pi = 0; pi < (int)rt->workspace->parts.size(); ++pi) {
-            if (rt->workspace->parts[pi].parentIndex >= 0) continue;
+            if (rt->workspace->parts[pi].parentIndex >= 0 || rt->workspace->parts[pi].destroyPending) continue;
             pushLivePart(ls, pi);
             lua_rawseti(ls, -2, i++);
         }
@@ -5424,6 +6871,25 @@ private:
             }
         }
         return 0;
+    }
+
+    static int luaPartClickConnect(lua_State* ls) {
+        int partIdx = -1;
+        if (lua_istable(ls, 1)) {
+            lua_getfield(ls, 1, "__partIndex");
+            partIdx = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+            lua_pop(ls, 1);
+        }
+        int fidx = fnArgIndex(ls);
+        if (!fidx || partIdx < 0) return blockyLuaError(ls, "MouseClick:Connect(fn) su un ClickDetector dentro una Part");
+        auto& list = scriptControls().partClicked[partIdx];
+        if ((int)list.size() >= LuaScriptSecurity::kMaxTouchedPerPart)
+            return blockyLuaError(ls, "MouseClick: troppi listener (max %d)", LuaScriptSecurity::kMaxTouchedPerPart);
+        lua_pushvalue(ls, fidx);
+        int ref = blockyLuaRef(ls);
+        list.push_back(ref);
+        lua_pushinteger(ls, ref);
+        return 1;
     }
 
     static int luaPartTouchedConnect(lua_State* ls) {
@@ -5618,6 +7084,11 @@ private:
         bool isServer = true;
         if (lua_istable(ls, 1)) {
             name = readStringField(ls, 1, "_remoteName", "Remote");
+            // Il nome ATTUALE del remote (puo' essere stato rinominato dopo la creazione).
+            auto* rt = fromState(ls);
+            const int si = intField(ls, 1, "__sharedIndex");
+            if (rt && rt->workspace && si >= 0 && si < (int)rt->workspace->instances.size())
+                name = rt->workspace->instances[(size_t)si].name;
             lua_getfield(ls, 1, "_isServer");
             isServer = lua_toboolean(ls, -1) != 0;
             lua_pop(ls, 1);
@@ -5714,11 +7185,39 @@ private:
         if (!rt || !refs) return blockyLuaError(ls, "%s:Connect: engine non pronto", label);
         int idx = fnArgIndex(ls);
         if (!idx) return blockyLuaError(ls, "%s:Connect richiede una funzione", label);
-        if ((int)refs->size() >= LuaScriptSecurity::kMaxHeartbeat)
+        // Gli slot staccati con Disconnect si riusano: connettere/staccare
+        // in continuazione (equip/unequip) non deve finire i posti.
+        size_t slot = refs->size();
+        int active = 0;
+        for (size_t i = 0; i < refs->size(); ++i) {
+            if ((*refs)[i] == LUA_NOREF) { if (slot == refs->size()) slot = i; }
+            else ++active;
+        }
+        if (active >= LuaScriptSecurity::kMaxHeartbeat)
             return blockyLuaError(ls, "%s: troppi listener (max %d)", label,
                               LuaScriptSecurity::kMaxHeartbeat);
         lua_pushvalue(ls, idx);
-        refs->push_back(blockyLuaRef(ls));
+        const int ref = blockyLuaRef(ls);
+        if (slot < refs->size()) (*refs)[slot] = ref;
+        else refs->push_back(ref);
+        // Restituisce chi lo stacca davvero: Connection:Disconnect lo chiama (LuaPrelude.h).
+        lua_pushlightuserdata(ls, refs);
+        lua_pushinteger(ls, ref);
+        lua_pushcclosure(ls, luaRunEventDrop, "luaRunEventDrop", 2);
+        return 1;
+    }
+
+    static int luaRunEventDrop(lua_State* ls) {
+        auto* refs = static_cast<std::vector<int>*>(lua_tolightuserdata(ls, lua_upvalueindex(1)));
+        const int ref = (int)lua_tointeger(ls, lua_upvalueindex(2));
+        auto* rt = fromState(ls);
+        if (!refs || !rt) return 0;
+        for (int& r : *refs)
+            if (r == ref) {
+                lua_unref(ls, r);
+                r = LUA_NOREF;
+                break;
+            }
         return 0;
     }
     static int luaHeartbeatConnect(lua_State* ls) {
@@ -5779,8 +7278,8 @@ private:
         if (rt && rt->workspace && index >= 0
             && index < (int)rt->workspace->instances.size()) {
             const auto& s = rt->workspace->instances[index];
-            lua_pushstring(ls, s.name.c_str());
-            lua_setfield(ls, -2, "Name");
+            // Name NON come campo: con un campo vero `obj.Name = "x"` cambiava solo
+            // la tabella e il motore restava col nome vecchio. Lo legge __index.
             lua_pushstring(ls, s.className.c_str());
             lua_setfield(ls, -2, "ClassName");
             lua_pushinteger(ls, (int)s.service);
@@ -5795,18 +7294,30 @@ private:
                 lua_newtable(ls);
                 lua_pushstring(ls, s.name.c_str());
                 lua_setfield(ls, -2, "_remoteName");
+                lua_pushinteger(ls, index);
+                lua_setfield(ls, -2, "__sharedIndex");
                 lua_pushboolean(ls, 1);
                 lua_setfield(ls, -2, "_isServer");
-                blockyPushCFunction(ls, luaRemoteConnect);
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 0);
                 lua_setfield(ls, -2, "Connect");
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 1);
+                lua_setfield(ls, -2, "Once");
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 2);
+                lua_setfield(ls, -2, "Wait");
                 lua_setfield(ls, -2, "OnServerEvent");
                 lua_newtable(ls);
                 lua_pushstring(ls, s.name.c_str());
                 lua_setfield(ls, -2, "_remoteName");
+                lua_pushinteger(ls, index);
+                lua_setfield(ls, -2, "__sharedIndex");
                 lua_pushboolean(ls, 0);
                 lua_setfield(ls, -2, "_isServer");
-                blockyPushCFunction(ls, luaRemoteConnect);
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 0);
                 lua_setfield(ls, -2, "Connect");
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 1);
+                lua_setfield(ls, -2, "Once");
+                pushSignalMethod(ls, luaRemoteConnect, "luaRemoteConnect", 2);
+                lua_setfield(ls, -2, "Wait");
                 lua_setfield(ls, -2, "OnClientEvent");
             }
             if (s.className == "RemoteFunction") {
@@ -5815,11 +7326,8 @@ private:
                 blockyPushCFunction(ls, luaRemoteInvokeClient);
                 lua_setfield(ls, -2, "InvokeClient");
             }
-            if (s.className == "ModuleScript" || s.className == "Script"
-                || s.className == "LocalScript") {
-                lua_pushstring(ls, s.source.c_str());
-                lua_setfield(ls, -2, "Source");
-            }
+            // Source NON come campo (come Name): `mod.Source = "..."` deve arrivare
+            // al motore, e lo legge __index.
             if (s.className == "Folder" || s.className == "ModuleScript"
                 || s.className == "RemoteEvent" || s.className == "RemoteFunction"
                 || s.className == "Script" || s.className == "LocalScript") {
@@ -5898,8 +7406,12 @@ private:
             lua_newtable(ls);
             lua_pushinteger(ls, idx);
             lua_setfield(ls, -2, "__sharedIndex");
-            blockyPushCFunction(ls, luaSharedChildAddedConnect);
+            pushSignalMethod(ls, luaSharedChildAddedConnect, "luaSharedChildAddedConnect", 0);
             lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaSharedChildAddedConnect, "luaSharedChildAddedConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaSharedChildAddedConnect, "luaSharedChildAddedConnect", 2);
+            lua_setfield(ls, -2, "Wait");
             return 1;
         }
         // Child by name: rs.MyModule style
@@ -5915,8 +7427,23 @@ private:
         if (!rt || !rt->workspace || idx < 0 || !key) return 0;
         if (idx >= (int)rt->workspace->instances.size()) return 0;
         auto& s = rt->workspace->instances[idx];
-        if (std::strcmp(key, "Name") == 0 && lua_isstring(ls, 3))
+        if (std::strcmp(key, "Name") == 0 && lua_isstring(ls, 3)) {
+            const std::string old = s.name;
             s.name = lua_tostring(ls, 3);
+            // I remote sono indicizzati per nome: chi era gia' collegato segue il nome nuovo.
+            if (old != s.name && (s.className == "RemoteEvent" || s.className == "RemoteFunction")) {
+                auto move = [&](auto& m) {
+                    auto it = m.find(old);
+                    if (it == m.end()) return;
+                    auto v = std::move(it->second);
+                    m.erase(it);
+                    m[s.name] = std::move(v);
+                };
+                move(scriptControls().remoteServer);
+                move(scriptControls().remoteClient);
+                move(scriptControls().remoteInvoke);
+            }
+        }
         else if (std::strcmp(key, "Source") == 0 && lua_isstring(ls, 3))
             s.source = lua_tostring(ls, 3);
         else if (std::strcmp(key, "Parent") == 0) {
@@ -6247,20 +7774,60 @@ private:
         lua_pushthread(ls);
         lua_xmove(ls, rt->L, 1);
         int ref = blockyLuaRef(rt->L);
-        rt->taskWaits_.push_back({ref, sec});
+        rt->taskWaits_.push_back({ref, sec, sec, -1});
         return lua_yield(ls, 0);
+    }
+
+    // ---- task (come Roblox) ----
+    //   task.spawn(f | thread, ...)  parte subito, restituisce il thread
+    //   task.defer(f | thread, ...)  parte al prossimo giro dello scheduler
+    //   task.delay(sec, f, ...)      parte dopo sec secondi
+    //   task.cancel(thread)          non riprende piu' (se stava aspettando)
+    //   task.wait(sec)               restituisce il tempo atteso davvero
+
+    // Primo argomento utile: con task:spawn(...) (due punti per errore) il primo e' la tabella task.
+    static int taskArgBase(lua_State* ls) {
+        return (lua_istable(ls, 1) && lua_gettop(ls) >= 2 && (lua_isfunction(ls, 2) || lua_isthread(ls, 2) || lua_isnumber(ls, 2))) ? 2 : 1;
+    }
+
+    /**
+     * Prepara il thread da far partire: nuovo (con la funzione) o quello
+     * passato. Lascia il thread in cima a rt->L e mette funzione/argomenti
+     * sul suo stack. Ritorna il numero di argomenti, -1 se il valore non va.
+     */
+    static int prepareTaskThread(lua_State* ls, LuaRuntime* rt, int fnIdx, lua_State*& co) {
+        const int top = lua_gettop(ls);
+        if (lua_isthread(ls, fnIdx)) {
+            co = lua_tothread(ls, fnIdx);
+            lua_pushvalue(ls, fnIdx);
+            if (ls != rt->L) lua_xmove(ls, rt->L, 1);
+        } else if (lua_isfunction(ls, fnIdx)) {
+            co = lua_newthread(rt->L);
+            lua_pushvalue(ls, fnIdx);
+            lua_xmove(ls, co, 1);
+        } else {
+            return -1;
+        }
+        const int nargs = top - fnIdx;
+        for (int i = fnIdx + 1; i <= top; ++i) lua_pushvalue(ls, i);
+        if (nargs > 0) lua_xmove(ls, co, nargs);
+        return nargs;
+    }
+
+    /** Il thread in cima a rt->L diventa il valore restituito a chi ha chiamato. */
+    static int returnTaskThread(lua_State* ls, LuaRuntime* rt) {
+        if (ls != rt->L) lua_xmove(rt->L, ls, 1);
+        return 1;
     }
 
     static int luaTaskSpawn(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->L) return 0;
-        int fidx = fnArgIndex(ls);
-        if (!fidx) return blockyLuaError(ls, "task.spawn(function)");
-        lua_State* co = lua_newthread(rt->L);
-        lua_pushvalue(ls, fidx);
-        lua_xmove(ls, co, 1);
+        lua_State* co = nullptr;
+        const int nargs = prepareTaskThread(ls, rt, taskArgBase(ls), co);
+        if (nargs < 0) return blockyLuaError(ls, "task.spawn(funzione o thread, ...)");
         rt->callStart_ = std::chrono::steady_clock::now();
-        int st = lua_resume(co, rt->L, 0);
+        int st = lua_resume(co, rt->L, nargs);
         int nres = lua_gettop(co);
         if (st != LUA_OK && st != LUA_YIELD) {
             const char* err = lua_tostring(co, -1);
@@ -6269,32 +7836,57 @@ private:
             return blockyLuaError(ls, "task.spawn: %s", msg.c_str());
         }
         if (nres > 0) lua_pop(co, nres);
-        lua_pop(rt->L, 1);
-        return 0;
+        return returnTaskThread(ls, rt);
     }
 
-    static int luaTaskDelayWorker(lua_State* ls) {
-        float s = (float)lua_tonumber(ls, lua_upvalueindex(1));
-        blockyPushCFunction(ls, luaTaskWait);
-        lua_pushnumber(ls, s);
-        lua_call(ls, 1, 0);
-        lua_pushvalue(ls, lua_upvalueindex(2));
-        lua_call(ls, 0, 0);
-        return 0;
+    /** Mette in coda un thread nuovo che parte tra `sec` secondi (0 = al prossimo giro). */
+    static int scheduleTask(lua_State* ls, float sec, int fnIdx, const char* usage) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->L) return 0;
+        if ((int)rt->taskWaits_.size() >= LuaScriptSecurity::kMaxTaskWaits)
+            return blockyLuaError(ls, "%s: troppi task in attesa", usage);
+        lua_State* co = nullptr;
+        const int nargs = prepareTaskThread(ls, rt, fnIdx, co);
+        if (nargs < 0) return blockyLuaError(ls, "%s", usage);
+        lua_pushvalue(rt->L, -1);
+        const int ref = blockyLuaRef(rt->L);
+        // Un thread passato a defer che sta gia' aspettando altro riparte col
+        // suo stack; uno nuovo parte con funzione + argomenti.
+        rt->taskWaits_.push_back({ref, sec, sec, lua_status(co) == LUA_YIELD ? 0 : nargs});
+        return returnTaskThread(ls, rt);
     }
 
     static int luaTaskDelay(lua_State* ls) {
-        int base = 1;
-        if (lua_istable(ls, 1) && lua_gettop(ls) >= 3) base = 2;
+        const int base = taskArgBase(ls);
         float sec = (float)luaL_optnumber(ls, base, 0);
-        if (!lua_isfunction(ls, base + 1))
-            return blockyLuaError(ls, "task.delay(sec, function)");
-        lua_pushnumber(ls, sec);
-        lua_pushvalue(ls, base + 1);
-        lua_pushcclosure(ls, luaTaskDelayWorker, "luaTaskDelayWorker", 2);
-        blockyPushCFunction(ls, luaTaskSpawn);
-        lua_insert(ls, -2);
-        lua_call(ls, 1, 0);
+        sec = std::clamp(sec, 0.f, 3600.f);
+        return scheduleTask(ls, sec, base + 1, "task.delay(secondi, funzione, ...)");
+    }
+
+    static int luaTaskDefer(lua_State* ls) {
+        return scheduleTask(ls, 0.f, taskArgBase(ls), "task.defer(funzione o thread, ...)");
+    }
+
+    static int luaTaskCancel(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int base = taskArgBase(ls);
+        if (!rt || !rt->L || !lua_isthread(ls, base)) return blockyLuaError(ls, "task.cancel(thread)");
+        lua_State* target = lua_tothread(ls, base);
+        auto drop = [&](auto& list) {
+            for (size_t i = 0; i < list.size();) {
+                lua_rawgeti(rt->L, LUA_REGISTRYINDEX, list[i].coRef);
+                lua_State* co = lua_tothread(rt->L, -1);
+                lua_pop(rt->L, 1);
+                if (co == target) {
+                    lua_unref(rt->L, list[i].coRef);
+                    list.erase(list.begin() + (long)i);
+                } else {
+                    ++i;
+                }
+            }
+        };
+        drop(rt->taskWaits_);
+        drop(rt->childWaits_);
         return 0;
     }
 

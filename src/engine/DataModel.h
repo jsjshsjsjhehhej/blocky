@@ -36,6 +36,12 @@ struct WorkspacePart {
     std::string name = "Part";
     // ID stabile per replica rete (Host lo assegna). 0 = non ancora in rete.
     uint32_t netId = 0;
+    // Client: part libera che muove il server/host (lui ha la fisica). La
+    // fisica locale la tratta da cinematica e la posizione scivola verso
+    // l'ultima ricevuta (WorldReplication::smoothNetDriven). Non si salva.
+    bool netDriven = false;
+    glm::vec3 netTargetPos{0};
+    glm::vec3 netTargetRot{0};
     glm::vec3 position{0};
     glm::vec3 size{4, 1, 2};
     glm::vec3 rotation{0};
@@ -51,6 +57,9 @@ struct WorkspacePart {
     float lightRange = 20.f;
     float lightBrightness = 1.25f;
     bool canDestroy = true;
+    // Destroy() chiamato: la part sparisce subito dalle ricerche (FindFirstChild,
+    // GetChildren), anche se il motore la toglie davvero a fine frame. Non si salva.
+    bool destroyPending = false;
     float health = 100.f;
     float maxHealth = 100.f;
     bool boomOnTouch = false;

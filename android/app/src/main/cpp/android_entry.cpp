@@ -146,6 +146,9 @@ bool initEgl(android_app* app) {
         LOGE("eglMakeCurrent fallita");
         return false;
     }
+    // La superficie nuova riparte con vsync acceso: si rimette quello che il
+    // motore aveva chiesto (vedi glfwSwapInterval nello shim).
+    eglSwapInterval(g_ctx.display, blkShim().swapInterval);
 
     // Alcuni driver accettano la richiesta di un contesto ES 3 e ne consegnano
     // comunque uno piu vecchio: l unica risposta di cui fidarsi e quella del

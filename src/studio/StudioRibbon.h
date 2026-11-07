@@ -2,6 +2,7 @@
 
 
 #include <imgui.h>
+#include <cstdio>
 #include <cstring>
 
 #include "studio/StudioIcons.h"
@@ -64,6 +65,26 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
     return changed;
 }
 
+/**
+ * Pulsantino solo icona sulla striscia delle schede (in alto a destra), come
+ * la barra di accesso rapido di Roblox Studio: Salva, Annulla, Ripeti.
+ * `x` = dove disegnarlo (coordinate schermo); restituisce il clic.
+ */
+inline bool ribbonQuickButton(const char* id, Icon icon, const char* tooltip, ImVec2 at, bool enabled = true) {
+    const float s = kRibbonTabHeight - 6.f;
+    ImGui::SetCursorScreenPos(at);
+    ImGui::PushID(id);
+    const bool pressed = ImGui::InvisibleButton("##q", {s, s}) && enabled;
+    const bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hovered && enabled) dl->AddRectFilled(at, {at.x + s, at.y + s}, IM_COL32(58, 66, 80, 255), 3.f);
+    drawIcon(dl, {at.x + s * 0.5f, at.y + s * 0.5f}, s * 0.62f, icon,
+             enabled ? IM_COL32(205, 214, 228, 255) : IM_COL32(95, 100, 110, 255));
+    if (hovered && tooltip && tooltip[0]) ImGui::SetTooltip("%s", tooltip);
+    return pressed;
+}
+
 inline void ribbonBeginGroup() {
     ImGui::BeginGroup();
     ImGui::Dummy({0.f, 4.f});
@@ -94,13 +115,16 @@ inline void ribbonEndGroup(const char* label, bool last = false) {
 
 inline bool ribbonBigButton(const char* id, Icon icon, const char* label,
                             bool active = false, bool enabled = true) {
+    // Largo quanto serve al testo: in tedesco o in russo le parole sono lunghe.
+    const float textW = ImGui::CalcTextSize(label).x;
+    const float w = textW + 12.f > kBigButtonW ? textW + 12.f : kBigButtonW;
     ImGui::PushID(id);
     const ImVec2 min = ImGui::GetCursorScreenPos();
-    const bool pressed = ImGui::InvisibleButton("##b", {kBigButtonW, kBigButtonH}) && enabled;
+    const bool pressed = ImGui::InvisibleButton("##b", {w, kBigButtonH}) && enabled;
     const bool hovered = ImGui::IsItemHovered() && enabled;
     ImGui::PopID();
 
-    const ImVec2 max(min.x + kBigButtonW, min.y + kBigButtonH);
+    const ImVec2 max(min.x + w, min.y + kBigButtonH);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     if (active)       dl->AddRectFilled(min, max, IM_COL32(38, 96, 168, 255), 4.f);
@@ -111,24 +135,41 @@ inline bool ribbonBigButton(const char* id, Icon icon, const char* label,
                                          : IM_COL32(205, 214, 228, 255))
                                : IM_COL32(110, 116, 128, 255);
 
-    drawIcon(dl, {min.x + kBigButtonW * 0.5f, min.y + 24.f}, 27.f, icon, tint);
-
-    const float textW = ImGui::CalcTextSize(label).x;
-    dl->AddText({min.x + (kBigButtonW - textW) * 0.5f, min.y + 43.f}, tint, label);
+    drawIcon(dl, {min.x + w * 0.5f, min.y + 24.f}, 27.f, icon, tint);
+    dl->AddText({min.x + (w - textW) * 0.5f, min.y + 43.f}, tint, label);
 
     ImGui::SameLine(0.f, 3.f);
     return pressed && enabled;
 }
 
+/**
+ * Pulsante grande con menu a tendina (freccina in basso a destra): i comandi
+ * rari stanno nel menu invece che in dieci pulsanti. Vero = menu aperto, e
+ * allora chi chiama disegna le voci e poi chiama ImGui::EndPopup().
+ */
+inline bool ribbonMenuButton(const char* id, Icon icon, const char* label, bool active = false) {
+    char popup[96];
+    std::snprintf(popup, sizeof(popup), "%s##menu", id);
+    if (ribbonBigButton(id, icon, label, active)) ImGui::OpenPopup(popup);
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddTriangleFilled({max.x - 11.f, max.y - 9.f}, {max.x - 4.f, max.y - 9.f}, {max.x - 7.5f, max.y - 5.f},
+                          IM_COL32(170, 180, 196, 255));
+    ImGui::SetNextWindowPos({ImGui::GetItemRectMin().x, max.y + 2.f});
+    return ImGui::BeginPopup(popup);
+}
+
 inline bool ribbonSmallButton(const char* id, Icon icon, const char* label,
                               bool active = false, bool enabled = true) {
+    const float textW = ImGui::CalcTextSize(label).x;
+    const float w = textW + 32.f > kSmallButtonW ? textW + 32.f : kSmallButtonW;
     ImGui::PushID(id);
     const ImVec2 min = ImGui::GetCursorScreenPos();
-    const bool pressed = ImGui::InvisibleButton("##s", {kSmallButtonW, kSmallButtonH}) && enabled;
+    const bool pressed = ImGui::InvisibleButton("##s", {w, kSmallButtonH}) && enabled;
     const bool hovered = ImGui::IsItemHovered() && enabled;
     ImGui::PopID();
 
-    const ImVec2 max(min.x + kSmallButtonW, min.y + kSmallButtonH);
+    const ImVec2 max(min.x + w, min.y + kSmallButtonH);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     if (active)       dl->AddRectFilled(min, max, IM_COL32(38, 96, 168, 255), 3.f);

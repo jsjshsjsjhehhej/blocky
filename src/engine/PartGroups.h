@@ -10,6 +10,7 @@
 // non con un indice: cancellare o riordinare le part non rompe i Model.
 
 #include "DataModel.h"
+#include "JsonScan.h"
 
 #ifndef GLM_ENABLE_EXPERIMENTAL
 #define GLM_ENABLE_EXPERIMENTAL
@@ -296,7 +297,7 @@ inline void writeJson(std::ostream& o, const DataModel& dm) {
 inline void readJson(const std::string& json, DataModel& dm) {
     dm.groups.clear();
     dm.nextGroupId = 1;
-    const size_t key = json.find("\"groups\"");
+    const size_t key = blk::jsonscan::topKey(json, "groups");
     if (key != std::string::npos) {
         const size_t open = json.find('[', key);
         const size_t close = open == std::string::npos ? open : json.find(']', open);

@@ -18,6 +18,7 @@
 // testa a platform/TestSessionGuard.h sul perche' un recupero anche per
 // quel caso si e' rivelato inaffidabile).
 
+#include <stdexcept>
 #include "platform/TestSessionGuard.h"
 
 #include <cstdio>
@@ -73,6 +74,21 @@ int main() {
             std::fprintf(stdout, "[3] lavoro normale post-crash: len=%zu\n", s.size());
         }, &reason);
         if (completed) ++ok;
+    }
+
+    // 4) Un'eccezione C++ lanciata e gestita (e' cosi' che Luau fa un errore
+    //    dentro pcall) NON e' un crash: il Test deve continuare.
+    {
+        ++total;
+        std::string reason;
+        bool caught = false;
+        bool completed = TestSessionGuard::runGuarded([&]() {
+            try { throw std::runtime_error("errore Lua finto"); }
+            catch (const std::exception&) { caught = true; }
+        }, &reason);
+        std::fprintf(stdout, "[4] eccezione C++ gestita: completed=%d caught=%d %s\n",
+                     (int)completed, (int)caught, reason.c_str());
+        if (completed && caught) ++ok;
     }
 
     std::fprintf(stdout, "RISULTATO: %d/%d\n", ok, total);

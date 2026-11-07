@@ -1,10 +1,12 @@
 #pragma once
 
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <vector>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -33,6 +35,29 @@ inline const char* levelTag(Level l) {
     }
 }
 
+// Le ultime righe in memoria, per la Developer Console (F9): sul telefono
+// non c'e' un file da aprire. Un solo thread scrive il log (il loop del
+// motore), quindi niente lock.
+struct Entry {
+    Level level;
+    double time;        // secondi dall'avvio
+    std::string tag;
+    std::string text;
+};
+constexpr size_t kRecent = 400;
+inline std::vector<Entry>& recent() { static std::vector<Entry> v; return v; }
+inline size_t& recentHead() { static size_t h = 0; return h; }   // prossima posizione da sovrascrivere
+
+// In ordine dalla piu' vecchia alla piu' nuova.
+inline std::vector<Entry> recentOrdered() {
+    const auto& v = recent();
+    std::vector<Entry> out;
+    out.reserve(v.size());
+    if (v.size() < kRecent) return v;
+    for (size_t k = 0; k < v.size(); ++k) out.push_back(v[(recentHead() + k) % v.size()]);
+    return out;
+}
+
 inline void write(Level lv, const char* tag, const char* fmt, ...) {
     if (lv > levelRef()) return;
 
@@ -47,6 +72,14 @@ inline void write(Level lv, const char* tag, const char* fmt, ...) {
 
     std::fputs(line, stderr);
     if (fileRef()) { std::fputs(line, fileRef()); std::fflush(fileRef()); }
+
+    {
+        static const auto t0 = std::chrono::steady_clock::now();
+        Entry e{lv, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), tag, msg};
+        auto& v = recent();
+        if (v.size() < kRecent) v.push_back(std::move(e));
+        else { v[recentHead()] = std::move(e); recentHead() = (recentHead() + 1) % kRecent; }
+    }
 
 #ifdef __ANDROID__
     // Su Android stdout e stderr non vanno da nessuna parte: l'unico canale

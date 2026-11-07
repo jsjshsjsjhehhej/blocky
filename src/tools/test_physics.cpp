@@ -319,6 +319,25 @@ static void testCost() {
     }
 }
 
+// workspace.Gravity: la fisica la segue davvero (prima era solo un numero).
+static void testGravity() {
+    std::printf("\nGravita' (workspace.Gravity):\n");
+    auto fallAfter = [](float g) {
+        bphys::World phys;
+        phys.configure(profileFor(TargetPlatform::PC));
+        phys.setGravity(g);
+        auto parts = baseplateWorld();
+        parts.push_back(makePart({0, 60, 0}, {2, 2, 2}, false));
+        simulate(phys, parts, 0.5f, 60.f);
+        return 60.f - parts.back().position.y;
+    };
+    const float g0 = fallAfter(0.f), g80 = fallAfter(bphys::kGravity), g160 = fallAfter(160.f);
+    std::printf("  caduta in 0.5 s: gravita' 0 -> %.2f, 80 -> %.2f, 160 -> %.2f stud\n", g0, g80, g160);
+    check(std::fabs(g0) < 0.05f, "gravita' 0: la cassa resta in aria");
+    check(g80 > 8.f && g80 < 12.f, "gravita' 80: circa 10 stud in mezzo secondo (g t^2 / 2)");
+    check(g160 > g80 * 1.8f, "gravita' doppia: cade circa il doppio");
+}
+
 int main() {
     std::printf("=== Blocky Physics (Jolt + LOD) ===\n");
     testEuler();
@@ -328,6 +347,7 @@ int main() {
     testCharacter();
     testGeneratedProps();
     testCost();
+    testGravity();
     std::printf("\n%s (%d falliti)\n", g_fail ? "FALLITO" : "TUTTO OK", g_fail);
     return g_fail ? 1 : 0;
 }

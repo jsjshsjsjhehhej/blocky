@@ -92,7 +92,7 @@ static void drawMoveHandles(GLuint vao, GLuint partP, const glm::mat4& view,
     for (int axis = 0; axis < 3; ++axis) {
         bool hot = (g_moveDragging && g_moveAxis == axis) || (g_gizmoHoverAxis == axis && !g_moveDragging);
         glm::vec3 col = hot ? glm::mix(kGizmoRGB[axis], glm::vec3(1.f), 0.4f) : kGizmoRGB[axis];
-        glm::vec3 dir = partAxisDir(p, axis);
+        glm::vec3 dir = gizmoAxisDir(p, axis);
         float stemLen = len * 0.78f;
         glm::vec3 stemMid = p.position + dir * (stemLen * 0.5f);
         float thick = hot ? 0.16f : 0.12f;
@@ -128,7 +128,7 @@ static void drawRotateHandles(GLuint vao, GLuint partP, const glm::mat4& view,
                 || (g_gizmoHoverAxis == axis);
         glm::vec3 col = hot ? glm::mix(kGizmoRGB[axis], glm::vec3(1.f), 0.45f) : kGizmoRGB[axis];
         float thick = hot ? 0.22f : 0.14f;
-        glm::vec3 axisV = partAxisDir(p, axis);
+        glm::vec3 axisV = gizmoAxisDir(p, axis);
         glm::vec3 ref = (std::fabs(axisV.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
         glm::vec3 u = glm::normalize(glm::cross(axisV, ref));
         glm::vec3 v = glm::normalize(glm::cross(axisV, u));

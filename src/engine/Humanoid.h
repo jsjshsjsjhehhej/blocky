@@ -48,6 +48,9 @@ struct HumanoidPartDef {
     // Posa dei keyframe, sovrapposta a rotX/rotZ invece che al posto loro.
     RigPose anim;
     int parent = -1;
+    // Quanto comandano le animazioni degli script (AnimationTrack) su questa
+    // parte: 0 = camminata/salto procedurali del motore, 1 = solo animazione.
+    float animWeight = 0.f;
 };
 
 // Posa di una parte R6 mentre un item del Backpack e tenuto.

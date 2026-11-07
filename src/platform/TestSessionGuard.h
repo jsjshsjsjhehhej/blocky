@@ -70,6 +70,15 @@ inline LONG WINAPI vehHandler(EXCEPTION_POINTERS* ep) {
     // intercetta qui, va al CrashHandler globale come prima.
     if (code == EXCEPTION_STACK_OVERFLOW)
         return EXCEPTION_CONTINUE_SEARCH;
+    // Solo crash veri (codici di errore 0xC...: accesso a memoria non valida,
+    // divisione per zero, istruzione illegale...). Questo gestore vede OGNI
+    // eccezione prima di chiunque altro, anche quelle che verranno gestite:
+    // le eccezioni C++ (GCC 0x20474343 "CCG ", MSVC 0xE06D7363) sono il modo in
+    // cui Luau fa un normale errore Lua, anche dentro pcall, e i messaggi del
+    // debugger (0x4001000x) non sono errori. Prenderle per crash chiudeva il
+    // Test appena uno script (o il prelude) faceva un pcall che falliva.
+    if ((code & 0xF0000000u) != 0xC0000000u)
+        return EXCEPTION_CONTINUE_SEARCH;
 
     g_lastCode = code;
     std::snprintf(g_lastReason, sizeof(g_lastReason), "%s (0x%08lX)",

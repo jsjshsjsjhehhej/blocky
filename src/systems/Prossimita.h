@@ -103,6 +103,14 @@ public:
 
     const std::vector<Prompt>& all() const { return prompts_; }
 
+    /** La part `removed` e' stata tolta: i prompt dopo di lei scalano, i suoi si staccano. */
+    void onPartErased(int removed) {
+        for (auto& p : prompts_) {
+            if (p.partIndex == removed) p.partIndex = -1;
+            else if (p.partIndex > removed) --p.partIndex;
+        }
+    }
+
     void requestActivate() { hold_ = true; }
 
     std::string takeActivated() {

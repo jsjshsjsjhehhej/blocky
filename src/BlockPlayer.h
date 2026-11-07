@@ -153,6 +153,14 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
         if (rightArmHold != 0.f && p.name == "Right Arm" && !jumping)
             rx = rightArmHold;
 
+        // Un'animazione degli script (AnimationTrack) su questa parte prende il
+        // posto della camminata/salto procedurali, in proporzione al suo peso.
+        if (p.animWeight > 0.f) {
+            const float keep = 1.f - std::min(1.f, p.animWeight);
+            rx *= keep;
+            rz *= keep;
+        }
+
         drawPart(ctx, drawCube, root, c, p.size, p.color, p.pivot, rx, rz, p.anim);
         if (p.name == "Head")
             drawSmileFace(ctx, drawCube, root, headY + bob);

@@ -267,6 +267,19 @@ public:
     const Budget& budget() const { return budget_; }
     const Stats& stats() const { return stats_; }
 
+    // Altri punti attorno a cui la fisica resta sveglia, oltre a quello di
+    // sync(): sul server dedicato ogni giocatore e' un centro di attivita'.
+    void setExtraFocus(const std::vector<glm::vec3>& pts) { extraFocus_ = pts; }
+
+    // workspace.Gravity (stud/s^2): part e personaggio. Default kGravity.
+    void setGravity(float g) {
+        g = std::clamp(g, 0.f, 1000.f);
+        if (g == gravity_) return;
+        gravity_ = g;
+        if (sys_) sys_->SetGravity(JPH::Vec3(0.f, -gravity_, 0.f));
+    }
+    float gravity() const { return gravity_; }
+
     bool simulating(int partIndex) const {
         return partIndex >= 0 && partIndex < (int)slots_.size()
             && slots_[partIndex].tier == Tier::Active;
@@ -615,7 +628,7 @@ public:
         ext.mWalkStairsStepUp = JPH::Vec3(0.f, kStepUp, 0.f);
         ext.mStickToFloorStepDown = JPH::Vec3(0.f, -1.0f, 0.f);
         ext.mWalkStairsStepForwardTest = 0.5f;
-        character_->ExtendedUpdate(dt, JPH::Vec3(0.f, -kGravity, 0.f), ext,
+        character_->ExtendedUpdate(dt, JPH::Vec3(0.f, -gravity_, 0.f), ext,
                                    JPH::BroadPhaseLayerFilter{}, charFilter_,
                                    JPH::BodyFilter{}, JPH::ShapeFilter{}, *temp_);
 
@@ -794,7 +807,7 @@ private:
             const unsigned char* c = (const unsigned char*)d;
             for (size_t i = 0; i < n; ++i) { h ^= c[i]; h *= 16777619u; }
         };
-        uint8_t flags = (uint8_t)((p.anchored ? 1 : 0) | (p.canCollide ? 2 : 0));
+        uint8_t flags = (uint8_t)((p.anchored ? 1 : 0) | (p.canCollide ? 2 : 0) | (p.netDriven ? 4 : 0));
         mix(&flags, 1);
         mix(&p.shape, sizeof(p.shape));
         mix(&p.size, sizeof(p.size));
@@ -859,7 +872,7 @@ private:
         jobs_ = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
         sys_ = std::make_unique<JPH::PhysicsSystem>();
         sys_->Init((JPH::uint)capacity_, 0, pairs, contacts, bpLayers_, objVsBp_, layerPairs_);
-        sys_->SetGravity(JPH::Vec3(0.f, -kGravity, 0.f));
+        sys_->SetGravity(JPH::Vec3(0.f, -gravity_, 0.f));
 
         JPH::PhysicsSettings ps;
         ps.mNumVelocitySteps = budget_.velocitySteps;
@@ -925,14 +938,18 @@ private:
         s.writtenRot = p.rotation;
         s.prevRot = s.curRot = eulerDegToQuat(p.rotation);
 
-        s.dynamic = !p.anchored;
+        // netDriven (client): la muove il server, qui e' cinematica — spinge
+        // le casse locali e ci si sbatte contro, ma non la simula due volte.
+        s.dynamic = !p.anchored && !p.netDriven;
         JPH::ObjectLayer layer = p.anchored ? (p.canCollide ? layers::Static : layers::StaticGhost)
                                : (p.canCollide ? layers::Dynamic : layers::Ghost);
         JPH::RefConst<JPH::Shape> shape = makeShape(p);
         JPH::BodyCreationSettings bcs(shape,
             JPH::RVec3(p.position.x, p.position.y, p.position.z),
             JPH::Quat(s.curRot.x, s.curRot.y, s.curRot.z, s.curRot.w),
-            p.anchored ? JPH::EMotionType::Static : JPH::EMotionType::Dynamic, layer);
+            p.anchored ? JPH::EMotionType::Static
+                       : (p.netDriven ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic),
+            layer);
         bcs.mUserData = index;
         // Anche le ancorate: l'attrito di un contatto combina quello di
         // entrambe le part (un pavimento di ghiaccio fa scivolare le casse).
@@ -1082,6 +1099,10 @@ private:
             if (s.fallen) { ++st.culled; continue; }
             glm::vec3 d = s.curPos - focus;
             float d2 = glm::dot(d, d);
+            for (const glm::vec3& f : extraFocus_) {
+                const glm::vec3 e = s.curPos - f;
+                d2 = std::min(d2, glm::dot(e, e));
+            }
             // Una part vincolata resta nel broadphase anche lontana: il vincolo
             // non puo' puntare a un corpo che non c'e'. Al massimo si congela.
             if (d2 > cull2 && !s.jointed) {
@@ -1171,6 +1192,8 @@ private:
 
     Budget budget_ = budgetFor(QualityProfile{});
     Stats stats_;
+    std::vector<glm::vec3> extraFocus_;
+    float gravity_ = kGravity;
     BpLayers bpLayers_;
     ObjVsBp objVsBp_;
     LayerPairs layerPairs_;

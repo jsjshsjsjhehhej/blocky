@@ -803,6 +803,13 @@ static bool drawExplorerPartRow(int i) {
             g_editingPartScript = false;
         }
     }
+    // Trascinabile su un Model nell'Explorer (StudioGroupsUi.h).
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("BLOCKY_PART", &i, sizeof(int));
+        ImGui::Text("%s%s", p.name.c_str(),
+                    studioMultiContains(i) && g_multiParts.size() > 1 ? " (+ selezione)" : "");
+        ImGui::EndDragDropSource();
+    }
     drawExplorerPartContextMenu(i);
     if (!p.script.empty()) {
         ImGui::Indent();
@@ -822,42 +829,6 @@ static bool drawExplorerPartRow(int i) {
 // UI: Snap / View / Bookmarks / Align ribbon extras
 // ---------------------------------------------------------------------------
 
-static void drawStudioSnapViewRibbonExtras() {
-    if (studio::ribbonBigButton("ins", studio::Icon::Cube, "Insert"))
-        g_showInsertObject = true;
-    if (studio::ribbonBigButton("pnt", studio::Icon::Light, "Paint", g_paintToolActive)) {
-        g_paintToolActive = !g_paintToolActive;
-        if (g_paintToolActive) studioPaintAtSelection();
-    }
-    if (studio::ribbonBigButton("lok", studio::Icon::Anchor, "Lock",
-                                selectedPartLocked())) {
-        studioSetLockedOnSelection(!selectedPartLocked());
-    }
-    if (studio::ribbonBigButton("foc", studio::Icon::Camera, "Focus"))
-        studioFocusSelection();
-    if (studio::ribbonBigButton("iso", studio::Icon::Grid, "Isolate", g_viewIsolate))
-        studioIsolateToggle();
-}
-
-static void drawStudioModelTabExtras() {
-    if (ImGui::BeginMenu("Align")) {
-        if (ImGui::MenuItem("Align X Min")) studioAlignSelection(0, StudioAlignMode::Min);
-        if (ImGui::MenuItem("Align X Center")) studioAlignSelection(0, StudioAlignMode::Center);
-        if (ImGui::MenuItem("Align X Max")) studioAlignSelection(0, StudioAlignMode::Max);
-        if (ImGui::MenuItem("Align Y Min")) studioAlignSelection(1, StudioAlignMode::Min);
-        if (ImGui::MenuItem("Align Y Center")) studioAlignSelection(1, StudioAlignMode::Center);
-        if (ImGui::MenuItem("Align Y Max")) studioAlignSelection(1, StudioAlignMode::Max);
-        if (ImGui::MenuItem("Align Z Min")) studioAlignSelection(2, StudioAlignMode::Min);
-        if (ImGui::MenuItem("Align Z Center")) studioAlignSelection(2, StudioAlignMode::Center);
-        if (ImGui::MenuItem("Align Z Max")) studioAlignSelection(2, StudioAlignMode::Max);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Distribute X")) studioDistributeSelection(0);
-        if (ImGui::MenuItem("Distribute Y")) studioDistributeSelection(1);
-        if (ImGui::MenuItem("Distribute Z")) studioDistributeSelection(2);
-        ImGui::EndMenu();
-    }
-}
-
 static void drawSnapSettingsWindow() {
     if (!g_showSnapSettings) return;
     ImGui::SetNextWindowSize({320.f, 220.f}, ImGuiCond_FirstUseEver);
@@ -869,7 +840,7 @@ static void drawSnapSettingsWindow() {
         ImGui::Separator();
         ImGui::Checkbox("Show grid", &g_studioGridVisible);
         ImGui::SliderFloat("Grid size", &g_studioGridSize, 1.f, 16.f, "%.0f");
-        ImGui::Checkbox("Local space (gizmo)", &g_studioLocalSpace);
+        ImGui::Checkbox("Spazio locale del gizmo (Ctrl+L)", &g_studioLocalSpace);
         ImGui::TextDisabled("Ctrl = no snap · Shift = fine snap");
     }
     ImGui::End();
@@ -1807,7 +1778,7 @@ static void drawStudioHotkeyCheatSheet() {
         "Ctrl+I     Insert Object\n"
         "Ctrl+A     Select all Parts\n"
         "Ctrl+D     Duplicate (offset)\n"
-        "Ctrl+L     Lock / Unlock\n"
+        "Ctrl+L     Spazio Locale / Mondo del gizmo\n"
         "Ctrl+.     Cycle snap move\n"
         "F          Focus selection\n"
         "G          Toggle grid\n"
@@ -1865,35 +1836,6 @@ static void drawCopyPastePropsWindow() {
                     g_propClip.transparency);
     }
     ImGui::End();
-}
-
-static void drawStudioTransformRibbonExtras() {
-    if (ImGui::BeginMenu("Transform")) {
-        if (ImGui::MenuItem("Rotate +90° Y")) studioRotateSelectionY(90.f);
-        if (ImGui::MenuItem("Rotate -90° Y")) studioRotateSelectionY(-90.f);
-        if (ImGui::MenuItem("Rotate +90° X")) studioRotateSelectionAxis(0, 90.f);
-        if (ImGui::MenuItem("Rotate +90° Z")) studioRotateSelectionAxis(2, 90.f);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Mirror X")) studioMirrorSelection(0);
-        if (ImGui::MenuItem("Mirror Y")) studioMirrorSelection(1);
-        if (ImGui::MenuItem("Mirror Z")) studioMirrorSelection(2);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Nudge +X")) studioNudgeSelection(0, 1.f);
-        if (ImGui::MenuItem("Nudge -X")) studioNudgeSelection(0, -1.f);
-        if (ImGui::MenuItem("Nudge +Y")) studioNudgeSelection(1, 1.f);
-        if (ImGui::MenuItem("Nudge -Y")) studioNudgeSelection(1, -1.f);
-        if (ImGui::MenuItem("Nudge +Z")) studioNudgeSelection(2, 1.f);
-        if (ImGui::MenuItem("Nudge -Z")) studioNudgeSelection(2, -1.f);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Uniform scale ×2")) studioUniformScaleSelection(2.f);
-        if (ImGui::MenuItem("Uniform scale ×0.5")) studioUniformScaleSelection(0.5f);
-        if (ImGui::MenuItem("Match size to primary")) studioMatchSizeToPrimary();
-        if (ImGui::MenuItem("Match color to primary")) studioMatchColorToPrimary();
-        ImGui::Separator();
-        if (ImGui::MenuItem("Group as Model")) studioGroupSelectionAsModel();
-        if (ImGui::MenuItem("Type-In…")) g_showTransformTypeIn = true;
-        ImGui::EndMenu();
-    }
 }
 
 // ---------------------------------------------------------------------------

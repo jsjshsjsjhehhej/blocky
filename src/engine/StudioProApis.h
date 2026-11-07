@@ -7,6 +7,7 @@
  */
 
 #include "ScriptControls.h"
+#include "PlaceInstance.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -169,9 +170,21 @@ inline void jsonEncodeValue(lua_State* L, int idx, std::string& o, int depth) {
     o += "}";
 }
 
+// HttpService:JSONEncode(x) (due punti, come Roblox) passa la tabella del
+// servizio come argomento 1: il valore vero e' il 2.
+inline int httpArgIndex(lua_State* L) {
+    if (lua_gettop(L) >= 2 && lua_istable(L, 1)) {
+        lua_getfield(L, 1, "JSONEncode");
+        const bool isSvc = lua_isfunction(L, -1);
+        lua_pop(L, 1);
+        if (isSvc) return 2;
+    }
+    return 1;
+}
+
 inline int luaJsonEncode(lua_State* L) {
     std::string o;
-    jsonEncodeValue(L, 1, o, 0);
+    jsonEncodeValue(L, httpArgIndex(L), o, 0);
     lua_pushlstring(L, o.data(), o.size());
     return 1;
 }
@@ -274,7 +287,7 @@ inline bool jsonParseValue(lua_State* L, const char*& p, int depth) {
 }
 
 inline int luaJsonDecode(lua_State* L) {
-    const char* s = luaL_optstring(L, 1, "");
+    const char* s = luaL_optstring(L, httpArgIndex(L), "");
     const char* p = s ? s : "";
     skipWs(p);
     if (!jsonParseValue(L, p, 0)) {
@@ -284,15 +297,13 @@ inline int luaJsonDecode(lua_State* L) {
 }
 
 inline int luaUrlEncode(lua_State* L) {
-    const char* s = luaL_optstring(L, 1, "");
+    const char* s = luaL_optstring(L, httpArgIndex(L), "");
     std::string o;
     for (const char* p = s; *p; ++p) {
         unsigned char c = (unsigned char)*p;
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
             || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
             o.push_back((char)c);
-        } else if (c == ' ') {
-            o.push_back('+');
         } else {
             char buf[8];
             std::snprintf(buf, sizeof(buf), "%%%02X", c);
@@ -502,32 +513,77 @@ inline int luaContextGetAllBoundActionInfo(lua_State* L) {
 // TeleportService
 // ---------------------------------------------------------------------------
 
+// I teleport vanno in coda (PlaceInstance.h): il motore cerca il server con
+// il Place Launcher e cambia partita solo se lo trova, altrimenti si resta
+// dove si e' e scatta TeleportInitFailed, come in Roblox.
+inline int teleportRequestResult(lua_State* L, const char* api, const char* place, const char* job) {
+    const bool ok = blk::teleport::request(place ? place : "", job ? job : "");
+    std::fprintf(stderr, "[TeleportService] %s place=%s job=%s -> %s\n", api, place ? place : "",
+                 job && job[0] ? job : "(qualsiasi)", ok ? "in coda" : "id non valido");
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+
+// Teleport(placeId, player?, teleportData?)
 inline int luaTeleport(lua_State* L) {
     int base = 1;
     if (lua_istable(L, 1) && !lua_isstring(L, 1)) base = 2;
     const char* place = luaL_optstring(L, base, "");
-    std::fprintf(stderr, "[TeleportService] Teleport locale stub place=%s\n", place);
-    lua_pushboolean(L, place[0] ? 1 : 0);
-    return 1;
+    return teleportRequestResult(L, "Teleport", place, "");
 }
 
+// TeleportAsync(placeId, {players}, options?) — options.ServerInstanceId
+// sceglie il server, come TeleportOptions in Roblox.
 inline int luaTeleportAsync(lua_State* L) {
     int base = 1;
     if (lua_istable(L, 1)) base = 2;
     const char* place = luaL_optstring(L, base, "");
-    std::fprintf(stderr, "[TeleportService] TeleportAsync stub place=%s\n", place);
-    lua_pushboolean(L, place[0] ? 1 : 0);
-    return 1;
+    std::string job;
+    if (lua_istable(L, base + 2)) {
+        lua_getfield(L, base + 2, "ServerInstanceId");
+        if (lua_isstring(L, -1)) job = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+    return teleportRequestResult(L, "TeleportAsync", place, job.c_str());
 }
 
+// TeleportToPlaceInstance(placeId, jobId, player?)
 inline int luaTeleportToPlaceInstance(lua_State* L) {
     int base = 1;
     if (lua_istable(L, 1)) base = 2;
     const char* place = luaL_optstring(L, base, "");
     const char* inst = luaL_optstring(L, base + 1, "");
-    std::fprintf(stderr, "[TeleportService] ToPlaceInstance %s / %s\n", place, inst);
-    lua_pushboolean(L, place[0] ? 1 : 0);
-    return 1;
+    if (!inst[0]) return blockyLuaError(L, "TeleportToPlaceInstance(placeId, jobId): manca il JobId");
+    return teleportRequestResult(L, "TeleportToPlaceInstance", place, inst);
+}
+
+/**
+ * Chiamata dal motore quando un teleport non riesce. Argomenti come in
+ * Roblox: (player, teleportResult, errorMessage, placeId).
+ */
+inline void fireTeleportInitFailed(lua_State* L, const char* reason, const char* message,
+                                   const char* placeId) {
+    if (!L) return;
+    for (int ref : teleportFailedRefs()) {
+        lua_getref(L, ref);
+        if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+        lua_getglobal(L, "game");
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "Players");
+            lua_remove(L, -2);
+            if (lua_istable(L, -1)) {
+                lua_getfield(L, -1, "LocalPlayer");
+                lua_remove(L, -2);
+            }
+        }
+        lua_pushstring(L, reason);
+        lua_pushstring(L, message);
+        lua_pushstring(L, placeId);
+        if (lua_pcall(L, 4, 0, 0) != LUA_OK) {
+            std::fprintf(stderr, "[TeleportService] TeleportInitFailed: %s\n", lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+    }
 }
 
 inline int luaGetLocalPlayerTeleportData(lua_State* L) {
@@ -660,7 +716,27 @@ inline int luaSetAttribute(lua_State* L) {
         val = luaL_optstring(L, keyArg + 1, "");
     }
     if (partIdx < 0) return 0;
-    attributes()[std::to_string(partIdx) + ":" + key] = val;
+    const std::string akey = std::to_string(partIdx) + ":" + key;
+    auto& store = attributes();
+    const auto old = store.find(akey);
+    const bool changed = old == store.end() || old->second != val;
+    store[akey] = val;
+    // GetAttributeChangedSignal: prima i listener si registravano ma non
+    // venivano mai chiamati.
+    if (changed) {
+        const auto it = scriptControls().attributeChanged.find(akey);
+        if (it != scriptControls().attributeChanged.end()) {
+            const std::vector<int> refs = it->second; // copia: un listener puo' aggiungerne altri
+            for (int ref : refs) {
+                if (ref == LUA_NOREF) continue;
+                lua_getref(L, ref);
+                if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                    std::fprintf(stderr, "[Lua] GetAttributeChangedSignal: %s\n", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+                    lua_pop(L, 1);
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -1681,6 +1757,8 @@ inline int luaCatalogSearchParamsNew(lua_State* L) {
 
 inline void registerApis(lua_State* L) {
     sessionStart(); // init clock
+    // I ref erano dello stato Lua precedente: qui ne nasce uno nuovo.
+    teleportFailedRefs().clear();
 
     // HttpService
     lua_newtable(L);

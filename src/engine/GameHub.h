@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DataModel.h"
+#include "JsonScan.h"
 #include "PartConstraints.h"
 #include "PartGroups.h"
 #include "PartProps.h"
@@ -237,7 +238,7 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     if (dm.placeName.empty()) dm.placeName = "Published";
 
     if (lighting) {
-        auto lg = json.find("\"lighting\"");
+        auto lg = blk::jsonscan::topKey(json, "lighting");
         if (lg != std::string::npos) {
             int mode = jsonFindInt(json, "dayNight", lg);
             if (mode < 0 || mode > 2) mode = 0;
@@ -253,7 +254,7 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
-    auto sp = json.find("\"spawn\"");
+    auto sp = blk::jsonscan::topKey(json, "spawn");
     if (sp != std::string::npos) {
         size_t spEnd = json.find('}', sp);
         if (spEnd == std::string::npos) spEnd = sp + 80;
@@ -271,7 +272,7 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     // Formato legacy: la Baseplate non era una Part ma un blob a parte nel
     // JSON. I place vecchi la portano ancora cosi' — la convertiamo in una
     // Part vera al volo, cosi' risulta editabile come tutte le altre.
-    auto bp = json.find("\"baseplate\"");
+    auto bp = blk::jsonscan::topKey(json, "baseplate");
     if (bp != std::string::npos && jsonFindBool(json, "enabled", bp, true)) {
         glm::vec3 bpSize{120, 2, 120}, bpColor{0.55f, 0.56f, 0.55f};
         jsonFindVec3(json, "size", bp, bpSize);
@@ -279,36 +280,27 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         dm.addBaseplate(bpSize, bpColor);
     }
 
-    size_t partsKey = json.find("\"parts\"");
+    size_t partsKey = blk::jsonscan::topKey(json, "parts");
     if (partsKey == std::string::npos) return true;
     size_t arr = json.find('[', partsKey);
     if (arr == std::string::npos) return true;
-    int depth = 0;
-    size_t arrEnd = arr;
-    for (size_t i = arr; i < json.size(); ++i) {
-        if (json[i] == '[') ++depth;
-        else if (json[i] == ']') {
-            --depth;
-            if (depth == 0) { arrEnd = i; break; }
-        }
-    }
+    size_t arrEnd = blk::jsonscan::matchingEnd(json, arr);
+    if (arrEnd == std::string::npos) arrEnd = arr;
 
     size_t pos = arr;
     while ((pos = json.find('{', pos)) != std::string::npos && pos < arrEnd) {
-        size_t end = json.find('}', pos);
+        size_t end = blk::jsonscan::matchingEnd(json, pos);
         if (end == std::string::npos || end > arrEnd) break;
         WorkspacePart p;
-        p.name = jsonFindStr(json, "name", pos);
+        p.name = jsonFindEscapedStr(json, "name", pos);
         if (p.name.empty()) p.name = "Part";
         jsonFindVec3(json, "pos", pos, p.position);
         jsonFindVec3(json, "size", pos, p.size);
         jsonFindVec3(json, "rot", pos, p.rotation);
         jsonFindVec3(json, "color", pos, p.color);
         {
-            // Fine dell'oggetto di questa part = inizio della successiva (lo
-            // script puo' contenere '}', quindi non si usa quella).
-            size_t next = json.find("{\"name\"", pos + 1);
-            partprops::readAll(json, pos, std::min(next, arrEnd), p);
+            // Solo dentro l'oggetto di questa part (end: fuori dalle stringhe).
+            partprops::readAll(json, pos, end, p);
         }
         {
             std::string sh = jsonFindStr(json, "shape", pos);
@@ -354,26 +346,19 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     partgroups::readJson(json, dm);
     partconstraints::readJson(json, dm);
 
-    size_t labKey = json.find("\"labels\"");
+    size_t labKey = blk::jsonscan::topKey(json, "labels");
     if (labKey != std::string::npos) {
         size_t larr = json.find('[', labKey);
         if (larr != std::string::npos) {
-            int depth = 0;
-            size_t larrEnd = larr;
-            for (size_t i = larr; i < json.size(); ++i) {
-                if (json[i] == '[') ++depth;
-                else if (json[i] == ']') {
-                    --depth;
-                    if (depth == 0) { larrEnd = i; break; }
-                }
-            }
+            size_t larrEnd = blk::jsonscan::matchingEnd(json, larr);
+            if (larrEnd == std::string::npos) larrEnd = larr;
             size_t lpos = larr;
             while ((lpos = json.find('{', lpos)) != std::string::npos && lpos < larrEnd) {
-                size_t end = json.find('}', lpos);
+                size_t end = blk::jsonscan::matchingEnd(json, lpos);
                 if (end == std::string::npos || end > larrEnd) break;
                 WorkspaceLabel lab;
-                lab.name = jsonFindStr(json, "name", lpos);
-                lab.text = jsonFindStr(json, "text", lpos);
+                lab.name = jsonFindEscapedStr(json, "name", lpos);
+                lab.text = jsonFindEscapedStr(json, "text", lpos);
                 lab.className = jsonFindStr(json, "className", lpos);
                 if (lab.name.empty()) lab.name = "TextLabel";
                 if (lab.text.empty()) lab.text = lab.name;
@@ -411,26 +396,19 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
-    size_t instKey = json.find("\"instances\"");
+    size_t instKey = blk::jsonscan::topKey(json, "instances");
     if (instKey != std::string::npos) {
         size_t iarr = json.find('[', instKey);
         if (iarr != std::string::npos) {
-            int depth = 0;
-            size_t iarrEnd = iarr;
-            for (size_t i = iarr; i < json.size(); ++i) {
-                if (json[i] == '[') ++depth;
-                else if (json[i] == ']') {
-                    --depth;
-                    if (depth == 0) { iarrEnd = i; break; }
-                }
-            }
+            size_t iarrEnd = blk::jsonscan::matchingEnd(json, iarr);
+            if (iarrEnd == std::string::npos) iarrEnd = iarr;
             size_t ipos = iarr;
             while ((ipos = json.find('{', ipos)) != std::string::npos && ipos < iarrEnd) {
-                size_t end = json.find('}', ipos);
+                size_t end = blk::jsonscan::matchingEnd(json, ipos);
                 if (end == std::string::npos || end > iarrEnd) break;
                 SharedInstance s;
-                s.name = jsonFindStr(json, "name", ipos);
-                s.className = jsonFindStr(json, "className", ipos);
+                s.name = jsonFindEscapedStr(json, "name", ipos);
+                s.className = jsonFindEscapedStr(json, "className", ipos);
                 if (s.name.empty()) s.name = "Instance";
                 if (s.className.empty()) s.className = "Folder";
                 int svc = jsonFindInt(json, "service", ipos);
@@ -450,19 +428,12 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
-    size_t bpKey = json.find("\"backpack\"");
+    size_t bpKey = blk::jsonscan::topKey(json, "backpack");
     if (bpKey != std::string::npos) {
         size_t barr = json.find('[', bpKey);
         if (barr != std::string::npos) {
-            int depth = 0;
-            size_t barrEnd = barr;
-            for (size_t i = barr; i < json.size(); ++i) {
-                if (json[i] == '[') ++depth;
-                else if (json[i] == ']') {
-                    --depth;
-                    if (depth == 0) { barrEnd = i; break; }
-                }
-            }
+            size_t barrEnd = blk::jsonscan::matchingEnd(json, barr);
+            if (barrEnd == std::string::npos) barrEnd = barr;
             size_t bpos = barr;
             while ((bpos = json.find('{', bpos)) != std::string::npos && bpos < barrEnd) {
                 // Depth sulle graffe: holdPose ha oggetti annidati, un
@@ -542,22 +513,15 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     if (dm.equippedBackpack < -1 || dm.equippedBackpack >= DataModel::kHotbarSlots)
         dm.equippedBackpack = -1;
 
-    size_t frKey = json.find("\"friends\"");
+    size_t frKey = blk::jsonscan::topKey(json, "friends");
     if (frKey != std::string::npos) {
         size_t farr = json.find('[', frKey);
         if (farr != std::string::npos) {
-            int depth = 0;
-            size_t farrEnd = farr;
-            for (size_t i = farr; i < json.size(); ++i) {
-                if (json[i] == '[') ++depth;
-                else if (json[i] == ']') {
-                    --depth;
-                    if (depth == 0) { farrEnd = i; break; }
-                }
-            }
+            size_t farrEnd = blk::jsonscan::matchingEnd(json, farr);
+            if (farrEnd == std::string::npos) farrEnd = farr;
             size_t fpos = farr;
             while ((fpos = json.find('{', fpos)) != std::string::npos && fpos < farrEnd) {
-                size_t end = json.find('}', fpos);
+                size_t end = blk::jsonscan::matchingEnd(json, fpos);
                 if (end == std::string::npos || end > farrEnd) break;
                 WorkspaceFriend fr;
                 fr.name = jsonFindStr(json, "name", fpos);
