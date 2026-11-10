@@ -3,7 +3,7 @@ BLOCKY LUA — Prompt per Copilot / AI  (+ esempi corretti)
 ================================================================================
 Usa QUESTO file come contesto. Non inventare API Roblox (TweenService, ScreenGui,
 TextLabel UI, DataStore, ecc. se non sono elencate QUI).
-Aggiornato: 2026-07-25 (Animator SetJumpAnim + BlockyPlayerAnim)
+Aggiornato: 2026-11-10 (AntiLag: SetMode, SetTargetFps, GetLevel, GetStats)
 ================================================================================
 
 Blocky Lua = Lua 5.4 + API stile Roblox (Blocky Game Engine).
@@ -170,6 +170,24 @@ end)
 Humanoid.SetWalkSpeed(24)
 Humanoid.SetJumpPower(60)
 Humanoid.SetJumpEnabled(true)
+
+================================================================================
+ANTILAG
+================================================================================
+local lag = game:GetService("AntiLag")   -- anche "AntiLagService"
+
+lag:SetMode("Auto")    -- "Off" | "Auto" | "Strong"
+lag:SetTargetFps(60)
+lag:GetMode()          → "Off" | "Auto" | "Strong"
+lag:GetLevel()         → 0..7  (0 = non sta tagliando)
+lag:GetStats()         → Level, Mode, Reason, AverageMs, P95Ms,
+                         RenderScale, MaxParts, PhysicsHz,
+                         LuaBudgetUs, HeartbeatStride, MaxParticles
+
+Auto misura il frame vero (prima del clamp a 50 ms) e abbassa solo quello
+che serve: risoluzione, part, fisica, Heartbeat, particelle, luci, ombre.
+Non alza mai la qualita' scelta dal menu. Strong parte gia' un gradino sotto
+se la media e' vicina al target. Off rimette i tetti del menu.
 
 ================================================================================
 ERRORI TIPICI

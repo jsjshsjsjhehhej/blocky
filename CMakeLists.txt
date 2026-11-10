@@ -671,6 +671,9 @@ endif()
 add_executable(test_luau src/tools/test_luau.cpp)
 target_link_libraries(test_luau PRIVATE Luau.VM Luau.Compiler)
 
+add_executable(test_antilag src/tools/test_antilag.cpp)
+target_include_directories(test_antilag PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 # Riproduzione isolata di un blocco (non crash) segnalato dall'utente con lo
 # script "Atmosfera dark horror" in stile Roblox. Stessa ricetta di
 # dipendenze di test_lua qui sopra.

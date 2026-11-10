@@ -243,6 +243,18 @@ void main(){
         }
     }
 
+    // Tiene le particelle con piu' vita rimasta. Le altre hanno gia' fatto
+    // il loro effetto: buttarle qui costa meno che disegnarle.
+    void trimTo(int keep) {
+        if (keep < 0) keep = 0;
+        int n = (int)particles.size();
+        if (n <= keep) return;
+        int drop = n - keep;
+        std::nth_element(particles.begin(), particles.begin() + drop, particles.end(),
+            [](const Particle& a, const Particle& b) { return a.life < b.life; });
+        particles.erase(particles.begin(), particles.begin() + drop);
+    }
+
     void update(float dt) {
         if (dt <= 0.f) return;
         for (auto& p : particles) {

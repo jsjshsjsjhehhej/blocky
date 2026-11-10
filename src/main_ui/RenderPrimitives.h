@@ -39,7 +39,12 @@ static void collectDynamicLights() {
     struct Cand { glm::vec3 pos, col; float range, d2; };
     static std::vector<Cand> cands;
     cands.clear();
-    const float maxD = g_engine.quality.maxDrawDistance;
+    float maxD = g_engine.quality.maxDrawDistance;
+    int lightCap = kMaxDynLights;
+    if (antilag::engine().enabled()) {
+        maxD = std::min(maxD, antilag::engine().plan().maxDrawDistance);
+        lightCap = std::min(lightCap, std::max(1, antilag::engine().plan().maxLights));
+    }
     for (const auto& p : g_world.parts) {
         const bool neon = p.isNeon();
         if (!p.pointLight && !neon) continue;
@@ -67,10 +72,10 @@ static void collectDynamicLights() {
         if (c.d2 > reach * reach) continue;
         cands.push_back(c);
     }
-    if ((int)cands.size() > kMaxDynLights) {
-        std::nth_element(cands.begin(), cands.begin() + kMaxDynLights, cands.end(),
+    if ((int)cands.size() > lightCap) {
+        std::nth_element(cands.begin(), cands.begin() + lightCap, cands.end(),
             [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
-        cands.resize(kMaxDynLights);
+        cands.resize(lightCap);
     }
     for (const auto& c : cands) {
         DynLight& L = g_dynLights[g_dynLightCount++];
@@ -83,7 +88,9 @@ static void collectDynamicLights() {
 static void collectShadowOccluders() {
     g_occCount = 0;
     g_bodyOccCount = 0;
-    const int budget = std::min(kMaxShadowBoxes, g_engine.quality.shadowOccluders);
+    int budget = std::min(kMaxShadowBoxes, g_engine.quality.shadowOccluders);
+    if (antilag::engine().enabled())
+        budget = std::min(budget, antilag::engine().plan().shadowOccluders);
     if (budget <= 0) return;
     if (g_dynLightCount == 0 && !g_lighting.globalShadows) return;
 

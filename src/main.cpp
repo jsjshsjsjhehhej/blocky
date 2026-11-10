@@ -396,9 +396,39 @@ static std::string g_luaRunMsg;
 static glm::mat4 g_lastView{1.f}, g_lastProj{1.f};
 static EngineConfig g_engine = EngineConfig::createDefault();
 
+#include "engine/antilag/AntiLag.h"
+
 /** Aggiorna la risoluzione interna dalla qualita scelta. */
+static void antilagSyncBase() {
+    antilag::BaseQuality b;
+    b.renderScale = g_engine.quality.renderScale;
+    b.maxDrawDistance = g_engine.quality.maxDrawDistance;
+    b.maxVisibleParts = g_engine.quality.maxVisibleParts;
+    b.physicsHz = g_engine.quality.physicsHz;
+    b.luaBudgetUs = g_engine.quality.luaBudgetUs;
+    b.maxParticles = 64;
+    b.maxLights = 8;
+    b.shadowOccluders = g_engine.quality.shadowOccluders;
+    b.studTextures = g_engine.quality.studTextures;
+    // Il composite del bloom gira sempre: quality.postFx non e' collegato
+    // al renderer. Il governor lo spegne solo quando il frame non ci sta.
+    b.postFx = true;
+    antilag::engine().setBase(b);
+    // Solo quando cambia il preset. Altrimenti un game:GetService("AntiLag"):SetTargetFps
+    // verrebbe cancellato al frame dopo.
+    static int appliedFps = -1;
+    if (g_engine.quality.targetFps != appliedFps) {
+        appliedFps = g_engine.quality.targetFps;
+        float fps = appliedFps > 0 ? (float)appliedFps : 60.f;
+        antilag::engine().setTargetFps(fps);
+    }
+}
+
 static void updateRenderResolution() {
-    const float s = std::clamp(g_engine.quality.renderScale, 0.5f, 1.f);
+    float s = g_engine.quality.renderScale;
+    if (antilag::engine().enabled())
+        s = std::min(s, antilag::engine().plan().renderScale);
+    s = std::clamp(s, 0.5f, 1.f);
     g_renderW = std::max(64, (int)(g_w * s));
     g_renderH = std::max(64, (int)(g_h * s));
 }
@@ -419,6 +449,23 @@ struct DynLight {
 static DynLight g_dynLights[kMaxDynLights];
 static int g_dynLightCount = 0;
 static glm::vec3 g_renderCamPos{0, 8, 20};
+
+static void antilagObserve(float rawDt) {
+    antilagSyncBase();
+    antilag::Camera cam;
+    cam.eye = {g_renderCamPos.x, g_renderCamPos.y, g_renderCamPos.z};
+    glm::vec3 f = g_cam.front();
+    cam.forward = {f.x, f.y, f.z};
+    cam.velocity = {g_moveVel.x, g_moveVel.y, g_moveVel.z};
+    cam.fovyRad = glm::radians(g_cam.fov);
+    cam.viewportH = (float)std::max(g_renderH, 1);
+    antilag::engine().setCamera(cam);
+    float phaseMs[(int)antilag::Phase::Count];
+    for (int i = 0; i < (int)antilag::Phase::Count; ++i)
+        phaseMs[i] = plat::prof::state().phase[i].lastMs;
+    antilag::engine().notePhases(phaseMs, (int)antilag::Phase::Count);
+    antilag::engine().observe(rawDt);
+}
 
 static constexpr int kMaxShadowBoxes = 8;
 static glm::vec3 g_occCenter[kMaxShadowBoxes];
@@ -500,7 +547,12 @@ static void blockyStepFrame(GLFWwindow* win) {
         processPendingModelImport();
 
         float now = (float)glfwGetTime();
-        float dt = std::min(now - lastT, 0.05f);
+        float rawDt = now - lastT;
+        if (rawDt < 0.f) rawDt = 0.f;
+        // Il clamp a 50 ms protegge la fisica. L'anti-lag deve vedere lo
+        // scatto vero, prima che venga nascosto.
+        antilagObserve(rawDt);
+        float dt = std::min(rawDt, 0.05f);
         lastT = now;
         fpsAcc += dt; frames++;
         if (fpsAcc >= 0.5f) {
@@ -1018,6 +1070,14 @@ static void blockyStepFrame(GLFWwindow* win) {
                 PROF_SCOPE(plat::prof::Phase::Physics);
                 static float physAcc = 0.f;
                 float hz = std::max(20.f, g_engine.quality.physicsHz);
+                int stepCap = 8;
+                if (antilag::engine().enabled()) {
+                    const antilag::FramePlan& ap = antilag::engine().plan();
+                    hz = std::min(hz, ap.physicsHz);
+                    stepCap = antilag::engine().sim(dt, (int)g_particles.particles.size(),
+                                                    (int)g_net.remotes.size()).physicsSteps;
+                    if (stepCap < 1) stepCap = 1;
+                }
                 float step = 1.f / hz;
                 const bool inPlay = g_screen == AppScreen::Playing ||
                     (g_screen == AppScreen::Studio && g_mode == CamMode::Play);
@@ -1029,7 +1089,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                 }
                 physAcc += dt;
                 int guard = 0;
-                while (physAcc >= step && guard++ < 8) {
+                while (physAcc >= step && guard++ < stepCap) {
                     if (inPlay) {
                         stepPlayerPhysicsWithCollision(step);
                         g_bphys.step(step);
@@ -1055,8 +1115,25 @@ static void blockyStepFrame(GLFWwindow* win) {
                 }
                 // Anche "sono in aria": senza, gli altri ci vedono sempre a terra
                 // e il salto non compare mai sui loro schermi.
-                g_net.sendLocalState(dt, g_playerPos, g_playerYaw, g_walking,
-                                     !g_player.humanoid.grounded);
+                // In handshake si manda ogni frame: il server deve vederti.
+                // Da connessi, il piano puo' diradare gli invii.
+                static float netAcc = 0.f;
+                bool sendNow = true;
+                float sendDt = dt;
+                if (g_net.connected && antilag::engine().enabled()) {
+                    float iv = antilag::engine().sim(dt, 0, (int)g_net.remotes.size()).netInterval;
+                    if (iv > 0.f) {
+                        netAcc += dt;
+                        if (netAcc < iv) sendNow = false;
+                        else { sendDt = netAcc; netAcc = 0.f; }
+                    } else {
+                        netAcc = 0.f;
+                    }
+                }
+                if (sendNow) {
+                    g_net.sendLocalState(sendDt, g_playerPos, g_playerYaw, g_walking,
+                                         !g_player.humanoid.grounded);
+                }
                 g_net.updateDisplay(dt);
                 // Chat arrivata dalla rete: finisce nello stesso elenco di quella
                 // locale, cosi la finestra non deve sapere da dove viene.
@@ -1123,6 +1200,13 @@ static void blockyStepFrame(GLFWwindow* win) {
             if (g_screen == AppScreen::Playing
                 || (g_screen == AppScreen::Studio && g_studioTesting)) {
                 g_lua.budgetUs = g_engine.quality.luaBudgetUs;
+                if (antilag::engine().enabled()) {
+                    g_lua.softBudgetUs = antilag::engine().plan().luaBudgetUs;
+                    g_lua.heartbeatStride = antilag::engine().plan().heartbeatStride;
+                } else {
+                    g_lua.softBudgetUs = 0;
+                    g_lua.heartbeatStride = 1;
+                }
                 std::string crashReason;
                 bool okFrame = TestSessionGuard::runGuarded([&]() {
                     { PROF_SCOPE(plat::prof::Phase::Scripts); g_lua.fireHeartbeat(dt); }
@@ -1156,6 +1240,8 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
 
         g_particles.update(dt);
+        if (antilag::engine().enabled())
+            g_particles.trimTo(antilag::engine().plan().maxParticles);
 
         const bool worldScreen = (g_screen != AppScreen::MainMenu
                                && g_screen != AppScreen::AvatarPublisher);
@@ -1506,7 +1592,10 @@ static void blockyStepFrame(GLFWwindow* win) {
 
         plat::prof::end(plat::prof::Phase::World);
         { PROF_SCOPE(plat::prof::Phase::PostFx);
-        g_bloom.endSceneAndComposite(g_w, g_h, 1.6f, 0.95f, 1.5f, g_upscaleSharpen); }
+        float bloomI = 1.6f;
+        if (antilag::engine().enabled() && !antilag::engine().plan().postFx)
+            bloomI = 0.f;
+        g_bloom.endSceneAndComposite(g_w, g_h, bloomI, 0.95f, 1.5f, g_upscaleSharpen); }
 
         { PROF_SCOPE(plat::prof::Phase::Ui);
         ImGui::Render();

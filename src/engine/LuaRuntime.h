@@ -18,6 +18,7 @@
 #include "AnimLibrary.h"
 #include "LanNet.h"
 #include "LuaScriptSecurity.h"
+#include "antilag/AntiLag.h"
 #include "platform/CrashHandler.h"
 
 #include <GLFW/glfw3.h>
@@ -82,6 +83,11 @@ public:
         scriptSetChanged = true;
     }
     int budgetUs = 4000;
+    // Tetto morbido dell'anti-lag. Se e' > 0, i Heartbeat che non ci stanno
+    // in questo frame saltano il turno e restano collegati. budgetUs resta
+    // il tetto duro: superato quello, si staccano davvero (script in loop).
+    int softBudgetUs = 0;
+    int heartbeatStride = 1;
     bool budgetExceeded = false;
     bool requireSealedScripts = false;
     // Quando e' iniziata la chiamata Lua in corso — impostato all'inizio
@@ -502,9 +508,26 @@ public:
         if (!heartbeatRefs_.empty()) {
         budgetExceeded = false;
         auto t0 = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < heartbeatRefs_.size(); ++i) {
-            int ref = heartbeatRefs_[i];
-            if (ref == LUA_NOREF) continue;
+        int picked[64];
+        int nPick = 0;
+        const bool paced = softBudgetUs > 0 && antilag::engine().enabled();
+        if (paced) {
+            antilag::ScriptRoster& roster = antilag::engine().scripts();
+            roster.beginSweep();
+            for (int ref : heartbeatRefs_) {
+                if (ref != LUA_NOREF) roster.consider(ref);
+            }
+            roster.endSweep();
+            int stride = heartbeatStride < 1 ? 1 : heartbeatStride;
+            nPick = roster.select(stride, softBudgetUs, picked, 64);
+        } else {
+            for (int ref : heartbeatRefs_) {
+                if (ref == LUA_NOREF || nPick >= 64) continue;
+                picked[nPick++] = ref;
+            }
+        }
+        for (int p = 0; p < nPick; ++p) {
+            int ref = picked[p];
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) {
                 lua_pop(L, 1);
@@ -518,6 +541,11 @@ public:
                 lua_pop(L, 1);
                 if (lastError.find("budget") != std::string::npos)
                     budgetExceeded = true;
+            }
+            if (paced) {
+                auto callUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - callStart_).count();
+                antilag::engine().scripts().noteCost(ref, (float)callUs);
             }
         }
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1742,6 +1770,10 @@ private:
         if (count > LuaScriptSecurity::kMaxParticles)
             count = LuaScriptSecurity::kMaxParticles;
         if (preset == ParticlePreset::Coins && count > 8) count = 8;
+        if (antilag::engine().enabled() && count > 0) {
+            count = antilag::particleEmitsFor(
+                antilag::engine().plan(), count, (int)rt->particles->particles.size());
+        }
         rt->particles->emitPreset(preset, pos, count, col);
         return 0;
     }
@@ -2526,6 +2558,55 @@ private:
         return 1;
     }
 
+    static int luaAntiLagSetMode(lua_State* ls) {
+        const int arg = lua_istable(ls, 1) ? 2 : 1;
+        const char* mode = luaL_checkstring(ls, arg);
+        antilag::engine().setModeName(mode);
+        lua_pushstring(ls, antilag::modeName(antilag::engine().mode()));
+        return 1;
+    }
+    static int luaAntiLagSetTargetFps(lua_State* ls) {
+        const int arg = lua_istable(ls, 1) ? 2 : 1;
+        antilag::engine().setTargetFps((float)luaL_checknumber(ls, arg));
+        lua_pushnumber(ls, antilag::engine().targetFps());
+        return 1;
+    }
+    static int luaAntiLagGetLevel(lua_State* ls) {
+        lua_pushinteger(ls, antilag::engine().level());
+        return 1;
+    }
+    static int luaAntiLagGetMode(lua_State* ls) {
+        lua_pushstring(ls, antilag::modeName(antilag::engine().mode()));
+        return 1;
+    }
+    static int luaAntiLagGetStats(lua_State* ls) {
+        const antilag::FramePlan& p = antilag::engine().plan();
+        lua_newtable(ls);
+        lua_pushinteger(ls, p.level);
+        lua_setfield(ls, -2, "Level");
+        lua_pushstring(ls, antilag::modeName(antilag::engine().mode()));
+        lua_setfield(ls, -2, "Mode");
+        lua_pushstring(ls, antilag::reasonName(p.reason));
+        lua_setfield(ls, -2, "Reason");
+        lua_pushnumber(ls, p.averageMs);
+        lua_setfield(ls, -2, "AverageMs");
+        lua_pushnumber(ls, p.p95Ms);
+        lua_setfield(ls, -2, "P95Ms");
+        lua_pushnumber(ls, p.renderScale);
+        lua_setfield(ls, -2, "RenderScale");
+        lua_pushinteger(ls, p.maxVisibleParts);
+        lua_setfield(ls, -2, "MaxParts");
+        lua_pushnumber(ls, p.physicsHz);
+        lua_setfield(ls, -2, "PhysicsHz");
+        lua_pushinteger(ls, p.luaBudgetUs);
+        lua_setfield(ls, -2, "LuaBudgetUs");
+        lua_pushinteger(ls, p.heartbeatStride);
+        lua_setfield(ls, -2, "HeartbeatStride");
+        lua_pushinteger(ls, p.maxParticles);
+        lua_setfield(ls, -2, "MaxParticles");
+        return 1;
+    }
+
     static int luaGetService(lua_State* ls) {
         const char* name = luaL_checkstring(ls, 2);
         if (lua_isstring(ls, 1) && !lua_istable(ls, 1))
@@ -2552,6 +2633,20 @@ private:
         if (n == "startergui") return fromGame("StarterGui");
         if (n == "userinputservice") return fromGame("UserInputService");
         if (n == "datastoreservice") return fromGame("DataStoreService");
+        if (n == "antilag" || n == "antilagservice") {
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaAntiLagSetMode);
+            lua_setfield(ls, -2, "SetMode");
+            blockyPushCFunction(ls, luaAntiLagSetTargetFps);
+            lua_setfield(ls, -2, "SetTargetFps");
+            blockyPushCFunction(ls, luaAntiLagGetLevel);
+            lua_setfield(ls, -2, "GetLevel");
+            blockyPushCFunction(ls, luaAntiLagGetMode);
+            lua_setfield(ls, -2, "GetMode");
+            blockyPushCFunction(ls, luaAntiLagGetStats);
+            lua_setfield(ls, -2, "GetStats");
+            return 1;
+        }
         if (n == "marketplaceservice" || n == "teleportservice" || n == "httpservice"
             || n == "contextactionservice" || n == "collectionservice"
             || n == "pathfindingservice" || n == "physicsservice"

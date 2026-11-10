@@ -545,7 +545,8 @@
         <h3>Game / servizi</h3>
         <ul class="api-list">
           <li><code>game.RunService.Heartbeat:Connect(fn)</code><span class="hint">fn(dt) ogni frame</span></li>
-          <li><code>game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")</code></li>
+          <li><code>game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace"|"AntiLag")</code></li>
+          <li><code>AntiLag:SetMode("Auto"|"Off"|"Strong")</code> · <code>SetTargetFps(n)</code> · <code>GetLevel()</code> · <code>GetStats()</code></li>
           <li><code>game.SoundService:Play(path [, looped])</code> · <code>:Stop()</code></li>
           <li><code>game.Animator:Play("Wave"|"Walk"|"Dance"|"Idle"|id)</code></li>
           <li><code>game.Animator:SetWalkAnim(id)</code> · <code>SetJumpAnim(id)</code> · <code>Stop()</code> · <code>List()</code></li>

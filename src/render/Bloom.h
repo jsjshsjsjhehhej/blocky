@@ -297,6 +297,36 @@ void main(){
             glViewport(0, 0, screenW, screenH);
             return;
         }
+        // Anti-lag: intensity 0 vuol dire "niente alone". Si copia la scena
+        // sullo schermo e si saltano i 6 passaggi di blur, che sono il costo
+        // vero del post. Il framebuffer della scena va comunque risolto,
+        // altrimenti il frame resta nel target offscreen.
+        if (intensity <= 0.f) {
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, screenW, screenH);
+            glUseProgram(compositeProg);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, sceneColorTex);
+            glUniform1i(glGetUniformLocation(compositeProg, "uScene"), 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, sceneColorTex);
+            glUniform1i(glGetUniformLocation(compositeProg, "uBloom"), 1);
+            glUniform1f(glGetUniformLocation(compositeProg, "uIntensity"), 0.f);
+            const bool upscaling = (fullW < screenW || fullH < screenH);
+            glUniform2f(glGetUniformLocation(compositeProg, "uSceneSize"),
+                        (float)fullW, (float)fullH);
+            glUniform1f(glGetUniformLocation(compositeProg, "uUpscale"), upscaling ? 1.f : 0.f);
+            glUniform1f(glGetUniformLocation(compositeProg, "uSharp"), upscaling ? sharpen : 0.f);
+            drawQuad();
+            glActiveTexture(GL_TEXTURE0);
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_TRUE);
+            return;
+        }
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
