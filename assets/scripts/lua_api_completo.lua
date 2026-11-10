@@ -30,7 +30,8 @@
 
   GAME SERVICES
     game.RunService.Heartbeat:Connect(function(dt) end)
-    game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")
+    game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace"|"AntiLag")
+    -- AntiLag:SetMode("Auto"|"Off"|"Strong")  SetTargetFps(n)  GetLevel()  GetStats()
     game.SoundService:Play(path [, looped])  |  :Stop()
     game.Animator:Play("Wave"|"Walk"|"Dance"|"Idle"|id)
     game.Animator:Stop()  :SetWalkAnim(id)  :SetJumpAnim(id)  :List()

@@ -1033,6 +1033,7 @@ static void drawPlayingHud(GLFWwindow* win) {
                             g_engine.quality.studTextures ? "" : " · stud off");
         ImGui::TextDisabled("Ombre luci Neon: %s · MSAA al riavvio",
                             g_engine.quality.shadowOccluders > 0 ? "sì" : "no");
+        ImGui::TextDisabled("%s", antilag::engine().summary().c_str());
 
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.52f, 0.95f, 1.f});

@@ -41,6 +41,8 @@ static void updateCrashContext() {
  * collo di bottiglia e' la GPU e ottimizzare il codice C++ non servira' a
  * niente.
  */
+#include "engine/antilag/Report.h"
+
 inline void drawFrameProfiler() {
     using namespace plat::prof;
 
@@ -108,6 +110,11 @@ inline void drawFrameProfiler() {
         ImGui::TextDisabled("congelate %d  lontane %d  statiche %d", ph.frozen, ph.culled, ph.statics);
     }
 
+    ImGui::Separator();
+    {
+        const std::string anti = antilag::report(antilag::engine());
+        ImGui::TextUnformatted(anti.c_str());
+    }
     ImGui::Separator();
     ImGui::TextDisabled("Scena %dx%d  ->  schermo %dx%d", g_renderW, g_renderH, g_w, g_h);
     if (g_renderW < g_w)

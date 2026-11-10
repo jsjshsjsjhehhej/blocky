@@ -347,8 +347,17 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
     renderShadowDepth(vao, meshP);
     {
         glm::vec3 origin = g_renderCamPos;
-        const float maxD = g_engine.quality.maxDrawDistance;
-        const int maxN = g_engine.quality.maxVisibleParts;
+        float maxD = g_engine.quality.maxDrawDistance;
+        int maxN = g_engine.quality.maxVisibleParts;
+        float minPx = 0.f;
+        bool studsOn = g_engine.quality.studTextures;
+        if (antilag::engine().enabled()) {
+            const antilag::FramePlan& ap = antilag::engine().plan();
+            maxD = std::min(maxD, ap.maxDrawDistance);
+            maxN = std::min(maxN, ap.maxVisibleParts);
+            minPx = ap.minScreenPx;
+            studsOn = studsOn && ap.studTextures;
+        }
         const FrustumPlanes frustum = extractFrustum(proj * view);
         struct Cand { int i; float d2; bool transparent; };
         // static: riusato ogni frame invece di allocare/liberare da capo —
@@ -358,14 +367,56 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
         static std::vector<Cand> cands;
         cands.clear();
         cands.reserve(g_world.parts.size());
+        if (antilag::engine().enabled())
+            antilag::engine().beginPartDistances();
         for (int i = 0; i < (int)g_world.parts.size(); ++i) {
             const auto& part = g_world.parts[i];
             glm::vec3 d = part.position - origin;
             float d2 = glm::dot(d, d);
+            if (antilag::engine().enabled())
+                antilag::engine().notePartDistance(std::sqrt(d2));
             if (d2 > maxD * maxD) continue;
             float boundRadius = glm::length(part.size) * 0.5f;
             if (sphereOutsideFrustum(frustum, part.position, boundRadius)) continue;
+            if (minPx > 0.f && !part.pointLight && !part.isNeon() && part.script.empty()) {
+                float px = antilag::screenRadiusPx(
+                    {origin.x, origin.y, origin.z}, glm::radians(g_cam.fov),
+                    (float)std::max(g_renderH, 1),
+                    {part.position.x, part.position.y, part.position.z}, boundRadius);
+                if (px < minPx) continue;
+            }
             cands.push_back({i, d2, part.isTransparent()});
+        }
+        if (antilag::engine().enabled() && antilag::engine().level() >= 4 && (int)cands.size() > 12) {
+            antilag::Camera oc;
+            oc.eye = {origin.x, origin.y, origin.z};
+            oc.fovyRad = glm::radians(g_cam.fov);
+            oc.viewportH = (float)std::max(g_renderH, 1);
+            oc.setViewProj(antilag::fromColumnMajor(glm::value_ptr(proj * view)));
+            static std::vector<antilag::OccludeIn> occItems;
+            static std::vector<char> occHidden;
+            occItems.resize(cands.size());
+            occHidden.assign(cands.size(), 0);
+            for (size_t n = 0; n < cands.size(); ++n) {
+                const auto& part = g_world.parts[(size_t)cands[n].i];
+                antilag::OccludeIn& it = occItems[n];
+                it.x = part.position.x;
+                it.y = part.position.y;
+                it.z = part.position.z;
+                it.radius = glm::length(part.size) * 0.5f;
+                it.screenPx = antilag::screenRadiusPx(
+                    oc.eye, oc.fovyRad, oc.viewportH, {it.x, it.y, it.z}, it.radius);
+                it.opaque = !part.isTransparent();
+                it.important = part.pointLight || part.isNeon() || !part.anchored || !part.script.empty();
+                it.index = cands[n].i;
+            }
+            antilag::markOccluded(oc, occItems.data(), (int)occItems.size(),
+                                  occHidden.data(), (int)occHidden.size());
+            size_t kept = 0;
+            for (size_t n = 0; n < cands.size(); ++n) {
+                if (!occHidden[n]) cands[kept++] = cands[n];
+            }
+            cands.resize(kept);
         }
         if ((int)cands.size() > maxN) {
             std::nth_element(cands.begin(), cands.begin() + maxN, cands.end(),
@@ -380,7 +431,7 @@ static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
         for (const auto& c : cands) {
             auto& p = g_world.parts[c.i];
             glm::mat4 m = partModelMatrix(p);
-            bool useStud = p.useStud && g_engine.quality.studTextures
+            bool useStud = p.useStud && studsOn
                 && !p.isNeon() && p.material == PartMaterial::Plastic
                 && p.shape == PartShape::Block;
             GLuint drawVao = vao;
