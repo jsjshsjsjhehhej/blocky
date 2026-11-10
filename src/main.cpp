@@ -264,6 +264,11 @@ static void clearPlaceDirty() { g_placeDirty = false; }
 static GLFWwindow* g_mainWin = nullptr;
 
 static glm::vec3 g_playerPos{ 0, 0, 0 };
+// Posizione disegnata: fra un passo di fisica e l'altro. Il contatore FPS
+// conta le immagini; senza questa miscela il corpo e la camera si muovono
+// solo ai passi di fisica (30 Hz, o 20 se l'anti-lag stringe) e il gioco
+// sembra molto piu lento del numero mostrato.
+static glm::vec3 g_playerShown{ 0, 0, 0 };
 static float g_playerYaw = 180.f;
 static float g_orbitYaw = 0.f;
 static float g_orbitPitch = -22.f;
@@ -1087,9 +1092,11 @@ static void blockyStepFrame(GLFWwindow* win) {
                 } else {
                     g_bphys.reset();
                 }
+                static glm::vec3 playerPosePrev = g_playerPos;
                 physAcc += dt;
                 int guard = 0;
                 while (physAcc >= step && guard++ < stepCap) {
+                    playerPosePrev = g_playerPos;
                     if (inPlay) {
                         stepPlayerPhysicsWithCollision(step);
                         g_bphys.step(step);
@@ -1099,6 +1106,10 @@ static void blockyStepFrame(GLFWwindow* win) {
                     physAcc -= step;
                 }
                 if (physAcc > step * 2.f) physAcc = 0.f;
+                float poseAlpha = step > 0.f ? std::clamp(physAcc / step, 0.f, 1.f) : 1.f;
+                g_playerShown = glm::mix(playerPosePrev, g_playerPos, poseAlpha);
+                if (glm::length(g_playerPos - playerPosePrev) > 12.f)
+                    g_playerShown = g_playerPos;
                 if (inPlay) g_bphys.writeBack(g_world.parts, physAcc / step);
             }
             acValidateMovement(g_playerPos, g_moveVel, dt, (float)glfwGetTime(),
@@ -1275,6 +1286,13 @@ static void blockyStepFrame(GLFWwindow* win) {
         // a schermo pieno ricostruendola. Su una GPU modesta abbassare questa
         // sola risoluzione vale piu di qualunque altra impostazione.
         updateRenderResolution();
+        // Solo per il disegno. La fisica, la rete e i controlli restano su
+        // g_playerPos vero; qui camera e corpo usano la posizione interpolata.
+        struct ShownPlayer {
+            glm::vec3 saved;
+            ShownPlayer() : saved(g_playerPos) { g_playerPos = g_playerShown; }
+            ~ShownPlayer() { g_playerPos = saved; }
+        } shownPlayer;
         g_bloom.beginScene(g_renderW, g_renderH);
         plat::prof::begin(plat::prof::Phase::World);
         {
@@ -1612,7 +1630,10 @@ static void blockyStepFrame(GLFWwindow* win) {
         // diretta di surriscaldamento su mobile. targetFps=0 (default PC) lo
         // disattiva del tutto: non tocca ne' il rendering ne' l'input, solo
         // il tempo che il thread principale passa in sleep a fine frame.
-        if (g_engine.quality.targetFps > 0) {
+        // Con il vsync acceso lo schermo gia aspetta il refresh. Dormire
+        // ancora per stare sotto targetFps fa perdere il battito successivo
+        // e il movimento sembra a meta della frequenza vera.
+        if (g_engine.quality.targetFps > 0 && !g_vsync) {
             const double frameBudget = 1.0 / (double)g_engine.quality.targetFps;
             const double elapsed = glfwGetTime() - now;
             const double remaining = frameBudget - elapsed;

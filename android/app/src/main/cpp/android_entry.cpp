@@ -160,6 +160,10 @@ bool initEgl(android_app* app) {
     }
 
     syncSurfaceSize();
+    // Il vsync del motore arriva da glfwSwapInterval, che su Android e solo
+    // un numero salvato. Qui diventa la chiamata EGL vera, cosi i fotogrammi
+    // escono sul battito dello schermo e non a raffiche.
+    eglSwapInterval(g_ctx.display, blkShimSwapInterval());
     LOGI("EGL pronto: %dx%d", g_ctx.width, g_ctx.height);
     return true;
 }
@@ -707,6 +711,12 @@ extern "C" void android_main(android_app* app) {
             blk::android::pumpTextInput(app);
             blockyAndroidFrame();
             blkShimEndFrame();
+            static int appliedInterval = -1;
+            const int wantInterval = blkShimSwapInterval();
+            if (wantInterval != appliedInterval) {
+                if (eglSwapInterval(g_ctx.display, wantInterval))
+                    appliedInterval = wantInterval;
+            }
             eglSwapBuffers(g_ctx.display, g_ctx.surface);
 
             // "Esci" dal menu del gioco.

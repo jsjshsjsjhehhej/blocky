@@ -163,6 +163,10 @@ struct BlkShimState {
     double cursorX = 0.0, cursorY = 0.0;
     bool shouldClose = false;
     int fbWidth = 0, fbHeight = 0;
+    // 1 = aspetta il refresh del telefono. Il motore lo imposta ogni frame
+    // con glfwSwapInterval; senza questo campo la chiamata veniva ignorata
+    // e i fotogrammi uscivano a mucchi.
+    int swapInterval = 1;
 
     GLFWcursorposfun onCursorPos = nullptr;
     GLFWmousebuttonfun onMouseButton = nullptr;
@@ -198,7 +202,8 @@ inline GLFWwindow* glfwCreateWindow(int w, int h, const char*, GLFWmonitor*, GLF
 inline void glfwDestroyWindow(GLFWwindow*) {}
 inline void glfwMakeContextCurrent(GLFWwindow*) {}
 inline GLFWwindow* glfwGetCurrentContext(void) { return blkShimWindow(); }
-inline void glfwSwapInterval(int) {}
+inline void glfwSwapInterval(int interval) { blkShim().swapInterval = interval; }
+inline int blkShimSwapInterval() { return blkShim().swapInterval; }
 inline void glfwSwapBuffers(GLFWwindow*) {}   // il buffer lo scambia EGL
 inline void glfwPollEvents(void) {}           // gli eventi arrivano da GameActivity
 inline void glfwSetWindowTitle(GLFWwindow*, const char*) {}
