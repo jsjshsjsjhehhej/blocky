@@ -29,12 +29,15 @@ static GLuint materialTextureId(PartMaterial mat) {
     return 0;
 }
 
+static void bumpCubeUniformSerial();
+
 static float neonLightRange(const WorkspacePart& p) {
     float maxDim = std::max(p.size.x, std::max(p.size.y, p.size.z));
     return std::clamp(8.f + maxDim * 2.2f, 8.f, 42.f);
 }
 
 static void collectDynamicLights() {
+    bumpCubeUniformSerial();
     g_dynLightCount = 0;
     struct Cand { glm::vec3 pos, col; float range, d2; };
     static std::vector<Cand> cands;
@@ -147,42 +150,156 @@ static void collectShadowOccluders() {
 static void clearDynamicLights() {
     g_dynLightCount = 0;
     g_occCount = 0;
+    bumpCubeUniformSerial();
+}
+
+// Posizioni degli uniform del programma cubo. Su desktop e su GLES si cercano
+// una volta per programma: glGetUniformLocation per nome, a ogni blocco, e'
+// il costo che fa lagare Android (e sull'emulatore genera anche GL 0x502).
+struct CubeUniformCache {
+    GLuint prog = 0;
+    unsigned serial = 0;
+    GLint uModel = -1, uView = -1, uProj = -1;
+    GLint uColor = -1, uSun = -1, uCamPos = -1;
+    GLint uEmissive = -1, uSpecular = -1, uRoughness = -1, uAlpha = -1, uMaterial = -1;
+    GLint uStud = -1, uStudScale = -1, uMaterialTex = -1;
+    GLint uLightCount = -1, uLightPos = -1, uLightCol = -1, uLightRange = -1;
+    GLint uNight = -1, uSunColor = -1, uAmbientTint = -1;
+    GLint uSkyZenith = -1, uSkyHorizon = -1;
+    GLint uFogColor = -1, uFogStart = -1, uFogEnd = -1;
+    GLint uOccCount = -1, uAoOccStart = -1, uSunShadow = -1;
+    GLint uOccCenter = -1, uOccHalf = -1, uOccRot = -1;
+    GLint uShadowMap = -1, uLightVP = -1, uShadowTexel = -1;
+};
+
+static unsigned g_cubeUniformSerial = 1;
+
+static void bumpCubeUniformSerial() {
+    if (++g_cubeUniformSerial == 0)
+        g_cubeUniformSerial = 1;
+}
+
+static void uniform1i(GLint loc, int v) {
+    if (loc >= 0) glUniform1i(loc, v);
+}
+static void uniform1f(GLint loc, float v) {
+    if (loc >= 0) glUniform1f(loc, v);
+}
+static void uniform3(GLint loc, const glm::vec3& v) {
+    if (loc >= 0) glUniform3fv(loc, 1, glm::value_ptr(v));
+}
+static void uniformMat4(GLint loc, const glm::mat4& m) {
+    if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(m));
+}
+
+static CubeUniformCache& cubeUniforms(GLuint prog) {
+    constexpr int kSlots = 8;
+    static CubeUniformCache slots[kSlots];
+    static int clock = 0;
+    for (int i = 0; i < kSlots; ++i)
+        if (slots[i].prog == prog) return slots[i];
+    CubeUniformCache& slot = slots[clock];
+    clock = (clock + 1) % kSlots;
+    slot = CubeUniformCache{};
+    slot.prog = prog;
+    auto loc = [prog](const char* name) { return glGetUniformLocation(prog, name); };
+    slot.uModel = loc("uModel");
+    slot.uView = loc("uView");
+    slot.uProj = loc("uProj");
+    slot.uColor = loc("uColor");
+    slot.uSun = loc("uSun");
+    slot.uCamPos = loc("uCamPos");
+    slot.uEmissive = loc("uEmissive");
+    slot.uSpecular = loc("uSpecular");
+    slot.uRoughness = loc("uRoughness");
+    slot.uAlpha = loc("uAlpha");
+    slot.uMaterial = loc("uMaterial");
+    slot.uStud = loc("uStud");
+    slot.uStudScale = loc("uStudScale");
+    slot.uMaterialTex = loc("uMaterialTex");
+    // Gli array nello shader sono [8], uguale a kMaxDynLights. La location
+    // del nome senza indice e' il primo elemento: un solo glUniform*fv
+    // carica tutto l'array, su GL e su GLES.
+    slot.uLightCount = loc("uLightCount");
+    slot.uLightPos = loc("uLightPos");
+    slot.uLightCol = loc("uLightCol");
+    slot.uLightRange = loc("uLightRange");
+    slot.uNight = loc("uNight");
+    slot.uSunColor = loc("uSunColor");
+    slot.uAmbientTint = loc("uAmbientTint");
+    slot.uSkyZenith = loc("uSkyZenith");
+    slot.uSkyHorizon = loc("uSkyHorizon");
+    slot.uFogColor = loc("uFogColor");
+    slot.uFogStart = loc("uFogStart");
+    slot.uFogEnd = loc("uFogEnd");
+    slot.uOccCount = loc("uOccCount");
+    slot.uAoOccStart = loc("uAoOccStart");
+    slot.uSunShadow = loc("uSunShadow");
+    slot.uOccCenter = loc("uOccCenter");
+    slot.uOccHalf = loc("uOccHalf");
+    slot.uOccRot = loc("uOccRot");
+    slot.uShadowMap = loc("uShadowMap");
+    slot.uLightVP = loc("uLightVP");
+    slot.uShadowTexel = loc("uShadowTexel");
+    return slot;
 }
 
 static void uploadDynamicLights(GLuint prog) {
-    glUniform1i(glGetUniformLocation(prog, "uLightCount"), g_dynLightCount);
-    for (int i = 0; i < kMaxDynLights; ++i) {
-        char name[32];
-        std::snprintf(name, sizeof(name), "uLightPos[%d]", i);
-        glm::vec3 pos = (i < g_dynLightCount) ? g_dynLights[i].pos : glm::vec3(0);
-        glUniform3fv(glGetUniformLocation(prog, name), 1, glm::value_ptr(pos));
-        std::snprintf(name, sizeof(name), "uLightCol[%d]", i);
-        glm::vec3 col = (i < g_dynLightCount) ? g_dynLights[i].color : glm::vec3(0);
-        glUniform3fv(glGetUniformLocation(prog, name), 1, glm::value_ptr(col));
-        std::snprintf(name, sizeof(name), "uLightRange[%d]", i);
-        float rng = (i < g_dynLightCount) ? g_dynLights[i].range : 1.f;
-        glUniform1f(glGetUniformLocation(prog, name), rng);
+    if (!prog) return;
+    CubeUniformCache& u = cubeUniforms(prog);
+    if (u.serial != g_cubeUniformSerial) {
+        u.serial = g_cubeUniformSerial;
+        uniform1i(u.uLightCount, g_dynLightCount);
+        if (u.uLightPos >= 0) {
+            glm::vec3 pos[kMaxDynLights];
+            glm::vec3 col[kMaxDynLights];
+            float range[kMaxDynLights];
+            for (int i = 0; i < kMaxDynLights; ++i) {
+                if (i < g_dynLightCount) {
+                    pos[i] = g_dynLights[i].pos;
+                    col[i] = g_dynLights[i].color;
+                    range[i] = g_dynLights[i].range;
+                } else {
+                    pos[i] = glm::vec3(0.f);
+                    col[i] = glm::vec3(0.f);
+                    range[i] = 1.f;
+                }
+            }
+            glUniform3fv(u.uLightPos, kMaxDynLights, glm::value_ptr(pos[0]));
+            if (u.uLightCol >= 0)
+                glUniform3fv(u.uLightCol, kMaxDynLights, glm::value_ptr(col[0]));
+            if (u.uLightRange >= 0)
+                glUniform1fv(u.uLightRange, kMaxDynLights, range);
+        }
+        uniform1f(u.uNight, g_night);
+        uniform3(u.uSunColor, g_sunColor);
+        uniform3(u.uAmbientTint, g_ambientTint);
+        uniform3(u.uSkyZenith, g_skyZenith);
+        uniform3(u.uSkyHorizon, g_skyHorizon);
+        uniform3(u.uFogColor, g_lighting.fogColor);
+        uniform1f(u.uFogStart, g_lighting.fogStart);
+        uniform1f(u.uFogEnd, g_lighting.fogEnd);
+        uniform1i(u.uOccCount, g_occCount);
+        uniform1i(u.uAoOccStart, g_bodyOccCount);
+        uniform1i(u.uSunShadow, g_sunShadowOn ? 1 : 0);
+        if (g_occCount > 0) {
+            if (u.uOccCenter >= 0)
+                glUniform3fv(u.uOccCenter, g_occCount, glm::value_ptr(g_occCenter[0]));
+            if (u.uOccHalf >= 0)
+                glUniform3fv(u.uOccHalf, g_occCount, glm::value_ptr(g_occHalf[0]));
+            if (u.uOccRot >= 0)
+                glUniformMatrix3fv(u.uOccRot, g_occCount, GL_FALSE, glm::value_ptr(g_occRot[0]));
+        }
+        if (g_sunShadowOn && u.uShadowMap >= 0) {
+            uniform1i(u.uShadowMap, 3);
+            uniformMat4(u.uLightVP, g_shadowMap.lightVP);
+            uniform1f(u.uShadowTexel, g_shadowMap.size > 0 ? 1.f / (float)g_shadowMap.size : 1.f);
+        }
     }
-    glUniform1f(glGetUniformLocation(prog, "uNight"), g_night);
-    glUniform3fv(glGetUniformLocation(prog, "uSunColor"), 1, glm::value_ptr(g_sunColor));
-    glUniform3fv(glGetUniformLocation(prog, "uAmbientTint"), 1, glm::value_ptr(g_ambientTint));
-    glUniform3fv(glGetUniformLocation(prog, "uSkyZenith"), 1, glm::value_ptr(g_skyZenith));
-    glUniform3fv(glGetUniformLocation(prog, "uSkyHorizon"), 1, glm::value_ptr(g_skyHorizon));
-    glUniform3fv(glGetUniformLocation(prog, "uFogColor"), 1, glm::value_ptr(g_lighting.fogColor));
-    glUniform1f(glGetUniformLocation(prog, "uFogStart"), g_lighting.fogStart);
-    glUniform1f(glGetUniformLocation(prog, "uFogEnd"), g_lighting.fogEnd);
-    glUniform1i(glGetUniformLocation(prog, "uOccCount"), g_occCount);
-    glUniform1i(glGetUniformLocation(prog, "uAoOccStart"), g_bodyOccCount);
-    glUniform1i(glGetUniformLocation(prog, "uSunShadow"), g_sunShadowOn ? 1 : 0);
-    if (g_sunShadowOn)
-        g_shadowMap.bindForRead(prog, 3);
-    if (g_occCount > 0) {
-        glUniform3fv(glGetUniformLocation(prog, "uOccCenter"), g_occCount,
-                     glm::value_ptr(g_occCenter[0]));
-        glUniform3fv(glGetUniformLocation(prog, "uOccHalf"), g_occCount,
-                     glm::value_ptr(g_occHalf[0]));
-        glUniformMatrix3fv(glGetUniformLocation(prog, "uOccRot"), g_occCount, GL_FALSE,
-                           glm::value_ptr(g_occRot[0]));
+    if (g_sunShadowOn && g_shadowMap.depthTex) {
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, g_shadowMap.depthTex);
+        glActiveTexture(GL_TEXTURE0);
     }
 }
 
@@ -190,6 +307,7 @@ static void drawCube(GLuint vao, GLuint prog, const glm::mat4& m, const glm::mat
                      const glm::mat4& p, const glm::vec3& col, const glm::vec3& sun,
                      bool studTex = false, GLuint studId = 0, int vertCount = 36,
                      float emissive = 0.f, PartMaterial mat = PartMaterial::Plastic) {
+    if (!prog || !vao) return;
     if ((int)mat < 0 || mat >= PartMaterial::Count)
         mat = PartMaterial::Plastic;
     float specular = 0.12f, roughness = 0.75f, emBias = 0.f, alpha = 1.f;
@@ -204,28 +322,29 @@ static void drawCube(GLuint vao, GLuint prog, const glm::mat4& m, const glm::mat
     }
 
     glUseProgram(prog);
-    glUniformMatrix4fv(glGetUniformLocation(prog,"uModel"),1,GL_FALSE,glm::value_ptr(m));
-    glUniformMatrix4fv(glGetUniformLocation(prog,"uView"),1,GL_FALSE,glm::value_ptr(v));
-    glUniformMatrix4fv(glGetUniformLocation(prog,"uProj"),1,GL_FALSE,glm::value_ptr(p));
-    glUniform3fv(glGetUniformLocation(prog,"uColor"),1,glm::value_ptr(col));
-    glUniform3fv(glGetUniformLocation(prog,"uSun"),1,glm::value_ptr(sun));
-    glUniform3fv(glGetUniformLocation(prog,"uCamPos"),1,glm::value_ptr(g_renderCamPos));
-    glUniform1f(glGetUniformLocation(prog, "uEmissive"), em);
-    glUniform1f(glGetUniformLocation(prog, "uSpecular"), specular);
-    glUniform1f(glGetUniformLocation(prog, "uRoughness"), roughness);
-    glUniform1f(glGetUniformLocation(prog, "uAlpha"), alpha);
-    glUniform1i(glGetUniformLocation(prog, "uMaterial"), (int)mat);
+    CubeUniformCache& u = cubeUniforms(prog);
+    uniformMat4(u.uModel, m);
+    uniformMat4(u.uView, v);
+    uniformMat4(u.uProj, p);
+    uniform3(u.uColor, col);
+    uniform3(u.uSun, sun);
+    uniform3(u.uCamPos, g_renderCamPos);
+    uniform1f(u.uEmissive, em);
+    uniform1f(u.uSpecular, specular);
+    uniform1f(u.uRoughness, roughness);
+    uniform1f(u.uAlpha, alpha);
+    uniform1i(u.uMaterial, (int)mat);
     uploadDynamicLights(prog);
     if (studTex && studId) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, studId);
-        glUniform1i(glGetUniformLocation(prog, "uStud"), 0);
-        glUniform1f(glGetUniformLocation(prog, "uStudScale"), kStudTile);
+        uniform1i(u.uStud, 0);
+        uniform1f(u.uStudScale, kStudTile);
     }
     if (GLuint matTexId = materialTextureId(mat)) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, matTexId);
-        glUniform1i(glGetUniformLocation(prog, "uMaterialTex"), 1);
+        uniform1i(u.uMaterialTex, 1);
     }
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, vertCount);
