@@ -136,5 +136,17 @@
  "rb.prefs": "Настройки Studio",
  "rb.space.world": "Мир",
  "rb.space.local": "Локально",
- "rb.space.tip": "Оси гизмо: мир или деталь (Ctrl+L)"
+ "rb.space.tip": "Оси гизмо: мир или деталь (Ctrl+L)",
+ "rb.publish": "Опубликовать",
+ "rb.collide.drag": "Столкновения",
+ "rb.collide.tip": "Детали не проходят сквозь другие",
+ "rb.csg.union": "Объединить",
+ "rb.csg.negate": "Вычесть",
+ "rb.csg.intersect": "Пересечь",
+ "rb.csg.separate": "Разделить",
+ "rb.g.solids": "Твёрдые тела",
+ "rb.c.tool": "Щёлкните две точки",
+ "rb.c.fromsel": "Между выбранными деталями",
+ "rb.theme.light": "Светлая тема",
+ "rb.theme.dark": "Тёмная тема"
 }

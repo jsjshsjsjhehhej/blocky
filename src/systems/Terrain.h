@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -628,11 +629,7 @@ public:
         return true;
     }
 
-    bool save(const std::string& name) const {
-        std::string p = safeName(name);
-        if (p.empty()) return false;
-        std::ofstream out(p, std::ios::binary);
-        if (!out) return false;
+    bool writeTo(std::ostream& out) const {
         const char mag[4] = {'B', 'L', 'K', 'V'};
         out.write(mag, 4);
         int32_t ver = 1, seed = seed_;
@@ -659,14 +656,10 @@ public:
         return (bool)out;
     }
 
-    bool load(const std::string& name) {
-        std::string p = safeName(name);
-        if (p.empty()) return false;
-        std::ifstream in(p, std::ios::binary);
-        if (!in) return false;
+    bool readFrom(std::istream& in) {
         char mag[4]{};
         in.read(mag, 4);
-        if (mag[0] != 'B' || mag[1] != 'L' || mag[2] != 'K' || mag[3] != 'V') return false;
+        if (!in || mag[0] != 'B' || mag[1] != 'L' || mag[2] != 'K' || mag[3] != 'V') return false;
         int32_t ver = 0, seed = 0;
         float bs = kDefaultBlock;
         in.read((char*)&ver, 4);
@@ -689,6 +682,40 @@ public:
         dirty_ = true;
         rebuildMesh();
         return true;
+    }
+
+    std::string dump() const {
+        std::ostringstream out(std::ios::binary);
+        writeTo(out);
+        return out.str();
+    }
+
+    bool undump(const std::string& bytes) {
+        std::istringstream in(bytes, std::ios::binary);
+        return readFrom(in);
+    }
+
+    bool writeFile(const std::string& path) const {
+        std::ofstream out(path, std::ios::binary);
+        return out && writeTo(out);
+    }
+
+    bool readFile(const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+        return readFrom(in);
+    }
+
+    bool save(const std::string& name) const {
+        std::string p = safeName(name);
+        if (p.empty()) return false;
+        return writeFile(p);
+    }
+
+    bool load(const std::string& name) {
+        std::string p = safeName(name);
+        if (p.empty()) return false;
+        return readFile(p);
     }
 
     int seed() const { return seed_; }

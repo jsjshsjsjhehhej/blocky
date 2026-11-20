@@ -37,6 +37,7 @@ enum class StudioGraphicsPreset : int {
     Performance = 0,  // mobile-safe, no post, no shadows
     StudioDefault = 1, // look pulito tipo Studio di giorno
     Beautiful = 2,     // post + ombre + Clean AAA lighting
+    Realistic = 3,     // sole bianco, ombre riempite dal cielo, nebbia lunga
     Count
 };
 
@@ -45,6 +46,7 @@ inline const char* studioGraphicsPresetLabel(StudioGraphicsPreset p) {
     case StudioGraphicsPreset::Performance:  return "Performance";
     case StudioGraphicsPreset::StudioDefault: return "Studio Default";
     case StudioGraphicsPreset::Beautiful:    return "Beautiful";
+    case StudioGraphicsPreset::Realistic:    return "Realistico";
     default: return "?";
     }
 }
@@ -98,6 +100,16 @@ inline void applyStudioGraphicsPreset(StudioGraphicsPreset p,
         applyLookPreset(LookPreset::CleanAaa, look, L);
         L.globalShadows = true;
         std::snprintf(look.presetName, sizeof(look.presetName), "Beautiful");
+        break;
+
+    case StudioGraphicsPreset::Realistic:
+        q = applyPreset(q, q.mobile ? QualityPreset::High : QualityPreset::Ultra);
+        q.shadows = true;
+        q.shadowOccluders = std::max(q.shadowOccluders, 8);
+        q.postFx = true;
+        applyLookPreset(LookPreset::Realistic, look, L);
+        L.globalShadows = true;
+        std::snprintf(look.presetName, sizeof(look.presetName), "Realistico");
         break;
 
     default:

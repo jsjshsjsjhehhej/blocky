@@ -12,6 +12,8 @@
 #include "engine/DataModel.h"
 #include "engine/GameHub.h"
 #include "engine/LuaRuntime.h"
+#include "systems/Terrain.h"
+#include "systems/TerrainLua.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -73,6 +75,8 @@ int main(int argc, char** argv) {
     lua.proximity = &proximity;
     lua.runIsClient = true;
     lua.runIsServer = true;
+    Terrain terrain;
+    lua.extensions.push_back({"TerrainLuaInternal", &terrainlua::registerLua, &terrain});
     int pass = 0;
     std::vector<std::string> failures;
     for (const auto& f : files) {

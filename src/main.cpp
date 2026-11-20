@@ -27,10 +27,12 @@
 #include "engine/Humanoid.h"
 #include "engine/LuaRuntime.h"
 #include "engine/PlaceExporter.h"
+#include "engine/WorldSession.h"
 #include "engine/BlockyProject.h"
 #include "engine/SoundService.h"
 #include "engine/LightingService.h"
 #include "engine/Animator.h"
+#include "engine/anim/DefaultR6Animate.h"
 #include "engine/AntiCheat.h"
 #include "engine/LanNet.h"
 #include "engine/GamesLan.h"
@@ -170,6 +172,11 @@ static bool g_rmbLook = false;
 static BlockPlayer g_player;
 static LanNet g_net;
 static std::vector<BlockPlayer> g_remoteBodies;
+// Animazioni R6 di base (come "Animate" di Roblox): una per il player, una per
+// ogni giocatore remoto. Le pose: assets/animations/blocky_r6.blkanim.
+static blk::anim::DefaultR6Animate g_r6Animate;
+static std::vector<blk::anim::DefaultR6Animate> g_remoteR6Animate;
+static std::vector<float> g_remoteLastY;
 
 struct FriendPlayer {
     std::string name = "Amico";
@@ -389,7 +396,6 @@ static void resetGeneratedSystems() {
     g_proiettili.reset();
     g_combo.reset();
     g_stamina.reset();
-    g_terrain.reset();
     g_inventario.reset();
     g_mobs.reset();
     g_mobs.attach(&g_terrain);
@@ -439,6 +445,9 @@ static void updateGeneratedSystems(float dt) {
     g_cassa.update(dt);
     g_currency.update(dt);
 }
+#include "systems/SocialHud.h"
+static void drawProximityBillboards();
+static void drawSocialHud() { drawSocialPurchase(g_lua.luaState()); }
 static void drawGeneratedHud() {
     // @genera:hud
     drawClassificaHud(g_classifica);
@@ -455,6 +464,8 @@ static void drawGeneratedHud() {
     drawCooldownHud(g_cooldown);
     drawDebrisHud(g_debris);
     drawProssimitaHud(g_prossimita);
+    drawProximityBillboards();
+    drawSocialHud();
     drawHitboxHud(g_hitbox);
     drawBadgeHud(g_badge);
     drawTimerHud(g_timer);
@@ -581,6 +592,8 @@ static bool g_playCursorLocked = false;
 static constexpr float kFpEnterDist = 4.5f;
 static constexpr float kFpExitDist = 7.0f;
 static glm::vec3 g_moveVel{0, 0, 0};
+static float g_climbAxis = 0.f;
+static float g_swimUp = 0.f;
 static bool g_showFbx = false;
 static bool g_useGlbAvatar = false;
 static bool g_vsync = true;
@@ -641,6 +654,8 @@ static void insertFriendPlayer();
 static void updateFriendPlayers(float dt);
 static void drawFriendPlayers(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun);
+static void drawNpcActors(GLuint vao, GLuint partP, const glm::mat4& view,
+                          const glm::mat4& proj, const glm::vec3& sun);
 static void syncFriendsFromWorld();
 static void syncFriendsToWorld();
 static void drawInventoryHud();
@@ -653,10 +668,13 @@ static void drawGizmoOverlayHud();
 static void pollBackpackSwitch(GLFWwindow* win);
 static void trySwordAttack();
 static void tryUseEquippedItem();
+static void tryReleaseEquippedItem();
 static void drawEquippedSword(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun);
 static void drawEquippedTorch(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun);
+static void drawEquippedHandle(GLuint vao, GLuint partP, const glm::mat4& view,
+                               const glm::mat4& proj, const glm::vec3& sun);
 static void drawEquippedItemMesh(GLuint vao, GLuint partP, GLuint meshP,
                                  const glm::mat4& view, const glm::mat4& proj,
                                  const glm::vec3& sun);
@@ -668,6 +686,15 @@ static void syncEquippedToMenu();
 enum class StudioTool { Select, Move, Scale, Rotate };
 static StudioTool g_tool = StudioTool::Select;
 static bool g_editingPartScript = false;
+// Figlio selezionato sotto una Part (PointLight, Decal, vincolo...): le
+// Proprieta' mostrano lui, non tutta la Part. -1 se il figlio non ha un indice.
+enum class ExChild : int {
+    None = 0, PointLight, Decal, Texture, Highlight, SelectionBox, SelectionSphere,
+    DragDetector, Seat, VehicleSeat, Ladder, Spawn, Mesh, Weld,
+    Emitter, Attachment, Trail, Click
+};
+static ExChild g_exChild = ExChild::None;
+static int g_exChildIndex = -1;
 
 static bool g_scaleDragging = false;
 static int g_scaleAxis = -1;
@@ -729,7 +756,9 @@ static constexpr int kMaxDynLights = 8;
 struct DynLight {
     glm::vec3 pos{0};
     glm::vec3 color{1};
+    glm::vec3 dir{0.f, -1.f, 0.f};
     float range = 20.f;
+    float angle = 0.f;   // 0 = sfera (PointLight). Gradi del cono per Spot e Surface.
 };
 static DynLight g_dynLights[kMaxDynLights];
 static int g_dynLightCount = 0;
@@ -762,6 +791,10 @@ static int g_lookPresetUi = 0;
 
 #include "main_ui/WorldRenderPipeline.h"
 
+static void rememberTerrainForPlay();
+static void recallTerrainAfterPlay();
+static void saveTerrainBeside(const std::string& placePath, bool usePlaySnap);
+
 #include "main_ui/ScreenTransitions.h"
 
 #include "main_ui/PlaceLauncherUi.h"
@@ -789,6 +822,7 @@ static int g_lookPresetUi = 0;
 static GLuint vao = 0;
 static GLuint partP = 0, studP = 0, skinP = 0, meshP = 0;
 static Texture2D studTex;
+static Texture2D studTexLow;   // stud della qualita' Low: la stessa texture ridotta a 64x64
 static glm::vec3 sun{0.f, -1.f, 0.f};
 static SunSky sunSky;
 static AnimatedModel fbx;
@@ -839,6 +873,15 @@ static void startAudioMixer() {
     g_audioMixer.resolveScriptPath = resolveSoundPath;
     g_sounds.mixPlay = [](const std::string& p, float vol, bool loop) {
         return g_audioMixer.play(resolveSoundPath(p), vol, loop);
+    };
+    g_sounds.mixPlayAt = [](const std::string& p, glm::vec3 pos, float vol, bool loop) {
+        return g_audioMixer.playAt(resolveSoundPath(p), pos, vol, loop);
+    };
+    g_sounds.mixSetPosition = [](int voice, glm::vec3 pos) {
+        g_audioMixer.setPosition(voice, pos);
+    };
+    g_sounds.mixSetPitch = [](int voice, float pitch) {
+        g_audioMixer.setPitch(voice, pitch);
     };
     g_sounds.mixStop = [](int voice) { g_audioMixer.stop(voice); };
     g_sounds.mixStopAll = [] { g_audioMixer.stopAll(); };
@@ -897,6 +940,9 @@ static void blockyStepFrame(GLFWwindow* win) {
     ImGuiIO& io = ImGui::GetIO();
 
         glfwPollEvents();
+        plat::prof::mark("dopo eventi finestra");   // BLOCKY_PROFILE
+        pollAsyncPlaceOpen();
+        plat::prof::mark("dopo apertura place");   // BLOCKY_PROFILE
 
         if (!g_pendingOpenPlace.empty() && kIsGameEngine) {
             std::string path = g_pendingOpenPlace;
@@ -914,6 +960,7 @@ static void blockyStepFrame(GLFWwindow* win) {
         // (vedi insertImportedModel/processPendingModelImport).
         processPendingModelImport();
         applyPendingToolboxModelMeta();
+        plat::prof::mark("dopo import");   // BLOCKY_PROFILE
 
         float now = (float)glfwGetTime();
         float dt = blk::resilience::clampSimulationDt(now - lastT);
@@ -952,7 +999,9 @@ static void blockyStepFrame(GLFWwindow* win) {
 #endif
         }
 
+        plat::prof::mark("prima crash context");   // BLOCKY_PROFILE
         updateCrashContext();
+        plat::prof::mark("prima autosave");   // BLOCKY_PROFILE
 
         g_autosaveAcc += dt;
         if (g_autosaveAcc >= 30.f) {
@@ -967,6 +1016,7 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
         }
 
+        plat::prof::mark("dopo autosave");   // BLOCKY_PROFILE
         static bool escWasDown = false;
         bool escDown = glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS;
         bool escPressed = escDown && !escWasDown;
@@ -1008,6 +1058,7 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
         // I comandi a tocco entrano come se fossero una levetta analogica: il
         // movimento sotto resta quello di sempre, non ce n e' un secondo.
+        plat::prof::mark("dopo input");   // BLOCKY_PROFILE
         blk::touch::apply(gamepad());
         const auto& pad = gamepad();
 
@@ -1066,6 +1117,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                     }
                 }
             }
+            plat::prof::mark("prima stepPhysics");   // BLOCKY_PROFILE
             g_player.humanoid.stepPhysics(dt, g_playerPos.y, 0.f);
             if (g_catalog.previewWalk) {
                 if (g_catalog.hasPendingWalk && g_catalog.pendingWalk.valid())
@@ -1194,17 +1246,31 @@ static void blockyStepFrame(GLFWwindow* win) {
                     }
                 }
 
-                if (!(g_screen == AppScreen::Playing && (g_shiftLock || g_firstPerson))) {
-                    if ((kbOk && (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_LEFT) == GLFW_PRESS))
+                const bool studioFlyCam = g_screen == AppScreen::Studio
+                    && g_mode == CamMode::Studio && !g_studioTesting;
+                const bool inPlayCam = g_screen == AppScreen::Playing
+                    || (g_screen == AppScreen::Studio && g_studioTesting);
+                const bool promptOwnsE = inPlayCam && g_prossimita.usesKey('E');
+                const bool promptOwnsQ = inPlayCam && g_prossimita.usesKey('Q');
+                if (!studioFlyCam && !(g_screen == AppScreen::Playing && (g_shiftLock || g_firstPerson))) {
+                    if ((kbOk && ((glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS && !promptOwnsQ)
+                            || glfwGetKey(win, GLFW_KEY_LEFT) == GLFW_PRESS))
                         || (padOk && (pad.lb || pad.dpadL)))
                         g_orbitYaw += 90.f * dt;
-                    if ((kbOk && (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT) == GLFW_PRESS))
+                    if ((kbOk && ((glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS && !promptOwnsE)
+                            || glfwGetKey(win, GLFW_KEY_RIGHT) == GLFW_PRESS))
                         || (padOk && (pad.rb || pad.dpadR)))
                         g_orbitYaw -= 90.f * dt;
                 }
 
                 if (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting) {
-                    float spd = maxSpd * dt;
+                    const bool slowCam = kbOk && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS
+                        || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+                    float spd = maxSpd * dt * (slowCam ? 0.12f : 1.f);
+                    if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size()) {
+                        const float focus = std::max(0.02f, glm::length(g_cam.pos - g_world.parts[g_selectedPart].position));
+                        spd = std::clamp(focus, 0.02f, 60.f) * dt * (slowCam ? 0.35f : (sprintKey ? 2.4f : 1.2f));
+                    }
                     glm::vec3 f = g_cam.front(), r = glm::normalize(glm::cross(f, glm::vec3(0,1,0)));
                     glm::vec3 move(0);
                     if (kbOk && glfwGetKey(win, GLFW_KEY_W)) move += f;
@@ -1216,8 +1282,13 @@ static void blockyStepFrame(GLFWwindow* win) {
                         move += r * pad.lx;
                     }
                     if (glm::length(move) > 0.01f) g_cam.pos += glm::normalize(move) * spd;
-                    if ((kbOk && glfwGetKey(win, GLFW_KEY_SPACE)) || (padOk && pad.a)) g_cam.pos.y += spd;
-                    if ((kbOk && glfwGetKey(win, GLFW_KEY_LEFT_CONTROL)) || (padOk && pad.b)) g_cam.pos.y -= spd;
+                    // Q scende, E e Spazio salgono. Ctrl resta il modificatore
+                    // (niente snap, selezione, scorciatoie) e non muove la camera.
+                    if ((kbOk && (glfwGetKey(win, GLFW_KEY_SPACE) || glfwGetKey(win, GLFW_KEY_E)))
+                        || (padOk && pad.a))
+                        g_cam.pos.y += spd;
+                    if ((kbOk && glfwGetKey(win, GLFW_KEY_Q)) || (padOk && pad.b))
+                        g_cam.pos.y -= spd;
                     if (padOk && pad.dpadU) g_orbitDist = std::max(4.f, g_orbitDist - 12.f * dt);
                     if (padOk && pad.dpadD) g_orbitDist = std::min(60.f, g_orbitDist + 12.f * dt);
                 } else {
@@ -1232,6 +1303,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                         wish += fwd * pad.ly;
                         wish += right * pad.lx;
                     }
+                    g_lua.applyScriptMove(dt, wish, fwd, right, g_playerPos);
                     if (!scriptControls().walkEnabled || g_player.humanoid.dead)
                         wish = glm::vec3(0.f);
                     float wishLen = glm::length(wish);
@@ -1267,9 +1339,15 @@ static void blockyStepFrame(GLFWwindow* win) {
 
                     scriptControls().moveHeld = wishLen > 0.001f;
                     scriptControls().sprintHeld = sprintKey && scriptControls().moveHeld;
+                    g_climbAxis = 0.f;
+                    if (kbOk && glfwGetKey(win, GLFW_KEY_W)) g_climbAxis += 1.f;
+                    if (kbOk && glfwGetKey(win, GLFW_KEY_S)) g_climbAxis -= 1.f;
+                    if (padOk) g_climbAxis += pad.ly;
+                    g_swimUp = (kbOk && glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS) || (padOk && pad.a) ? 1.f : 0.f;
 
                     bool grounded = g_player.humanoid.grounded;
                     glm::vec3 targetVel = wish * maxSpd;
+                    if (playerInWater()) targetVel *= 0.55f;
                     const bool hasInput = wishLen > 0.001f;
                     float rate = grounded
                         ? (hasInput ? 22.f : 28.f)
@@ -1444,8 +1522,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                     doSavePlaceAs();
                 else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
                     doSavePlace();
-                if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_U))
-                    doSaveForPublish();
+                // Ctrl+Maiusc+U ora e' Separa (come Roblox Studio): Salva per pubblicare sta nel menu File.
                 if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
                     doOpenPlace();
                 if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_P)) {
@@ -1455,9 +1532,12 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
             if (kbOk && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) doExport();
 
+            plat::prof::mark("prima clamp");   // BLOCKY_PROFILE
             acClampHumanoid(g_player.humanoid);
+            plat::prof::mark("dopo clamp");   // BLOCKY_PROFILE
             acSetLinkedUser(g_menu.username);
             acTickIntegrity(dt, (float)glfwGetTime());
+            plat::prof::mark("dopo integrita'");   // BLOCKY_PROFILE
             {
                 std::string warn;
                 if (acTakePlayerWarning(warn)) {
@@ -1470,6 +1550,22 @@ static void blockyStepFrame(GLFWwindow* win) {
                     returnToMenu(win);
                 }
             }
+            {
+                const bool inPlayNow = g_screen == AppScreen::Playing ||
+                    (g_screen == AppScreen::Studio && g_mode == CamMode::Play);
+                blk::scale::budget().begin(g_engine.quality.mobile ? 5.0 : 7.0);
+                blk::scale::stream().enabled = inPlayNow && g_streamingEnabled;
+                blk::scale::stream().radius = g_engine.quality.mobile ? 100.f : 160.f;
+                static std::vector<glm::vec3> foci;
+                foci.clear();
+                foci.push_back(g_playerPos);
+                for (const auto& r : g_net.remotes) foci.push_back(r.displayPos);
+                const int scan = blk::scale::budget().exhausted()
+                    ? 48 : (g_engine.quality.mobile ? 500 : 1200);
+                blk::scale::stream().tick(g_world.parts, foci, scan,
+                                          g_engine.quality.maxVisibleParts);
+            }
+            plat::prof::mark("prima fisica");   // BLOCKY_PROFILE
             {
                 PROF_SCOPE(plat::prof::Phase::Physics);
                 static float physAcc = 0.f;
@@ -1490,10 +1586,12 @@ static void blockyStepFrame(GLFWwindow* win) {
                 // Pausa del Test (scheda Test / Developer Console): niente passi.
                 physAcc = (inPlay && g_simPaused) ? 0.f : physAcc + dt;
                 int guard = 0;
-                while (physAcc >= step && guard++ < 8) {
+                while (physAcc >= step && guard++ < 8 && !blk::scale::budget().exhausted()) {
                     if (inPlay) {
                         stepPlayerPhysicsWithCollision(step);
                         g_bphys.step(step);
+                        applyConstraintMovers(step);
+                        applyWaterBuoyancy(step);
                     } else {
                         g_player.humanoid.stepPhysics(step, g_playerPos.y, 0.f);
                     }
@@ -1530,8 +1628,25 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
             acValidateMovement(g_playerPos, g_moveVel, dt, (float)glfwGetTime(),
                                g_player.humanoid.grounded, g_player.humanoid.velocityY);
+            plat::prof::mark("prima update player");   // BLOCKY_PROFILE
             g_player.update(dt, g_walking);
             updateFriendPlayers(dt);
+            g_world.tickNpcs(dt);
+            if (g_lua.ok) g_lua.flushNpcSignals();
+            if (g_net.role != NetRole::Client
+                && (g_screen == AppScreen::Playing
+                    || (g_screen == AppScreen::Studio && g_studioTesting))) {
+                glm::vec3 spots[9];
+                int ns = 0;
+                spots[ns++] = g_playerPos;
+                for (const auto& r : g_net.remotes) {
+                    if (ns >= 9) break;
+                    spots[ns++] = r.displayPos;
+                }
+                g_world.tryPickupNear(spots, ns);
+            }
+            g_sounds.updateTracked(g_world, g_playerPos);
+            plat::prof::mark("prima rete");   // BLOCKY_PROFILE
             if (g_screen == AppScreen::Playing && g_net.role != NetRole::Offline) {
                 { PROF_SCOPE(plat::prof::Phase::Network);
                   g_net.poll((float)glfwGetTime());
@@ -1573,6 +1688,25 @@ static void blockyStepFrame(GLFWwindow* win) {
                     // che c'era gia' fa il resto, senza codice nuovo.
                     g_remoteBodies[i].humanoid.grounded = !g_net.remotes[i].airborne;
                     g_remoteBodies[i].update(dt, g_net.remotes[i].walking);
+                }
+                // Animazioni R6 anche sugli altri: lo stato arriva dalla rete
+                // (cammina, in aria); la velocita' verticale si stima dalla posizione.
+                if (g_remoteR6Animate.size() < g_remoteBodies.size()) {
+                    g_remoteR6Animate.resize(g_remoteBodies.size());
+                    g_remoteLastY.resize(g_remoteBodies.size(), 0.f);
+                }
+                for (size_t i = 0; i < g_net.remotes.size() && i < g_remoteBodies.size(); ++i) {
+                    auto& an = g_remoteR6Animate[i];
+                    Humanoid& rh = g_remoteBodies[i].humanoid;
+                    if (!an.setup()) { blk::anim::DefaultR6Animate::clearFrom(rh); continue; }
+                    const float y = g_net.remotes[i].displayPos.y;
+                    blk::anim::R6AnimInput in;
+                    in.grounded = !g_net.remotes[i].airborne;
+                    in.walking = g_net.remotes[i].walking;
+                    in.velocityY = dt > 0.f ? (y - g_remoteLastY[i]) / dt : 0.f;
+                    g_remoteLastY[i] = y;
+                    an.update(in, dt);
+                    an.applyTo(rh);
                 }
                 std::snprintf(g_menu.netStatus, sizeof(g_menu.netStatus), "%s (%d)",
                               g_net.status, g_net.playerCount());
@@ -1627,32 +1761,51 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
             if (!g_showPlayerRigEditor && !g_player.humanoid.dead)
                 g_animator.apply(g_player.humanoid, dt, g_walking);
+            {
+                // Animazioni R6 di base sopra la camminata procedurale. Restano
+                // fuori: rig editor, una clip custom in corso (catalogo, script
+                // vecchi) e una camminata/salto scelti dal catalogo animazioni.
+                Humanoid& ph = g_player.humanoid;
+                const auto& lib = animLibrary();
+                const bool customWalk = g_walking && ph.grounded && !lib.defaultWalkId.empty() && lib.defaultWalkId != "classic_walk";
+                const bool customJump = !ph.grounded && !lib.defaultJumpId.empty() && lib.defaultJumpId != "classic_jump";
+                const bool customClip = g_animator.clip == AnimClip::Custom && g_animator.hasCustomClip;
+                if (g_r6Animate.ready() && !g_showPlayerRigEditor && !ph.dead && !customClip && !customWalk && !customJump) {
+                    blk::anim::R6AnimInput in;
+                    in.grounded = ph.grounded;
+                    in.walking = g_walking;
+                    in.seated = g_veicoli.seated();
+                    in.toolEquipped = effectiveHeldSlot() >= 0;
+                    in.velocityY = ph.velocityY;
+                    in.walkSpeed = ph.walkSpeed;
+                    in.emote = g_animator.clip == AnimClip::Wave ? "wave" : g_animator.clip == AnimClip::Dance ? "dance" : "";
+                    g_r6Animate.update(in, dt);
+                    g_r6Animate.applyTo(ph);
+                } else {
+                    blk::anim::DefaultR6Animate::clearFrom(ph);
+                }
+            }
             // Dopo l animatore di sistema: la posa dei keyframe si SOMMA a
             // camminata e salto invece di sostituirli.
+            plat::prof::mark("prima rig");   // BLOCKY_PROFILE
             tickRigAnimatorPreview(dt);
             updateModelAnimPlayback(dt);
             if (g_screen == AppScreen::Playing
                 || (g_screen == AppScreen::Studio && g_studioTesting)) {
                 g_lua.budgetUs = g_engine.quality.luaBudgetUs;
+                g_lua.budgetExceeded = false;   // si riparte a ogni frame (prima restava acceso per sempre)
                 std::string crashReason;
+                plat::prof::mark("prima heartbeat");   // BLOCKY_PROFILE
                 bool okFrame = TestSessionGuard::runGuarded([&]() {
                     { PROF_SCOPE(plat::prof::Phase::Scripts); g_lua.fireHeartbeat(dt); }
                     // AnimationTrack degli script (Humanoid:LoadAnimation) sul corpo del player.
                     g_lua.applyCharacterAnimation(g_player.humanoid);
-                    {
-                        static bool eWas = false;
-                        bool eNow = false;
-                        if (!io.WantCaptureKeyboard)
-                            eNow = glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS;
-                        // anche pad Y / interact se presente
-                        if (gamepad().yPressed) eNow = true;
-                        g_lua.tickProximity(eNow && !eWas);
-                        eWas = eNow;
-                    }
+                    g_lua.tickProximity(dt, !io.WantCaptureKeyboard, gamepad().y, gamepad().yPressed);
                     pollPartTouched();
                     pollBackpackEquipChanged();
                     tickBoomAutoFuse(dt);
                     tickCameraShake(dt);
+                    consumeServerPlayerStates();   // vita, leaderstats, teletrasporti dal server
                     g_lua.drainRemoteEvents();
                 }, &crashReason);
                 if (g_lua.budgetExceeded) {
@@ -1689,6 +1842,7 @@ static void blockyStepFrame(GLFWwindow* win) {
             }
         }
 
+        plat::prof::mark("prima particelle");   // BLOCKY_PROFILE
         g_particles.update(dt);
 
         const bool worldScreen = (g_screen != AppScreen::MainMenu
@@ -1697,6 +1851,7 @@ static void blockyStepFrame(GLFWwindow* win) {
         glm::vec3 skyZenith, skyHorizon;
         const bool timeRuns = (g_screen == AppScreen::Playing)
             || (g_screen == AppScreen::Studio && g_studioTesting);
+        plat::prof::mark("prima luci");   // BLOCKY_PROFILE
         if (worldScreen) {
             g_lighting.tick(dt, timeRuns);
             toSunNow = g_lighting.toSun();
@@ -1722,9 +1877,15 @@ static void blockyStepFrame(GLFWwindow* win) {
         // La scena si disegna a g_renderW x g_renderH; il composite la riporta
         // a schermo pieno ricostruendola. Su una GPU modesta abbassare questa
         // sola risoluzione vale piu di qualunque altra impostazione.
+        plat::prof::mark("prima risoluzione");   // BLOCKY_PROFILE
         updateRenderResolution();
-        g_bloom.beginScene(g_renderW, g_renderH);
+        // beginScene lega il framebuffer della scena. Su Android lo swap non
+        // aspetta (Presentazione resta 0) e l'attesa della GPU cade su questo
+        // bind: va contato dentro Mondo 3D, non in "non misurato".
+        plat::prof::mark("prima mondo 3D");   // BLOCKY_PROFILE
         plat::prof::begin(plat::prof::Phase::World);
+        g_bloom.beginScene(g_renderW, g_renderH);
+        plat::prof::mark("dopo bloom begin");   // BLOCKY_PROFILE
         {
             glm::vec3 sky = glm::mix(skyHorizon, skyZenith, 0.35f);
             sky = glm::mix(sky, g_lighting.outdoorAmbient, g_lighting.ambient * 0.35f * (1.f - g_night));
@@ -1733,7 +1894,13 @@ static void blockyStepFrame(GLFWwindow* win) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float aspect = g_w / (float)g_h;
-        glm::mat4 proj = glm::perspective(glm::radians(g_cam.fov), aspect, 0.1f, 800.f);
+        float zNear = 0.1f, zFar = 800.f;
+        if (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting) {
+            const float focus = studioFocusDistance();
+            zNear = std::clamp(focus * 0.0015f, 0.0008f, 0.12f);
+            zFar = std::clamp(focus * 60.f, 40.f, 1200.f);
+        }
+        glm::mat4 proj = glm::perspective(glm::radians(g_cam.fov), aspect, zNear, zFar);
         auto camFromView = [](const glm::mat4& view) {
             return glm::vec3(glm::inverse(view)[3]);
         };
@@ -1794,7 +1961,9 @@ static void blockyStepFrame(GLFWwindow* win) {
             glm::mat4 view = (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting)
                 ? g_cam.view() : playCameraView();
             drawSunSky(view);
-            renderWorld3D(vao, studP, partP, studTex.id, skinP, meshP, &noobGlb, g_useGlbAvatar && noobGlb.loaded,
+            plat::prof::mark("dopo cielo");   // BLOCKY_PROFILE
+            renderWorld3D(vao, studP, partP,
+                          g_engine.quality.studLowDetail && studTexLow.id ? studTexLow.id : studTex.id, skinP, meshP, &noobGlb, g_useGlbAvatar && noobGlb.loaded,
                           view, proj, sun);
             if (g_showFbx && fbxOk && g_screen == AppScreen::Studio && !g_studioTesting) {
                 fbx.update(dt);
@@ -1857,6 +2026,7 @@ static void blockyStepFrame(GLFWwindow* win) {
                 if (!g_startupHomeDone) {
                     g_startupHomeDone = true;
                     g_world.loadBaseplatePlace();
+                    g_terrain.reset();
                     g_placeFilePath.clear();
                     clearPlaceDirty();
                     if (autosaveFileExists())
@@ -2129,31 +2299,50 @@ static void blockyStepFrame(GLFWwindow* win) {
             blk::touch::draw();
         }
 
+        plat::prof::mark("fine mondo 3D");   // BLOCKY_PROFILE
         drawMenuPadCursor();
         if (g_showProfiler) drawFrameProfiler();
 
         plat::prof::end(plat::prof::Phase::World);
         { PROF_SCOPE(plat::prof::Phase::PostFx);
         const bool useBloom = g_engine.quality.postFx || (g_look.enabled && g_look.wantPostFx);
-        const float exp = g_look.enabled ? g_look.exposure : 1.f;
-        const float con = g_look.enabled ? g_look.contrast : 1.f;
-        const float sat = g_look.enabled ? g_look.saturation : 1.f;
+        float exp = g_look.enabled ? g_look.exposure : 1.f;
+        float con = g_look.enabled ? g_look.contrast : 1.f;
+        float sat = g_look.enabled ? g_look.saturation : 1.f;
         const float vig = g_look.enabled ? g_look.vignette : 0.f;
+        const bool gradeOn = g_lighting.ccEnabled;
+        const glm::vec3 gradeTint = g_lighting.ccEnabled ? g_lighting.ccTint : glm::vec3(1.f);
+        if (g_lighting.ccEnabled) {
+            exp *= std::clamp(1.f + g_lighting.ccBrightness, 0.05f, 4.f);
+            con *= std::clamp(1.f + g_lighting.ccContrast, 0.2f, 3.f);
+            sat *= std::clamp(1.f + g_lighting.ccSaturation, 0.f, 3.f);
+        }
         float bloomI = g_look.enabled ? g_look.bloomIntensity : 1.6f;
         if (g_lighting.sunRaysEnabled)
             bloomI *= (1.f + g_lighting.sunRaysIntensity * 0.85f * g_lighting.sunRaysSpread);
-        const float thL = g_look.enabled ? g_look.bloomThLow : 0.95f;
+        if (g_lighting.bloomFx)
+            bloomI *= std::max(0.f, g_lighting.bloomFxIntensity);
+        float thL = g_look.enabled ? g_look.bloomThLow : 0.95f;
+        if (g_lighting.bloomFx) thL = std::min(thL, g_lighting.bloomFxThreshold);
         const float thH = g_look.enabled ? g_look.bloomThHigh : 1.5f;
-        const float sharp = g_look.enabled ? g_look.sharpen
+        float sharp = g_look.enabled ? g_look.sharpen
             : (g_engine.quality.mobile ? 0.35f : g_upscaleSharpen);
+        float blurAmt = 0.f;
+        if (g_lighting.blurFx) blurAmt = std::clamp(g_lighting.blurFxSize / 24.f, 0.f, 1.f);
+        if (g_lighting.dofFx) blurAmt = std::max(blurAmt, g_lighting.dofFar * 0.65f);
+        if (blurAmt > 0.f) sharp *= (1.f - blurAmt);
         if (useBloom)
             g_bloom.endSceneAndComposite(g_w, g_h, bloomI, thL, thH, sharp,
-                                         g_look.enabled, exp, con, sat, vig);
+                                         g_look.enabled || gradeOn, exp, con, sat, vig,
+                                         gradeOn, gradeTint, blurAmt);
         else
-            g_bloom.endScenePresent(g_w, g_h, sharp, g_look.enabled, exp, con, sat, vig);
+            g_bloom.endScenePresent(g_w, g_h, sharp, g_look.enabled || gradeOn, exp, con, sat, vig,
+                                    gradeOn, gradeTint, blurAmt);
         }
 
+        plat::prof::mark("prima ui");   // BLOCKY_PROFILE
         { PROF_SCOPE(plat::prof::Phase::Ui);
+        drawScriptAdornmentOutlines();
         drawServerControlOverlay(); // messaggio del giorno, aggiornamenti (dal backend)
         drawAnimStudioWindow();   // rig e animazione (solo in Studio)
         drawAnimStudioOverlay();
@@ -2162,11 +2351,80 @@ static void blockyStepFrame(GLFWwindow* win) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData()); }
 
         studioSaveScreenshotIfRequested(g_w, g_h);  // pulsante Screenshot (Studio)
+        {
+            // Per chi sviluppa: BLOCKY_SHOT=file.png salva un'immagine dopo
+            // BLOCKY_SHOT_SEC secondi (default 8) e chiude. Serve a controllare
+            // il disegno senza toccare mouse e tastiera.
+            static const char* shotPath = std::getenv("BLOCKY_SHOT");
+            static bool shotPlaceOpened = false;   // BLOCKY_SHOT_PLACE=file.blocky: lo apre nello Studio
+            static bool shotCamSet = false;
+            static glm::vec3 shotCamPos{0.f};
+            if (shotPath && !shotPlaceOpened) {
+                shotPlaceOpened = true;
+                const char* place = std::getenv("BLOCKY_SHOT_PLACE");
+                // "baseplate": place vuoto dello Studio (per i progetti Rojo, BLOCKY_ROJO).
+                const bool emptyPlace = place && std::strcmp(place, "baseplate") == 0;
+                if (emptyPlace) enterStudio();
+                if (place && *place && (emptyPlace || openPlacePath(place))) {
+                    // BLOCKY_ROJO: gli script del progetto entrano prima del Test.
+                    if (const char* rojo = std::getenv("BLOCKY_ROJO"); rojo && *rojo) studioRojoConnect(rojo);
+                    returnToStudioEditor(win);
+                    g_showLuaGuide = false;
+                    // Camera isometrica sulle part del place (senza il pavimento enorme).
+                    glm::vec3 lo(1e9f), hi(-1e9f);
+                    for (const WorkspacePart& p : g_world.parts)
+                        if (std::max(p.size.x, p.size.z) < 100.f) {
+                            lo = glm::min(lo, p.position - p.size * 0.5f);
+                            hi = glm::max(hi, p.position + p.size * 0.5f);
+                        }
+                    if (lo.x < hi.x) {
+                        const float radius = std::clamp(glm::length(hi - lo) * 0.35f, 4.f, 120.f);
+                        g_cam.yaw = -45.f;
+                        g_cam.pitch = -30.f;
+                        shotCamPos = (lo + hi) * 0.5f - g_cam.front() * (radius / std::tan(glm::radians(g_cam.fov * 0.5f)));
+                        shotCamSet = true;
+                    }
+                    // BLOCKY_SHOT_PLAY=1: avvia anche il Test (come il tasto Play).
+                    if (const char* play = std::getenv("BLOCKY_SHOT_PLAY"); play && *play == '1') startStudioTest(win);
+                }
+            }
+            if (shotPath && shotCamSet && !g_studioTesting) {   // lo Studio rimette la sua camera nei primi frame
+                g_cam.yaw = -45.f;
+                g_cam.pitch = -30.f;
+                g_cam.pos = shotCamPos;
+            }
+            static const double shotAt = glfwGetTime()
+                + (std::getenv("BLOCKY_SHOT_SEC") ? std::atof(std::getenv("BLOCKY_SHOT_SEC")) : 8.0);
+            if (shotPath && *shotPath && glfwGetTime() >= shotAt && g_w > 0 && g_h > 0) {
+                std::vector<unsigned char> px((size_t)g_w * g_h * 4), flip(px.size());
+                glReadPixels(0, 0, g_w, g_h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                for (int y = 0; y < g_h; ++y)
+                    std::memcpy(&flip[(size_t)y * g_w * 4], &px[(size_t)(g_h - 1 - y) * g_w * 4], (size_t)g_w * 4);
+                stbi_write_png(shotPath, g_w, g_h, 4, flip.data(), g_w * 4);
+                std::fprintf(stderr, "[shot] %s (parti a gruppi: %d draw, disegnate %d su %d)\n", shotPath,
+                             g_partInstBatchesLastFrame, g_renderCullStats.partsDrawn, g_renderCullStats.partsTotal);
+                const auto& st = plat::prof::state();
+                std::fprintf(stderr, "[shot] frame %.2f ms:", st.frameAvgMs);
+                for (int i = 0; i < (int)plat::prof::Phase::Count; ++i)
+                    std::fprintf(stderr, " %s=%.2f", plat::prof::phaseName((plat::prof::Phase)i), st.phase[i].avgMs);
+                std::fprintf(stderr, "\n[shot] pass: prepara=%.2f ombre=%.2f terreno=%.2f part=%.2f modelli=%.2f avatar=%.2f\n",
+                             g_renderPassMs[0], g_renderPassMs[1], g_renderPassMs[2], g_renderPassMs[3],
+                             g_renderPassMs[4], g_renderPassMs[5]);
+                std::fprintf(stderr, "[shot] animazione R6: %s (a terra %d, cammina %d, velY %.1f, attiva %d)\n",
+                             g_r6Animate.state().c_str(), (int)g_player.humanoid.grounded, (int)g_walking,
+                             g_player.humanoid.velocityY, (int)g_player.humanoid.defaultAnimActive);
+                shotPath = nullptr;
+                glfwSetWindowShouldClose(win, 1);
+            }
+        }
+        plat::prof::mark("dopo ui");   // BLOCKY_PROFILE
         glfwSwapInterval(g_vsync ? 1 : 0);
         // Qui la CPU ASPETTA la GPU: se questo numero e grande, il collo di
         // bottiglia e la scheda video, non il codice.
+        plat::prof::mark("prima swap");   // BLOCKY_PROFILE
         { PROF_SCOPE(plat::prof::Phase::Present); glfwSwapBuffers(win); }
         plat::prof::endFrame(dt);
+        plat::prof::mark("dopo swap");   // BLOCKY_PROFILE
         perfLogTick(dt);
         if (blk::resilience::tickLagDefense(plat::prof::state().frameMs, g_engine.quality,
                                             g_engine.quality.autoLagDefense))
@@ -2202,6 +2460,55 @@ static void blockyStepFrame(GLFWwindow* win) {
         }
 }
 
+static void captureWorldSession(DataModel& dm) {
+    capturePlaceSession(dm, g_prossimita, g_tag);
+    captureEmittersAndClicks(dm, g_lua.scriptEmitters_);
+}
+
+static std::string g_terrainPlaySnap;
+static bool g_terrainPlaySnapOn = false;
+
+static void rememberTerrainForPlay() {
+    g_terrainPlaySnap = g_terrain.dump();
+    g_terrainPlaySnapOn = true;
+}
+
+static void recallTerrainAfterPlay() {
+    if (!g_terrainPlaySnapOn) return;
+    g_terrain.undump(g_terrainPlaySnap);
+    g_terrainPlaySnapOn = false;
+}
+
+static std::string terrainSidecar(const std::string& placePath) {
+    return placePath + ".terrain";
+}
+
+static void loadTerrainBeside(const std::string& placePath) {
+    if (placePath.empty() || !g_terrain.readFile(terrainSidecar(placePath)))
+        g_terrain.reset();
+}
+
+static void saveTerrainBeside(const std::string& placePath, bool usePlaySnap) {
+    if (placePath.empty()) return;
+    const std::string side = terrainSidecar(placePath);
+    if (usePlaySnap && g_terrainPlaySnapOn) {
+        std::ofstream out(side, std::ios::binary);
+        if (out) out.write(g_terrainPlaySnap.data(), (std::streamsize)g_terrainPlaySnap.size());
+        return;
+    }
+    if (g_terrain.empty()) {
+        std::remove(side.c_str());
+        return;
+    }
+    g_terrain.writeFile(side);
+}
+
+static void applyWorldSession(DataModel& dm) {
+    applyPlaceSession(dm, g_prossimita, g_tag);
+    restoreEmittersAndClicks(dm, g_lua.scriptEmitters_);
+    loadTerrainBeside(dm.placeFile);
+}
+
 static int blockyInitEngine(GLFWwindow*& win) {
     CrashHandler::install(kAppBrand, "1.0");
     CrashHandler::note(kIsGameEngine ? "Avvio Game Engine" : "Avvio Blocky hub");
@@ -2212,6 +2519,8 @@ static int blockyInitEngine(GLFWwindow*& win) {
     blog::toFile(blockyDataDir() + "/blocky.log");
     LOG_INFO("boot", "Blocky avviato su %s", plat::name());
     registerGeneratedLua();
+    PlaceExporter::sessionHook() = captureWorldSession;
+    placeLoadedHook() = applyWorldSession;
     g_lua.extensions.push_back({"Models", &partgroupslua::registerLua, &g_world});
     g_lua.extensions.push_back({"Constraints", &partconstraintslua::registerLua, &g_world});
     g_veicoli.attach(&g_bphys);
@@ -2308,6 +2617,7 @@ static int blockyInitEngine(GLFWwindow*& win) {
     // nuove in background (vedi ServerControlUi.h).
     serverControlBoot();
 
+    studio_theme::load(blockyDataDir() + "/studio_theme.txt");   // Tema chiaro/scuro dello Studio scelto l'ultima volta
     if (kIsGameEngine)
         applyStudioTheme();
     else
@@ -2327,6 +2637,7 @@ static int blockyInitEngine(GLFWwindow*& win) {
         ecoBoot(g_menu.username[0] ? g_menu.username : "Player", EconomyState::kStartCoins);
         ecoSyncMenu(g_menu);
     }
+    socialBind(g_menu.username);
     ImGui_ImplGlfw_InitForOpenGL(win, true);
 #ifdef __ANDROID__
     // ImGui legge il numero di versione con sscanf e lo confronta contro
@@ -2395,6 +2706,14 @@ static int blockyInitEngine(GLFWwindow*& win) {
     vao = makeCubeVAO();
     g_bevelCube.build(0.11f);
     g_partMeshes.buildAll();
+    {
+        std::string animErr;
+        const std::string animPath = resolveScriptPath("animations/blocky_r6.blkanim");
+        if (blk::anim::loadR6DefaultActions(animPath, animErr) && g_r6Animate.setup())
+            std::printf("[Blocky] Animazioni R6: %zu caricate\n", blk::anim::r6DefaultActions()->size());
+        else
+            std::fprintf(stderr, "[Blocky] Animazioni R6 non caricate (%s): resta la camminata di prima\n", animErr.c_str());
+    }
     // Ogni sorgente passa da shaderSrc(): se assets/shaders/<nome> esiste,
     // usa quello (modifichi il file, riavvii, vedi il cambiamento — zero
     // ricompilazione); altrimenti usa la stringa incorporata qui sotto,
@@ -2403,6 +2722,19 @@ static int blockyInitEngine(GLFWwindow*& win) {
                       shaderSrc("part.frag.glsl", kPartFS).c_str());
     studP = makeProg(shaderSrc("part.vert.glsl", kPartVS).c_str(),
                       shaderSrc("stud.frag.glsl", kStudFS).c_str());
+    {
+        // Le stesse part, disegnate a gruppi (main_ui/PartInstancedDraw.h).
+        const std::string ivs = instancedPartVS(shaderSrc("part.vert.glsl", kPartVS));
+        const std::string ipfs = instancedPartFS(shaderSrc("part.frag.glsl", kPartFS));
+        const std::string isfs = instancedPartFS(shaderSrc("stud.frag.glsl", kStudFS));
+        if (!ivs.empty() && !ipfs.empty() && !isfs.empty()) {
+            g_partInstP = makeProg(ivs.c_str(), ipfs.c_str());
+            g_studInstP = makeProg(ivs.c_str(), isfs.c_str());
+        }
+        g_partInstancingOk = partInstProgramLinked(g_partInstP) && partInstProgramLinked(g_studInstP)
+            && !std::getenv("BLOCKY_NO_INSTANCING");   // per confrontare col disegno vecchio
+        std::printf("[Blocky] Part a gruppi (instancing): %s\n", g_partInstancingOk ? "attivo" : "no, una alla volta");
+    }
     skinP = makeProg(shaderSrc("skin.vert.glsl", kSkinVS).c_str(),
                       shaderSrc("part.frag.glsl", kPartFS).c_str());
     meshP = makeProg(shaderSrc("meshtex.vert.glsl", kMeshTexVS).c_str(),
@@ -2420,6 +2752,7 @@ static int blockyInitEngine(GLFWwindow*& win) {
         }
         bucksEnsureLoaded();
     }
+    studTexLow.loadDownscaled(findStudTexture(), 64);
     if (!studTex.load(findStudTexture(), true))
         std::fprintf(stderr, "Avviso: stud.png non trovato.\n");
     sun = g_lighting.sunDirection();

@@ -653,6 +653,40 @@ int main() {
         if (!ok) return 12;
     }
 
+    // Debugger dello Studio: punto di interruzione alla riga 3, variabili locali,
+    // Continua, e Passo che si ferma alla riga dopo.
+    {
+        const char* src =
+            "local a = 1\n"
+            "local b = 2\n"
+            "DBG_X = a + b\n"
+            "DBG_Y = DBG_X * 10\n"
+            "DBG_DONE = true\n";
+        lua.debugBreakpoints["string"] = {3};
+        const bool ran = lua.runString(src);
+        const bool paused = lua.debugIsPaused();
+        const int line = lua.debugPause.line;
+        bool sawA = false, sawB = false;
+        for (const auto& v : lua.debugPause.locals) {
+            if (v.name == "a" && v.value == "1") sawA = true;
+            if (v.name == "b" && v.value == "2") sawB = true;
+        }
+        const std::string beforeX = lua.evalWatch("DBG_X");
+        lua.debugContinue(true);   // Passo: si ferma alla riga 4
+        const bool steppedPaused = lua.debugIsPaused();
+        const int stepLine = lua.debugPause.line;
+        const std::string afterStepX = lua.evalWatch("DBG_X");
+        lua.debugContinue(false);  // Continua fino in fondo
+        const std::string done = lua.evalWatch("DBG_DONE");
+        const bool ok = ran && paused && line == 3 && sawA && sawB && beforeX == "nil" && steppedPaused && stepLine == 4
+                     && afterStepX == "3" && done == "true" && !lua.debugIsPaused();
+        std::fprintf(stderr, "[debugger] %s (fermo=%d riga=%d a=%d b=%d X prima=%s, passo fermo=%d riga=%d X=%s, fine=%s)\n",
+                     ok ? "OK" : "FAIL", (int)paused, line, (int)sawA, (int)sawB, beforeX.c_str(), (int)steppedPaused, stepLine,
+                     afterStepX.c_str(), done.c_str());
+        lua.debugBreakpoints.clear();
+        if (!ok) return 13;
+    }
+
     // Script che non finisce mai: va fermato dal budget, non deve mandare in
     // crash il processo (prima: SIGILL quando l'interrupt trovava lo stack pieno).
     {

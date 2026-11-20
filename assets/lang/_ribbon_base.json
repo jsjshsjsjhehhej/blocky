@@ -224,5 +224,17 @@
  "rb.prefs": ["Preferenze dello Studio","Studio preferences"],
  "rb.space.world": ["Mondo","World"],
  "rb.space.local": ["Locale","Local"],
- "rb.space.tip": ["Assi del gizmo: del mondo o della part (Ctrl+L)","Gizmo axes: world or part (Ctrl+L)"]
+ "rb.space.tip": ["Assi del gizmo: del mondo o della part (Ctrl+L)","Gizmo axes: world or part (Ctrl+L)"],
+ "rb.publish": ["Pubblica","Publish"],
+ "rb.collide.drag": ["Collisioni","Collisions"],
+ "rb.collide.tip": ["Spostando o scalando una part non entra dentro le altre","Moved or scaled parts can't go inside other parts"],
+ "rb.csg.union": ["Unione","Union"],
+ "rb.csg.negate": ["Nega","Negate"],
+ "rb.csg.intersect": ["Interseca","Intersect"],
+ "rb.csg.separate": ["Separa","Separate"],
+ "rb.g.solids": ["Solidi","Solid Modeling"],
+ "rb.c.tool": ["Clic su due punti","Click two points"],
+ "rb.c.fromsel": ["Tra le part selezionate","Between selected parts"],
+ "rb.theme.light": ["Tema chiaro","Light theme"],
+ "rb.theme.dark": ["Tema scuro","Dark theme"]
 }

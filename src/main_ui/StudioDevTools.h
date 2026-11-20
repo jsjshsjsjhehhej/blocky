@@ -402,6 +402,7 @@ static void drawVersionHistoryWindow() {
                 studioMultiClear();
                 selectPart(g_world.parts.empty() ? -1 : 0);
                 g_undo.clear();
+                g_worldReplaced = true;
                 markPlaceDirty();
                 g_exportMsg = "Versione ripristinata";
             } else {

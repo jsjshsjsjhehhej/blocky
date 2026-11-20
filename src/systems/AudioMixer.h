@@ -102,6 +102,18 @@ public:
         return false;
     }
 
+    void setPosition(int id, const glm::vec3& pos) {
+        for (auto& v : voices_)
+            if (v->id == id) ma_sound_set_position(&v->sound, pos.x, pos.y, pos.z);
+    }
+
+    void setPitch(int id, float pitch) {
+        if (pitch < 0.05f) pitch = 0.05f;
+        if (pitch > 8.f) pitch = 8.f;
+        for (auto& v : voices_)
+            if (v->id == id) ma_sound_set_pitch(&v->sound, pitch);
+    }
+
     void setVolume(int id, float volume) {
         for (auto& v : voices_)
             if (v->id == id) ma_sound_set_volume(&v->sound, clampVol(volume));

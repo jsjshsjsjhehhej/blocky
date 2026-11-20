@@ -35,6 +35,20 @@ struct LightingService {
     float sunRaysIntensity = 0.25f;
     float sunRaysSpread = 1.f;
 
+    // Figli di Lighting, come in Studio: cambiano l'immagine finale.
+    bool  ccEnabled = false;
+    float ccBrightness = 0.f;     // -1..1
+    float ccContrast = 0.f;       // -1..1
+    float ccSaturation = 0.f;     // -1..1
+    glm::vec3 ccTint{1.f, 1.f, 1.f};
+    bool  bloomFx = false;
+    float bloomFxIntensity = 1.f;
+    float bloomFxThreshold = 0.8f;
+    bool  blurFx = false;
+    float blurFxSize = 0.f;       // 0..56
+    bool  dofFx = false;
+    float dofFar = 0.4f;          // 0..1, sfoca il quadro (non un obiettivo vero)
+
     DayNightMode dayNight = DayNightMode::Cycle;
     float dayLengthMinutes = 8.f;
     float fixedDayClock = 14.f;
@@ -54,6 +68,14 @@ struct LightingService {
         atmosphereHaze = std::clamp(atmosphereHaze, 0.f, 1.f);
         sunRaysIntensity = std::clamp(sunRaysIntensity, 0.f, 2.f);
         sunRaysSpread = std::clamp(sunRaysSpread, 0.1f, 4.f);
+        ccBrightness = std::clamp(ccBrightness, -1.f, 1.f);
+        ccContrast = std::clamp(ccContrast, -1.f, 1.f);
+        ccSaturation = std::clamp(ccSaturation, -1.f, 1.f);
+        ccTint = glm::clamp(ccTint, glm::vec3(0.f), glm::vec3(1.f));
+        bloomFxIntensity = std::clamp(bloomFxIntensity, 0.f, 4.f);
+        bloomFxThreshold = std::clamp(bloomFxThreshold, 0.f, 2.f);
+        blurFxSize = std::clamp(blurFxSize, 0.f, 56.f);
+        dofFar = std::clamp(dofFar, 0.f, 1.f);
     }
 
     // Fog effettivo dopo Atmosphere (non modifica i campi salvati).

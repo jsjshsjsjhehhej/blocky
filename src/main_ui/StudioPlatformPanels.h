@@ -122,6 +122,8 @@ static void drawSharedServiceChildren(SharedService svc) {
     ImGui::Unindent();
 }
 
+static void drawOutputPanelPro();   // StudioToolsPro.h
+
 static void drawExplorerServiceTree() {
     using namespace studio::platform;
     auto svc = [](int id, const char* label) {
@@ -226,26 +228,7 @@ static void drawBottomDockTabs(float x, float y, float w, float h,
     if (ImGui::BeginTabBar("##bottomdocktabs", ImGuiTabBarFlags_Reorderable)) {
         if (g_showLuaOutput && ImGui::BeginTabItem("Output")) {
             g_bottomDockTab = 0;
-            if (ImGui::Button("Clear")) g_lua.printLog.clear();
-            ImGui::SameLine();
-            ImGui::TextDisabled("%d lines", (int)g_lua.printLog.size());
-            drawOutputFilterButtons();
-            const float childH = std::max(1.f, ImGui::GetContentRegionAvail().y);
-            ImGui::BeginChild("##luaprint2", {0.f, childH}, ImGuiChildFlags_None,
-                              ImGuiWindowFlags_HorizontalScrollbar);
-            for (const std::string& line : g_lua.printLog) {
-                if (!studioOutputLineVisible(line)) continue;
-                const bool isErr = line.find("error") != std::string::npos
-                                || line.find("Error") != std::string::npos;
-                const bool isWarn = line.find("warn") != std::string::npos
-                                 || line.find("Warn") != std::string::npos;
-                if (isErr) ImGui::TextColored({1.f, 0.45f, 0.4f, 1.f}, "%s", line.c_str());
-                else if (isWarn) ImGui::TextColored({1.f, 0.82f, 0.35f, 1.f}, "%s", line.c_str());
-                else ImGui::TextUnformatted(line.c_str());
-            }
-            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f)
-                ImGui::SetScrollHereY(1.f);
-            ImGui::EndChild();
+            drawOutputPanelPro();   // StudioToolsPro.h: Output come Roblox Studio
             ImGui::EndTabItem();
         }
         if (g_showAssets && ImGui::BeginTabItem("Assets")) {

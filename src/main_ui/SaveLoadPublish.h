@@ -4,6 +4,11 @@
 // main.cpp esattamente in questo punto, mai da altri translation unit.
 
 #include "engine/SceneIntegrity.h"
+#include "engine/RuntimeScale.h"
+
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 static void doExport() {
     syncFriendsToWorld();
@@ -29,8 +34,19 @@ static void refreshGamesList() {
 
 static bool writeCurrentPlaceTo(const std::string& path) {
     if (path.empty()) return false;
+    // Durante il Test il mondo contiene quello che gli script hanno creato giocando
+    // (GUI, part, NPC...): si salva il place di PRIMA del Test, come Roblox Studio.
+    // Prima chiudere lo Studio a meta' di un Test sporcava il place.
+    if (g_studioTesting && g_hasTestBackup) {
+        std::string json = PlaceExporter::exportPlace(g_worldTestBackup, g_player.humanoid, g_playerPosTestBackup,
+                                                      g_playerYawTestBackup, &g_lighting);
+        saveTerrainBeside(path, true);
+        return PlaceExporter::saveToFile(path, json);
+    }
     syncFriendsToWorld();
     std::string json = PlaceExporter::exportPlace(g_world, g_player.humanoid, g_playerPos, g_playerYaw, &g_lighting);
+    g_world.placeFile = path;
+    saveTerrainBeside(path, false);
     return PlaceExporter::saveToFile(path, json);
 }
 
@@ -43,7 +59,7 @@ static bool g_didPersistExit = false;
 static float g_autosaveAcc = 0.f;
 
 static void persistAutosavePlaceOnly() {
-    if (g_persistBusy || !kIsGameEngine) return;
+    if (g_persistBusy || !kIsGameEngine || g_studioTesting) return;
     if (!(g_screen == AppScreen::Studio || g_screen == AppScreen::AvatarPublisher
           || !g_world.parts.empty()))
         return;
@@ -268,6 +284,8 @@ static void loadAutosaveIntoEditor() {
         g_exportMsg = "Autosave non leggibile";
         return;
     }
+    g_undo.clear();   // le voci del place di prima non valgono qui
+    g_worldReplaced = true;
     g_placeFilePath.clear();
     g_wsMeshes.clear();
     syncFriendsFromWorld();
@@ -275,6 +293,8 @@ static void loadAutosaveIntoEditor() {
     markPlaceDirty();
     g_exportMsg = "Ripristinato place non salvato (autosave)";
 }
+
+static int g_pendingTemplate = -1;
 
 static void executePendingNav(GLFWwindow* win) {
     PendingNav a = g_pendingNav;
@@ -287,13 +307,16 @@ static void executePendingNav(GLFWwindow* win) {
     case PendingNav::QuitApp:
         glfwSetWindowShouldClose(win, true);
         break;
-    case PendingNav::NewPlace:
-        applyMapTemplate(0);
+    case PendingNav::NewPlace: {
+        const int kind = g_pendingTemplate >= 0 ? g_pendingTemplate : 0;
+        g_pendingTemplate = -1;
+        applyMapTemplate(kind);
         clearPlaceDirty();
         g_placeFilePath.clear();
         returnToStudioEditor(win);
-        g_exportMsg = "Nuovo place Baseplate";
+        g_exportMsg = std::string("Nuovo place: ") + g_world.placeName;
         break;
+    }
     case PendingNav::OpenPlace:
         doOpenPlace();
         returnToStudioEditor(win);
@@ -369,77 +392,103 @@ static void drawAutosavePrompt(GLFWwindow* win) {
     }
 }
 
+static void startPlaceTemplate(GLFWwindow* win, int kind) {
+    g_pendingTemplate = kind;
+    requestNav(win, PendingNav::NewPlace);
+}
+
 static void drawGameEngineHome(GLFWwindow* win, float ) {
     const float W = (float)g_w, H = (float)g_h;
-    const float cardW = std::min(720.f, W * 0.72f);
-    const float cardH = std::min(640.f, H * 0.78f);
-    const float cardX = (W - cardW) * 0.5f;
-    const float cardY = (H - cardH) * 0.5f;
-
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({W, H});
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.05f, 0.08f, 0.14f, 1.f});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.11f, 0.11f, 0.12f, 1.f});
     ImGui::Begin("##GEHome", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    ImDrawList* bg = ImGui::GetWindowDrawList();
-    bg->AddRectFilledMultiColor({0, 0}, {W, H},
-        IM_COL32(12, 22, 42, 255), IM_COL32(18, 36, 64, 255),
-        IM_COL32(10, 18, 34, 255), IM_COL32(8, 14, 28, 255));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled({0, 0}, {W, 52.f}, IM_COL32(24, 24, 26, 255));
+    dl->AddRectFilled({0, 52.f}, {0.f + 3.f, 52.f}, IM_COL32(0, 120, 212, 255));
+    ImGui::SetCursorPos({18.f, 14.f});
+    ImGui::TextUnformatted("Blocky Studio");
+    ImGui::SameLine();
+    ImGui::TextDisabled("  place");
+    if (g_placeDirty) {
+        ImGui::SameLine();
+        ImGui::TextColored({1.f, 0.55f, 0.28f, 1.f}, "  non salvato");
+    }
 
-    ImGui::SetCursorPos({cardX, cardY});
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.09f, 0.13f, 0.22f, 1.f});
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 18.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {36.f, 32.f});
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {14.f, 14.f});
-    ImGui::BeginChild("##gehomebox", {cardW, cardH}, true,
-        ImGuiWindowFlags_NoScrollbar);
-
-    ImGui::SetWindowFontScale(1.55f);
-    ImGui::TextColored({0.40f, 0.88f, 1.f, 1.f}, "BLOCKY");
-    ImGui::SetWindowFontScale(1.25f);
-    ImGui::TextColored({1.f, 0.82f, 0.30f, 1.f}, "Game Engine");
-    ImGui::SetWindowFontScale(1.f);
-    ImGui::Spacing();
-    ImGui::TextDisabled("Home — crea e modifica place");
-    if (g_placeDirty)
-        ImGui::TextColored({1.f, 0.55f, 0.25f, 1.f}, "Place non salvato");
-    else if (!g_placeFilePath.empty())
-        ImGui::TextWrapped("%s", g_placeFilePath.c_str());
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.f);
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.14f, 0.52f, 0.92f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22f, 0.62f, 1.f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_Text, {1.f, 1.f, 1.f, 1.f});
-    if (ImGui::Button("Continua editor", {-1, 64}))
-        returnToStudioEditor(win);
-    ImGui::PopStyleColor(3);
-
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.16f, 0.28f, 0.46f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22f, 0.38f, 0.62f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_Text, {1.f, 1.f, 1.f, 1.f});
-    if (ImGui::Button("Nuovo place", {-1, 56}))
-        requestNav(win, PendingNav::NewPlace);
-    if (ImGui::Button("Apri place...", {-1, 56}))
-        requestNav(win, PendingNav::OpenPlace);
-    ImGui::PopStyleColor(3);
-
-    ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.42f, 0.18f, 0.18f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.58f, 0.24f, 0.24f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_Text, {1.f, 1.f, 1.f, 1.f});
-    if (ImGui::Button("Esci", {-1, 52}))
-        requestNav(win, PendingNav::QuitApp);
-    ImGui::PopStyleColor(3);
-    ImGui::PopStyleVar();
-
+    const float railW = 220.f;
+    ImGui::SetCursorPos({0.f, 52.f});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.15f, 0.15f, 0.16f, 1.f});
+    ImGui::BeginChild("##homerail", {railW, H - 52.f}, false);
+    ImGui::Dummy({0, 12});
+    ImGui::Indent(12.f);
+    auto voce = [railW](const char* etichetta, bool acceso) {
+        ImGui::PushStyleColor(ImGuiCol_Button, acceso ? ImVec4(0.f, 0.47f, 0.83f, 1.f) : ImVec4(0.20f, 0.20f, 0.22f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, acceso ? ImVec4(0.10f, 0.55f, 0.92f, 1.f) : ImVec4(0.26f, 0.26f, 0.28f, 1.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+        const bool premuto = ImGui::Button(etichetta, ImVec2(railW - 28.f, 36.f));
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+        return premuto;
+    };
+    if (voce("Continua", true)) returnToStudioEditor(win);
+    ImGui::Dummy({0, 6});
+    if (voce("Apri place...", false)) requestNav(win, PendingNav::OpenPlace);
+    ImGui::Dummy({0, 18});
+    ImGui::TextDisabled("SESSIONE");
+    if (voce("Esci", false)) requestNav(win, PendingNav::QuitApp);
+    ImGui::Unindent(12.f);
     ImGui::EndChild();
-    ImGui::PopStyleVar(3);
     ImGui::PopStyleColor();
+
+    ImGui::SetCursorPos({railW + 28.f, 72.f});
+    ImGui::BeginChild("##hometemplates", {W - railW - 40.f, H - 96.f}, false);
+    ImGui::TextUnformatted("Nuovo");
+    ImGui::TextDisabled("Scegli un modello, come in Roblox Studio.");
+    ImGui::Dummy({0, 8});
+
+    struct Modello { const char* nome; const char* cosa; int kind; ImU32 fascia; };
+    const Modello modelli[] = {
+        {"Baseplate", "Pavimento e spawn", 0, IM_COL32(90, 170, 90, 255)},
+        {"Obby", "Piattaforme e salti", 2, IM_COL32(230, 150, 40, 255)},
+        {"Arena", "Spazio per uno scontro", 3, IM_COL32(190, 70, 70, 255)},
+        {"Citta'", "Strade e isolati", 5, IM_COL32(120, 130, 145, 255)},
+        {"Giardino", "Erba, alberi, luce", 1, IM_COL32(70, 160, 90, 255)},
+        {"Parco", "Aperto, poco costruito", 4, IM_COL32(60, 140, 110, 255)},
+        {"FPS", "Kit di sparatoria", 6, IM_COL32(70, 110, 180, 255)},
+        {"Tycoon", "Pad e monete", 7, IM_COL32(200, 170, 50, 255)},
+        {"Survival", "Base e un NPC", 8, IM_COL32(90, 80, 140, 255)},
+    };
+    const float cardW = 188.f, cardH = 96.f, gap = 12.f;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    int col = 0;
+    const int cols = std::max(1, (int)((avail + gap) / (cardW + gap)));
+    for (const Modello& m : modelli) {
+        if (col > 0) ImGui::SameLine(0.f, gap);
+        ImGui::PushID(m.kind);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.17f, 0.17f, 0.18f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.26f, 0.32f, 1.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+        const std::string et = std::string(m.nome) + "\n" + m.cosa;
+        if (ImGui::Button(et.c_str(), {cardW, cardH}))
+            startPlaceTemplate(win, m.kind);
+        const ImVec2 a = ImGui::GetItemRectMin();
+        const ImVec2 b = ImGui::GetItemRectMax();
+        ImGui::GetWindowDrawList()->AddRectFilled(a, {b.x, a.y + 5.f}, m.fascia);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+        ImGui::PopID();
+        if (++col >= cols) col = 0;
+    }
+    if (!g_placeFilePath.empty()) {
+        ImGui::Dummy({0, 16});
+        ImGui::TextDisabled("Ultimo file");
+        ImGui::TextWrapped("%s", g_placeFilePath.c_str());
+    }
+    ImGui::EndChild();
+
     ImGui::End();
     ImGui::PopStyleColor();
 
@@ -452,6 +501,8 @@ static bool openPlacePath(const std::string& path) {
         g_exportMsg = "Impossibile aprire: " + path;
         return false;
     }
+    g_undo.clear();   // come Roblox: aprire un altro place azzera la cronologia
+    g_worldReplaced = true;
     int integrityFixes = SceneIntegrity::repair(g_world);
     g_placeFilePath = path;
     g_wsMeshes.clear();
@@ -474,13 +525,103 @@ static bool openPlacePath(const std::string& path) {
     return true;
 }
 
+struct AsyncPlaceJob {
+    std::mutex mu;
+    std::thread thread;
+    std::atomic<int> phase{0};
+    std::string path;
+    DataModel world;
+    LightingService lighting;
+};
+
+static AsyncPlaceJob& asyncPlaceJob() {
+    static AsyncPlaceJob job;
+    return job;
+}
+
+static void requestAsyncPlace(const std::string& path) {
+    AsyncPlaceJob& job = asyncPlaceJob();
+    if (job.phase.load() == 1) {
+        g_exportMsg = "Caricamento gia' in corso";
+        return;
+    }
+    if (job.thread.joinable()) job.thread.join();
+    job.phase.store(1);
+    blk::scale::asyncLoad().phase.store(1);
+    blk::scale::asyncLoad().path = path;
+    blk::scale::asyncLoad().message = "Lettura " + path;
+    g_exportMsg = "Caricamento in background: " + path;
+    job.thread = std::thread([path] {
+        DataModel loaded;
+        LightingService lights;
+        const bool ok = loadPlaceFromJson(path, loaded, &lights);
+        AsyncPlaceJob& job = asyncPlaceJob();
+        if (ok) {
+            std::lock_guard<std::mutex> lock(job.mu);
+            job.world = std::move(loaded);
+            job.lighting = lights;
+            job.path = path;
+        }
+        job.phase.store(ok ? 2 : 3);
+        blk::scale::asyncLoad().phase.store(ok ? 2 : 3);
+        blk::scale::asyncLoad().message = ok ? "Pronto" : "Lettura fallita";
+    });
+}
+
+static void pollAsyncPlaceOpen() {
+    AsyncPlaceJob& job = asyncPlaceJob();
+    const int phase = job.phase.load();
+    if (phase != 2 && phase != 3) return;
+    if (job.thread.joinable()) job.thread.join();
+    if (phase == 3) {
+        g_exportMsg = "Impossibile aprire: " + blk::scale::asyncLoad().path;
+        job.phase.store(0);
+        blk::scale::asyncLoad().phase.store(0);
+        return;
+    }
+    DataModel loaded;
+    LightingService lights;
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(job.mu);
+        loaded = std::move(job.world);
+        lights = job.lighting;
+        path = job.path;
+    }
+    job.phase.store(0);
+    blk::scale::asyncLoad().phase.store(0);
+    g_world = std::move(loaded);
+    g_lighting = lights;
+    g_undo.clear();
+    g_worldReplaced = true;
+    const int integrityFixes = SceneIntegrity::repair(g_world);
+    g_placeFilePath = path;
+    g_wsMeshes.clear();
+    syncFriendsFromWorld();
+    g_selectedPart = -1;
+    g_selectedModel = -1;
+    g_selectedSound = -1;
+    g_selectedLabel = -1;
+    g_scaleDragging = g_moveDragging = g_rotateDragging = false;
+    clearPlaceDirty();
+    std::snprintf(g_gameNameBuf, sizeof(g_gameNameBuf), "%s", g_world.placeName.c_str());
+    if (!g_world.parts.empty())
+        selectPart(0);
+    g_exportMsg = "Aperto: " + path + " (" + std::to_string(g_world.parts.size()) + " parti"
+        + (g_friends.empty() ? "" : (", " + std::to_string(g_friends.size()) + " amici"))
+        + (integrityFixes > 0 ? (", " + std::to_string(integrityFixes) + " fix integrita'") : "")
+        + ")";
+    if (GLFWwindow* win = glfwGetCurrentContext())
+        glfwSetWindowTitle(win, (std::string(kAppBrand) + " - " + g_world.placeName).c_str());
+}
+
 static void doOpenPlace() {
     std::string path;
     if (!openPlaceFileDialog(path, publisherHwnd())) {
         g_exportMsg = "Apertura annullata";
         return;
     }
-    openPlacePath(path);
+    requestAsyncPlace(path);
 }
 
 static void doSaveProject() {

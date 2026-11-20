@@ -4,6 +4,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <glm/glm.hpp>
 
 struct ScriptControls {
     bool jumpEnabled = true;
@@ -11,6 +12,15 @@ struct ScriptControls {
     bool shiftLockAllowed = true;
     float walkSpeedOverride = -1.f;
     float jumpPowerOverride = -1.f;
+
+    // Humanoid:Move / MoveTo. Age > 0.2 means the script stopped calling Move,
+    // so the keyboard drives again.
+    glm::vec3 scriptMove{0.f};
+    bool scriptMoveCamera = true;
+    float scriptMoveAge = 10.f;
+    bool moveToActive = false;
+    float moveToAge = 0.f;
+    glm::vec3 moveToTarget{0.f};
 
     bool sprintHeld = false;
     bool moveHeld = false;
@@ -35,6 +45,12 @@ struct ScriptControls {
     std::vector<int> humanoidDied;
     std::vector<int> humanoidHealthChanged;
     std::vector<int> humanoidStateChanged;
+    std::vector<int> humanoidMoveToFinished;
+
+    // BadgeService, per questa partita: "userId:badgeId"
+    std::map<std::string, bool> badges;
+    // MessagingService: topic -> callback
+    std::map<std::string, std::vector<int>> topics;
 
     // ProximityPrompt.Triggered[name]
     std::map<std::string, std::vector<int>> proximityTriggered;
@@ -64,10 +80,19 @@ struct ScriptControls {
     std::map<std::string, std::vector<int>> toolEquipped;
     std::map<std::string, std::vector<int>> toolUnequipped;
     std::map<std::string, std::vector<int>> toolActivated;
+    std::map<std::string, std::vector<int>> toolDeactivated;
+
+    // Actors (NPC Humanoid): indice nell'elenco -> callback Lua
+    std::map<int, std::vector<int>> npcDied;
+    std::map<int, std::vector<int>> npcArrived;
 
     std::vector<int> playerRemoving;
     std::vector<int> inputBegan;
     std::vector<int> inputEnded;
+    std::vector<int> mouse1Down;
+    std::vector<int> mouse1Up;
+    std::vector<int> mouse2Down;
+    std::vector<int> mouse2Up;
 
     struct DebrisItem {
         int partIndex = -1;
@@ -99,10 +124,24 @@ struct ScriptControls {
         std::string name = "Beam";
         int a0 = -1, a1 = -1;
         float width0 = 0.2f, width1 = 0.2f;
+        float r = 1.f, g = 1.f, b = 1.f;
         bool enabled = true;
+    };
+    struct ScriptTrail {
+        std::string name = "Trail";
+        int partIndex = -1;
+        float width = 0.35f;
+        float life = 0.7f;
+        float r = 1.f, g = 0.85f, b = 0.3f;
+        bool enabled = true;
+        std::vector<glm::vec3> pts;
+        std::vector<float> age;
     };
     std::vector<ScriptAttachment> attachments;
     std::vector<ScriptBeam> beams;
+    std::vector<ScriptTrail> trails;
+    // ClickDetector: distanza massima per part (stud).
+    std::map<int, float> clickReach;
 
     // Gravita' vera della fisica di Blocky (bphys::kGravity), non il 196.2 di
     // Roblox: la fisica e i salti di Blocky sono tarati su 80.

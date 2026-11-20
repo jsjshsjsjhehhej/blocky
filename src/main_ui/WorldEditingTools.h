@@ -6,9 +6,21 @@
 // esattamente in questo punto.
 
 #include "render/RenderCullLod.h"
+#include <unordered_map>
 
-static glm::vec3 insertPositionInFront() {
+// Come Roblox Studio: la part nuova compare al centro della vista, appoggiata
+// sulla superficie che guardi (part o terreno). halfHeight = meta altezza.
+static glm::vec3 insertPositionInFront(float halfHeight = 0.5f) {
     if (g_mode == CamMode::Studio) {
+        glm::vec3 hit, n;
+        if (freeDragSurface((float)g_w * 0.5f, (float)g_h * 0.5f, {}, hit, n) && glm::length(hit - g_cam.pos) < 250.f) {
+            glm::vec3 p = hit + n * halfHeight;
+            const float step = studioSnapMoveStep();
+            if (step > 0.f)
+                for (int k = 0; k < 3; ++k)
+                    if (std::fabs(n[k]) < 0.99f) p[k] = std::round(p[k] / step) * step;
+            return p;
+        }
         glm::vec3 p = g_cam.pos + g_cam.front() * 12.f;
         p.y = std::max(1.f, p.y);
         p.x = std::round(p.x);
@@ -21,12 +33,13 @@ static glm::vec3 insertPositionInFront() {
 
 static void insertNewPart() {
     // Come Roblox Studio: ogni Part nuova si chiama "Part" (i nomi possono ripetersi).
-    auto& p = g_world.addPart("Part", insertPositionInFront(), {4, 1, 4}, {0.64f, 0.64f, 0.64f});
+    auto& p = g_world.addPart("Part", insertPositionInFront(0.5f), {4, 1, 4}, {0.64f, 0.64f, 0.64f});
     (void)p;
     g_selectedModel = -1;
     g_selectedSound = -1;
     g_selectedLabel = -1;
     selectPart((int)g_world.parts.size() - 1);
+    studioPushOut(g_world.parts[(size_t)g_selectedPart]);
     g_undo.recordInsert(g_selectedPart, g_world.parts[g_selectedPart]);
     markPlaceDirty();
 }
@@ -42,13 +55,14 @@ static void insertShapedPart(PartShape shape) {
     // Nomi di Roblox: sfera e cilindro sono "Part" (cambia solo Shape), il cuneo "Wedge".
     (void)n;
     auto& p = g_world.addPart(shape == PartShape::Wedge ? std::string("Wedge") : std::string("Part"),
-                              insertPositionInFront(), size, col);
+                              insertPositionInFront(size.y * 0.5f), size, col);
     p.shape = shape;
     p.useStud = false;
     g_selectedModel = -1;
     g_selectedSound = -1;
     g_selectedLabel = -1;
     selectPart((int)g_world.parts.size() - 1);
+    studioPushOut(g_world.parts[(size_t)g_selectedPart]);
     syncPartEditors();
     g_undo.recordInsert(g_selectedPart, g_world.parts[g_selectedPart]);
     markPlaceDirty();
@@ -298,6 +312,55 @@ static void reloadWorkspaceModelMeshes() {
     }
 }
 
+static StaticMesh* partFileMesh(const std::string& path) {
+    static std::unordered_map<std::string, StaticMesh> cache;
+    auto it = cache.find(path);
+    if (it == cache.end()) {
+        StaticMesh m;
+        m.load(path, 1.f);
+        it = cache.emplace(path, std::move(m)).first;
+    }
+    return it->second.loaded ? &it->second : nullptr;
+}
+
+static bool partFileMeshReady(const WorkspacePart& p) {
+    if (p.meshFile.empty() || p.destroyPending || g_world.partHeldInHand(p)) return false;
+    return partFileMesh(p.meshFile) != nullptr;
+}
+
+static glm::mat4 partFileMeshMatrix(const WorkspacePart& p) {
+    glm::mat4 m = partModelMatrix(p);
+    if (p.meshScale.x != 1.f || p.meshScale.y != 1.f || p.meshScale.z != 1.f)
+        m = m * glm::scale(glm::mat4(1.f), p.meshScale);
+    return m;
+}
+
+static void drawPartFileMeshes(GLuint meshP, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    for (const auto& p : g_world.parts) {
+        StaticMesh* mesh = p.meshFile.empty() ? nullptr : partFileMesh(p.meshFile);
+        if (!mesh || p.destroyPending || g_world.partHeldInHand(p)) continue;
+        glm::mat4 model = partFileMeshMatrix(p);
+        glUseProgram(meshP);
+        glUniformMatrix4fv(glGetUniformLocation(meshP, "uModel"), 1, GL_FALSE, glm::value_ptr(model));
+        glUniformMatrix4fv(glGetUniformLocation(meshP, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix4fv(glGetUniformLocation(meshP, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
+        glUniform3fv(glGetUniformLocation(meshP, "uSun"), 1, glm::value_ptr(sun));
+        glUniform3fv(glGetUniformLocation(meshP, "uCamPos"), 1, glm::value_ptr(g_renderCamPos));
+        uploadDynamicLights(meshP);
+        mesh->drawTextured(meshP, p.color, 1.f - p.transparency);
+    }
+}
+
+static void drawPartFileMeshShadows(GLuint prog, const glm::vec3& focus, float reach2) {
+    for (const auto& p : g_world.parts) {
+        if (!partFileMeshReady(p) || !p.castShadow) continue;
+        glm::vec3 d = p.position - focus;
+        if (glm::dot(d, d) > reach2) continue;
+        g_shadowMap.setModel(partFileMeshMatrix(p));
+        partFileMesh(p.meshFile)->drawTextured(prog, glm::vec3(1.f), 1.f);
+    }
+}
+
 static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& view,
                                 const glm::mat4& proj, const glm::vec3& sun) {
     if (g_wsMeshes.size() != g_world.models.size())
@@ -394,6 +457,7 @@ static void drawWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& vie
     }
     if (modelsSkippedBudget > 0)
         g_renderCullStats.modelsCulled += modelsSkippedBudget;
+    drawPartFileMeshes(meshP, view, proj, sun);
 }
 
 static void ensureDefaultBeepWav() {

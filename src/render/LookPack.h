@@ -54,6 +54,7 @@ enum class LookPreset : int {
     NightNeon = 4,
     CleanAaa = 5,
     Misty = 6,
+    Realistic = 7,
     Count
 };
 
@@ -65,6 +66,7 @@ inline const char* lookPresetLabel(LookPreset p) {
     case LookPreset::NightNeon: return "Night Neon";
     case LookPreset::CleanAaa: return "Clean AAA";
     case LookPreset::Misty: return "Misty / Atmosphere";
+    case LookPreset::Realistic: return "Realistico";
     default: return "Default (off)";
     }
 }
@@ -196,6 +198,35 @@ inline void applyLookPreset(LookPreset p, LookPack& look, LightingService& L) {
         L.fogStart = 18.f;
         L.fogEnd = 110.f;
         L.globalShadows = true;
+        break;
+    case LookPreset::Realistic:
+        // Pomeriggio chiaro: sole a circa 45 gradi, cielo blu, nebbia lunga,
+        // bloom solo sulle punte. Niente vignetta da film.
+        look.exposure = 1.0f;
+        look.contrast = 1.0f;
+        look.saturation = 1.0f;
+        look.vignette = 0.f;
+        look.bloomIntensity = 0.15f;
+        look.bloomThLow = 1.2f;
+        look.bloomThHigh = 1.8f;
+        look.sharpen = 0.15f;
+        L.clockTime = 15.2f;
+        L.dayNight = DayNightMode::DayOnly;
+        L.fixedDayClock = 15.2f;
+        L.brightness = 2.f;
+        L.ambient = 0.2f;
+        L.outdoorAmbient = {0.96f, 0.97f, 0.98f};
+        L.fogColor = {0.78f, 0.82f, 0.86f};
+        L.fogStart = 140.f;
+        L.fogEnd = 900.f;
+        L.atmosphereEnabled = true;
+        L.atmosphereDensity = 0.08f;
+        L.atmosphereHaze = 0.04f;
+        L.sunRaysEnabled = false;
+        L.sunRaysIntensity = 0.f;
+        L.globalShadows = true;
+        L.ccEnabled = false;
+        L.bloomFx = false;
         break;
     default:
         break;

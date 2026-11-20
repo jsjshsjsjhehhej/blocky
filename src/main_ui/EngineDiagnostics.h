@@ -176,8 +176,16 @@ inline void drawFrameProfiler() {
             "Part: %d disegnate / %d  (dist %d  frustum %d  occ %d  piccole %d  budget %d)",
             rs.partsDrawn, rs.partsTotal, rs.partsDistCulled, rs.partsFrustumCulled,
             rs.partsOcclusionCulled, rs.partsSmallCulled, rs.partsBudgetCulled);
-        ImGui::TextDisabled("Occluder soft-Z: %d  ·  Stud off: %d  mesh low: %d",
-                            rs.occlusionOccluders, rs.partsStudLod, rs.partsShapeLod);
+        ImGui::TextDisabled("Occluder soft-Z: %d  ·  Stud off: %d  mesh low: %d  batch %d",
+                            rs.occlusionOccluders, rs.partsStudLod, rs.partsShapeLod,
+                            g_partInstBatchesLastFrame);
+        {
+            const blk::scale::ScaleStats& sc = blk::scale::stats();
+            ImGui::TextDisabled(
+                "Stream %d dentro / %d fuori  pool %d+%d  sonno %d  rete %d inviati / %d fuori interesse",
+                sc.streamedIn, sc.streamedOut, sc.poolLive, sc.poolFree, sc.slept,
+                sc.interestSent, sc.interestSkipped);
+        }
         ImGui::TextDisabled("Modelli: %d / %d visibili (%d scartati)",
                             rs.modelsDrawn, rs.modelsTotal, rs.modelsCulled);
     }
@@ -215,7 +223,14 @@ static void perfLogTick(float dt) {
                            plat::prof::phaseName((plat::prof::Phase)i), ph.avgMs, ph.peakMs);
     }
     if (n > 0 && n < (int)sizeof(buf))
-        std::snprintf(buf + n, sizeof(buf) - (size_t)n, " | non_misurato=%.2f", plat::prof::unaccountedMs());
+        n += std::snprintf(buf + n, sizeof(buf) - (size_t)n, " | non_misurato=%.2f", plat::prof::unaccountedMs());
+    if (n > 0 && n < (int)sizeof(buf)) {
+        const bphys::Stats& phs = g_bphys.stats();
+        std::snprintf(buf + n, sizeof(buf) - (size_t)n,
+                      " | pass prepa=%.2f ombre=%.2f terreno=%.2f part=%.2f modelli=%.2f avatar=%.2f | fis_attive=%d",
+                      g_renderPassMs[0], g_renderPassMs[1], g_renderPassMs[2],
+                      g_renderPassMs[3], g_renderPassMs[4], g_renderPassMs[5], phs.active);
+    }
     lines.emplace_back(buf);
     if (lines.size() > 36) lines.erase(lines.begin());
     std::ofstream f(blockyDataDir() + "/perf.txt", std::ios::trunc);

@@ -45,6 +45,11 @@ static glm::vec3 clampCameraOffset(const glm::vec3& target, const glm::vec3& off
 }
 
 static glm::mat4 thirdPersonView() {
+    if (g_lua.cameraType == 1 && g_lua.scriptCamOn) {
+        const glm::vec3 look = glm::length(g_lua.scriptCamLook) > 0.01f
+            ? glm::normalize(g_lua.scriptCamLook) : glm::vec3(0.f, 0.f, -1.f);
+        return glm::lookAt(g_lua.scriptCamPos, g_lua.scriptCamPos + look, glm::vec3(0, 1, 0));
+    }
     float pitchR = glm::radians(g_orbitPitch);
     float cp = cosf(pitchR), sp = sinf(pitchR);
     glm::vec3 fwd = camFlatForward();
@@ -89,6 +94,11 @@ static void onResize(GLFWwindow*, int w, int h) {
 }
 
 static glm::mat4 firstPersonView() {
+    if (g_lua.cameraType == 1 && g_lua.scriptCamOn) {
+        const glm::vec3 look = glm::length(g_lua.scriptCamLook) > 0.01f
+            ? glm::normalize(g_lua.scriptCamLook) : glm::vec3(0.f, 0.f, -1.f);
+        return glm::lookAt(g_lua.scriptCamPos, g_lua.scriptCamPos + look, glm::vec3(0, 1, 0));
+    }
     float pitchR = glm::radians(g_orbitPitch);
     float yawR = glm::radians(g_orbitYaw);
     glm::vec3 eye = (g_ragdoll.active ? playFocusPos() : g_playerPos)
@@ -196,11 +206,52 @@ static bool playCameraActive() {
 }
 
 static void syncPlayCursor(GLFWwindow* win);
+// SelectionAndInput.h (incluso dopo): il raggio dal mouse dentro la scena.
+static void screenToRay(float mx, float my, const glm::mat4& view, const glm::mat4& proj, glm::vec3& o, glm::vec3& d);
+// Telefono, Studio: un dito trascinato sullo sfondo gira la camera (niente tasto destro).
+static bool g_studioTouchLook = false;
+
+/** Distanza usata da zoom e velocità: la part selezionata, altrimenti l'altezza. */
+static float studioFocusDistance() {
+    if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size())
+        return std::max(0.01f, glm::length(g_cam.pos - g_world.parts[g_selectedPart].position));
+    return std::max(0.02f, std::fabs(g_cam.pos.y));
+}
+
+/**
+ * Zoom dello Studio come Roblox Studio: la rotella (o il pizzico a due dita sul
+ * telefono) avvicina e allontana la camera verso il punto sotto il mouse.
+ * Il passo è una frazione della distanza, così si entra anche in un modello
+ * da 0.001 stud. Shift = ancora più lento.
+ */
+static void studioZoomCamera(GLFWwindow* win, float amount) {
+    glm::vec3 dir = g_cam.front();
+#ifndef __ANDROID__
+    if (win) {
+        double mx = 0, my = 0;
+        glfwGetCursorPos(win, &mx, &my);
+        glm::vec3 o, d;
+        screenToRay((float)mx, (float)my, g_lastView, g_lastProj, o, d);
+        if (glm::length(d) > 1e-4f) dir = glm::normalize(d);
+    }
+#else
+    (void)win;
+    amount *= 3.f;   // il pizzico arriva a passi piccoli
+#endif
+    const bool slow = win && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+    const float dist = studioFocusDistance();
+    const float step = std::clamp(dist * 0.15f, 0.002f, 48.f) * (slow ? 0.2f : 1.f);
+    g_cam.pos += dir * (amount * step);
+}
 
 static void onScroll(GLFWwindow* win, double , double yoff) {
     const bool inPlay = playCameraActive()
         || (g_screen == AppScreen::Studio && g_studioTesting);
     if (!playCameraActive() && ImGui::GetIO().WantCaptureMouse) return;
+    if (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting) {
+        studioZoomCamera(win, (float)yoff);
+        return;
+    }
     if (inPlay && win
         && (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS
             || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS)) {
@@ -343,7 +394,9 @@ static void onMouse(GLFWwindow*, double x, double y) {
 #else
     const bool touchLook = false;
 #endif
-    const bool looking = fpLook || g_rmbLook || touchLook;
+    const bool studioDragLook = g_studioTouchLook && glfwGetMouseButton(glfwGetCurrentContext(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (g_studioTouchLook && !studioDragLook) g_studioTouchLook = false;   // dito sollevato
+    const bool looking = fpLook || g_rmbLook || touchLook || studioDragLook;
     if (!looking && ImGui::GetIO().WantCaptureMouse) return;
     if (!looking) return;
     if (g_firstMouse) { g_lastMx = (float)x; g_lastMy = (float)y; g_firstMouse = false; return; }

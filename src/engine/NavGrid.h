@@ -11,6 +11,14 @@
 
 #include "engine/DataModel.h"
 
+struct NavAgent {
+    float radius = 1.2f;
+    float height = 5.f;
+    bool canJump = false;
+    float jumpHeight = 7.f;
+    float spacing = 0.f;   // 0 = solo gli angoli. Roblox usa 4.
+};
+
 class NavGrid {
 public:
     float cellSize = 2.f;
@@ -30,16 +38,24 @@ public:
         cols_ = std::max(1, (int)std::ceil((bounds * 2.f) / cellSize));
         rows_ = cols_;
 
-        blocked_.assign((size_t)cols_ * rows_, 0);
+        const size_t cells = (size_t)cols_ * rows_;
+        blocked_.assign(cells, 0);
+        top_.assign(cells, 0.f);
+        bot_.assign(cells, 1e9f);
 
         for (const WorkspacePart& p : world.parts) {
             if (!p.canCollide) continue;
             const glm::vec3 half = glm::abs(p.size) * 0.5f;
-            if (p.position.y + half.y <= stepOver) continue;
+            const float top = p.position.y + half.y;
+            const float bottom = p.position.y - half.y;
+            if (top <= stepOver) continue;          // pavimento: ci si cammina
+            if (bottom >= 12.f) continue;           // troppo in alto per la testa
 
             const float r = std::max(half.x, half.z);
             markBox(p.position.x - r, p.position.z - r,
                     p.position.x + r, p.position.z + r);
+            markHeight(p.position.x - r, p.position.z - r,
+                       p.position.x + r, p.position.z + r, bottom, top);
         }
 
         const size_t n = std::min(modelMins.size(), modelMaxs.size());
@@ -47,6 +63,8 @@ public:
             if (!world.models[i].canCollide) continue;
             if (modelMaxs[i].y <= stepOver) continue;
             markBox(modelMins[i].x, modelMins[i].z, modelMaxs[i].x, modelMaxs[i].z);
+            markHeight(modelMins[i].x, modelMins[i].z, modelMaxs[i].x, modelMaxs[i].z,
+                       modelMins[i].y, modelMaxs[i].y);
         }
     }
 
@@ -61,6 +79,12 @@ public:
 
     std::vector<glm::vec3> findPath(const glm::vec3& from, const glm::vec3& to,
                                     int maxNodes = 20000) const {
+        return findPath(from, to, NavAgent{}, nullptr, maxNodes);
+    }
+
+    std::vector<glm::vec3> findPath(const glm::vec3& from, const glm::vec3& to,
+                                    const NavAgent& agent, std::vector<uint8_t>* jumps,
+                                    int maxNodes = 20000) const {
         std::vector<glm::vec3> out;
         if (!ready()) return out;
 
@@ -68,7 +92,7 @@ public:
         int gx = cellX(to.x), gz = cellZ(to.z);
         if (sx < 0 || sz < 0 || sx >= cols_ || sz >= rows_) return out;
 
-        if (blockedAt(gx, gz) && !nearestFree(gx, gz, 6)) return out;
+        if (agentBlocked(gx, gz, agent) && !nearestFree(gx, gz, 6, agent)) return out;
 
         const size_t total = (size_t)cols_ * rows_;
         std::vector<float> gScore(total, kInf);
@@ -101,10 +125,10 @@ public:
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dz == 0) continue;
                     const int nx = cx + dx, nz = cz + dz;
-                    if (blockedAt(nx, nz)) continue;
+                    if (agentBlocked(nx, nz, agent)) continue;
 
                     if (dx != 0 && dz != 0 &&
-                        (blockedAt(cx + dx, cz) || blockedAt(cx, cz + dz))) continue;
+                        (agentBlocked(cx + dx, cz, agent) || agentBlocked(cx, cz + dz, agent))) continue;
 
                     const size_t ni = idx(nx, nz);
                     if (closed[ni]) continue;
@@ -140,6 +164,28 @@ public:
         out.push_back(worldOf(chain.back() % cols_, chain.back() / cols_, from.y));
 
         if (!out.empty()) out.back() = glm::vec3(to.x, from.y, to.z);
+        if (agent.spacing > 0.5f && out.size() >= 2) {
+            std::vector<glm::vec3> dense;
+            dense.push_back(out.front());
+            for (size_t i = 1; i < out.size(); ++i) {
+                const glm::vec3 a = out[i - 1], b = out[i];
+                const float len = glm::length(b - a);
+                if (len < 1e-3f) continue;
+                const int n = (int)std::floor(len / agent.spacing);
+                for (int s = 1; s <= n; ++s) {
+                    const float t = (agent.spacing * (float)s) / len;
+                    if (t >= 0.999f) break;
+                    dense.push_back(glm::mix(a, b, t));
+                }
+                dense.push_back(b);
+            }
+            out.swap(dense);
+        }
+        if (jumps) {
+            jumps->assign(out.size(), 0);
+            for (size_t i = 0; i < out.size(); ++i)
+                (*jumps)[i] = cellJump(cellX(out[i].x), cellZ(out[i].z), agent) ? 1 : 0;
+        }
         return out;
     }
 
@@ -170,13 +216,52 @@ private:
                 blocked_[(size_t)z * cols_ + x] = 1;
     }
 
-    bool nearestFree(int& cx, int& cz, int maxRing) const {
+    bool cellWall(int cx, int cz, const NavAgent& a) const {
+        if (cx < 0 || cz < 0 || cx >= cols_ || cz >= rows_) return true;
+        if (top_.empty()) return blockedAt(cx, cz);
+        const size_t i = (size_t)cz * cols_ + cx;
+        const float top = top_[i];
+        const float bot = bot_[i];
+        if (top <= stepOver) return false;
+        if (bot >= a.height) return false;   // soffitto sopra la testa
+        const float limit = a.canJump ? std::max(a.jumpHeight, stepOver) : stepOver;
+        return top > limit;
+    }
+
+    bool agentBlocked(int cx, int cz, const NavAgent& a) const {
+        const int r = std::max(0, (int)std::floor(a.radius / std::max(0.25f, cellSize)));
+        for (int dz = -r; dz <= r; ++dz)
+            for (int dx = -r; dx <= r; ++dx)
+                if (cellWall(cx + dx, cz + dz, a)) return true;
+        return false;
+    }
+
+    bool cellJump(int cx, int cz, const NavAgent& a) const {
+        if (!a.canJump || cx < 0 || cz < 0 || cx >= cols_ || cz >= rows_ || top_.empty()) return false;
+        const size_t i = (size_t)cz * cols_ + cx;
+        const float top = top_[i];
+        if (bot_[i] >= a.height) return false;
+        return top > stepOver && top <= std::max(a.jumpHeight, stepOver);
+    }
+
+    void markHeight(float minX, float minZ, float maxX, float maxZ, float bottom, float top) {
+        const int x0 = cellX(minX), z0 = cellZ(minZ);
+        const int x1 = cellX(maxX), z1 = cellZ(maxZ);
+        for (int z = std::max(0, z0); z <= std::min(rows_ - 1, z1); ++z)
+            for (int x = std::max(0, x0); x <= std::min(cols_ - 1, x1); ++x) {
+                const size_t i = (size_t)z * cols_ + x;
+                top_[i] = std::max(top_[i], top);
+                bot_[i] = std::min(bot_[i], bottom);
+            }
+    }
+
+    bool nearestFree(int& cx, int& cz, int maxRing, const NavAgent& agent) const {
         for (int r = 1; r <= maxRing; ++r) {
             for (int dz = -r; dz <= r; ++dz) {
                 for (int dx = -r; dx <= r; ++dx) {
                     if (std::abs(dx) != r && std::abs(dz) != r) continue;
                     const int nx = cx + dx, nz = cz + dz;
-                    if (!blockedAt(nx, nz)) { cx = nx; cz = nz; return true; }
+                    if (!agentBlocked(nx, nz, agent)) { cx = nx; cz = nz; return true; }
                 }
             }
         }
@@ -184,6 +269,8 @@ private:
     }
 
     std::vector<uint8_t> blocked_;
+    std::vector<float> top_;
+    std::vector<float> bot_;
     int cols_ = 0, rows_ = 0;
     float originX_ = 0.f, originZ_ = 0.f;
 };

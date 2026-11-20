@@ -43,21 +43,35 @@ static float neonLightRange(const WorkspacePart& p) {
     return std::clamp(8.f + maxDim * 2.2f, 8.f, 42.f);
 }
 
-static void collectDynamicLights() {
+// nearby: se non e' nullo, solo queste part (le vicine alla camera, dalla
+// griglia spaziale delle mappe grandi) invece di tutte.
+static void collectDynamicLights(const std::vector<int>* nearby = nullptr) {
     bumpSceneUniforms();
     g_dynLightCount = 0;
-    struct Cand { glm::vec3 pos, col; float range, d2; };
+    struct Cand { glm::vec3 pos, col, dir; float range, angle, d2; };
     static std::vector<Cand> cands;
     cands.clear();
     const float maxD = g_engine.quality.maxDrawDistance;
-    for (const auto& p : g_world.parts) {
+    const size_t count = nearby ? nearby->size() : g_world.parts.size();
+    for (size_t k = 0; k < count; ++k) {
+        const size_t pi = nearby ? (size_t)(*nearby)[k] : k;
+        if (pi >= g_world.parts.size()) continue;
+        const auto& p = g_world.parts[pi];
         const bool neon = p.isNeon();
         if (!p.pointLight && !neon) continue;
         Cand c;
         c.pos = p.position;
+        c.dir = {0.f, -1.f, 0.f};
+        c.angle = 0.f;
         if (p.pointLight) {
-            c.col = p.color * std::max(0.05f, p.lightBrightness);
+            const glm::vec3 tinta = p.lightColor.x >= 0.f ? p.lightColor : p.color;
+            c.col = tinta * std::max(0.05f, p.lightBrightness);
             c.range = std::max(1.f, p.lightRange);
+            const int kind = (int)std::lround(p.lightKind);
+            if (kind == 1 || kind == 2) {
+                c.dir = partLightDirection(p);
+                c.angle = std::clamp(p.lightAngle, 1.f, 180.f);
+            }
         } else {
             c.col = p.color * std::clamp(0.55f + p.effectiveEmissive() * 0.55f, 0.35f, 1.6f);
             c.range = neonLightRange(p);
@@ -82,15 +96,19 @@ static void collectDynamicLights() {
             [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
         cands.resize(kMaxDynLights);
     }
+    std::sort(cands.begin(), cands.end(),
+              [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
     for (const auto& c : cands) {
         DynLight& L = g_dynLights[g_dynLightCount++];
         L.pos = c.pos;
         L.color = c.col;
         L.range = c.range;
+        L.dir = c.dir;
+        L.angle = c.angle;
     }
 }
 
-static void collectShadowOccluders() {
+static void collectShadowOccluders(const std::vector<int>* nearby = nullptr) {
     bumpSceneUniforms();
     g_occCount = 0;
     g_bodyOccCount = 0;
@@ -101,7 +119,7 @@ static void collectShadowOccluders() {
     auto add = [&](const glm::vec3& center, const glm::vec3& half, const glm::mat3& invRot) {
         if (g_occCount >= budget) return;
         g_occCenter[g_occCount] = center;
-        g_occHalf[g_occCount] = glm::max(half, glm::vec3(0.05f));
+        g_occHalf[g_occCount] = glm::max(half, glm::vec3(kMinPartSize));
         g_occRot[g_occCount] = invRot;
         ++g_occCount;
     };
@@ -127,7 +145,10 @@ static void collectShadowOccluders() {
     struct OccCand { int i; float d2; };
     static std::vector<OccCand> cands;
     cands.clear();
-    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+    const int count = nearby ? (int)nearby->size() : (int)g_world.parts.size();
+    for (int k = 0; k < count; ++k) {
+        const int i = nearby ? (*nearby)[(size_t)k] : k;
+        if (i < 0 || i >= (int)g_world.parts.size()) continue;
         const auto& p = g_world.parts[i];
         if (p.isNeon() || p.pointLight) continue;
         if (p.isTransparent()) continue;
@@ -168,9 +189,10 @@ struct CubeProgLocs {
     GLint stud = -1, studScale = -1, materialTex = -1, hasMaterialTex = -1;
     GLint lightCount = -1;
     GLint lightPos[kMaxDynLights], lightCol[kMaxDynLights], lightRange[kMaxDynLights];
+    GLint lightDir[kMaxDynLights], lightAngle[kMaxDynLights];
     GLint night = -1, sunColor = -1, ambientTint = -1, skyZenith = -1, skyHorizon = -1;
     GLint fogColor = -1, fogStart = -1, fogEnd = -1;
-    GLint occCount = -1, aoOccStart = -1, sunShadow = -1, occCenter = -1, occHalf = -1, occRot = -1;
+    GLint occCount = -1, aoOccStart = -1, sunShadow = -1, shadeLite = -1, occCenter = -1, occHalf = -1, occRot = -1;
     GLint shadowMap = -1, lightVP = -1, shadowTexel = -1;
     uint32_t sceneVersion = 0;   // ultima versione delle uniform di scena caricata
 };
@@ -193,11 +215,14 @@ static CubeProgLocs& cubeProgLocs(GLuint prog) {
         std::snprintf(name, sizeof(name), "uLightPos[%d]", i);   L.lightPos[i] = u(name);
         std::snprintf(name, sizeof(name), "uLightCol[%d]", i);   L.lightCol[i] = u(name);
         std::snprintf(name, sizeof(name), "uLightRange[%d]", i); L.lightRange[i] = u(name);
+        std::snprintf(name, sizeof(name), "uLightDir[%d]", i);   L.lightDir[i] = u(name);
+        std::snprintf(name, sizeof(name), "uLightAngle[%d]", i); L.lightAngle[i] = u(name);
     }
     L.night = u("uNight"); L.sunColor = u("uSunColor"); L.ambientTint = u("uAmbientTint");
     L.skyZenith = u("uSkyZenith"); L.skyHorizon = u("uSkyHorizon");
     L.fogColor = u("uFogColor"); L.fogStart = u("uFogStart"); L.fogEnd = u("uFogEnd");
     L.occCount = u("uOccCount"); L.aoOccStart = u("uAoOccStart"); L.sunShadow = u("uSunShadow");
+    L.shadeLite = u("uShadeLite");
     L.occCenter = u("uOccCenter"); L.occHalf = u("uOccHalf"); L.occRot = u("uOccRot");
     L.shadowMap = u("uShadowMap"); L.lightVP = u("uLightVP"); L.shadowTexel = u("uShadowTexel");
     return cache.emplace(prog, L).first->second;
@@ -214,14 +239,24 @@ static void uploadDynamicLights(GLuint prog) {
     if (L.sceneVersion == g_sceneUniformVersion) return;
     L.sceneVersion = g_sceneUniformVersion;
 
-    glUniform1i(L.lightCount, g_dynLightCount);
+    // Mobile, qualita' Low, o PC gia' in difesa lag: stesso shader, meno lavoro per pixel.
+    const int shadeLite = (g_engine.quality.mobile || g_engine.quality.studLowDetail
+                           || blk::resilience::state().emergencyLevel >= 1) ? 1 : 0;
+    glUniform1i(L.shadeLite, shadeLite);
+    const int lightN = shadeLite ? std::min(g_dynLightCount, g_engine.quality.mobile ? 4 : 6)
+                                 : g_dynLightCount;
+    glUniform1i(L.lightCount, lightN);
     for (int i = 0; i < kMaxDynLights; ++i) {
         glm::vec3 pos = (i < g_dynLightCount) ? g_dynLights[i].pos : glm::vec3(0);
         glm::vec3 col = (i < g_dynLightCount) ? g_dynLights[i].color : glm::vec3(0);
         float rng = (i < g_dynLightCount) ? g_dynLights[i].range : 1.f;
+        glm::vec3 dir = (i < g_dynLightCount) ? g_dynLights[i].dir : glm::vec3(0.f, -1.f, 0.f);
+        float ang = (i < g_dynLightCount) ? g_dynLights[i].angle : 0.f;
         glUniform3fv(L.lightPos[i], 1, glm::value_ptr(pos));
         glUniform3fv(L.lightCol[i], 1, glm::value_ptr(col));
         glUniform1f(L.lightRange[i], rng);
+        glUniform3fv(L.lightDir[i], 1, glm::value_ptr(dir));
+        glUniform1f(L.lightAngle[i], ang);
     }
     glUniform1f(L.night, g_night);
     glUniform3fv(L.sunColor, 1, glm::value_ptr(g_sunColor));
@@ -310,6 +345,8 @@ static void drawCube(GLuint vao, GLuint prog, const glm::mat4& m, const glm::mat
 struct TerrainDrawPass {
     GLuint prog = 0;
     GLuint boundVao = 0;
+    GLuint boundMatTex = 0;
+    bool matTexKnown = false;
     const CubeProgLocs* L = nullptr;
     bool lite = false; // niente texture materiale (preset Low / mobile)
 };
@@ -360,15 +397,21 @@ static void drawTerrainRange(TerrainDrawPass& tp, GLuint vao, const glm::vec3& c
     glUniform1f(L.alpha, alpha);
     glUniform1i(L.material, (int)mat);
     if (!tp.lite) {
-        if (GLuint matTexId = materialTextureId(mat)) {
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, matTexId);
-            glUniform1i(L.materialTex, 1);
-            glUniform1i(L.hasMaterialTex, 1);
-        } else {
-            glUniform1i(L.hasMaterialTex, 0);
+        const GLuint matTexId = materialTextureId(mat);
+        if (!tp.matTexKnown || tp.boundMatTex != matTexId) {
+            tp.matTexKnown = true;
+            tp.boundMatTex = matTexId;
+            if (matTexId) {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, matTexId);
+                glUniform1i(L.materialTex, 1);
+                glUniform1i(L.hasMaterialTex, 1);
+            } else {
+                glUniform1i(L.hasMaterialTex, 0);
+            }
         }
-    } else {
+    } else if (!tp.matTexKnown) {
+        tp.matTexKnown = true;
         glUniform1i(L.hasMaterialTex, 0);
     }
     glDrawArrays(GL_TRIANGLES, firstVert, vertCount);

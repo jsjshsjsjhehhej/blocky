@@ -136,5 +136,17 @@
  "rb.prefs": "Studio 偏好设置",
  "rb.space.world": "世界",
  "rb.space.local": "本地",
- "rb.space.tip": "Gizmo 轴：世界或部件 (Ctrl+L)"
+ "rb.space.tip": "Gizmo 轴：世界或部件 (Ctrl+L)",
+ "rb.publish": "发布",
+ "rb.collide.drag": "碰撞",
+ "rb.collide.tip": "移动的部件不会穿过其他部件",
+ "rb.csg.union": "合并",
+ "rb.csg.negate": "求反",
+ "rb.csg.intersect": "相交",
+ "rb.csg.separate": "分离",
+ "rb.g.solids": "实体建模",
+ "rb.c.tool": "点击两个点",
+ "rb.c.fromsel": "在所选部件之间",
+ "rb.theme.light": "浅色主题",
+ "rb.theme.dark": "深色主题"
 }

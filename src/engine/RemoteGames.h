@@ -753,16 +753,27 @@ inline void downloadGame(const std::string& hostPort, const std::string& gameId,
                          bool launchWhenDone = true) {
     if (hostPort.empty() || gameId.empty()) return;
 
-    // Cache completa (place + asset): niente rete, avvia subito.
+    // Gia' scaricato: controlla se il PC ha ripubblicato il mondo (stessa
+    // dimensione = non e' cambiato). Senza questo il telefono teneva per
+    // sempre la prima copia e il gioco nuovo non compariva.
     if (isDownloaded(gameId) && !packageLooksIncomplete(gameId) && launchWhenDone) {
-        {
-            std::lock_guard<std::mutex> lock(dlMutex());
-            dlDoneSlot() = gameId;
+        const std::string dir = localGameDir(gameId);
+        const std::string place = localPlacePath(gameId);
+        std::string rel = "place.json";
+        if (place.size() > dir.size() + 1)
+            rel = place.substr(dir.size() + 1);
+        const int fresh = fetchGameFile(hostPort, gameId, dir, rel);
+        if (fresh <= 0) {
+            {
+                std::lock_guard<std::mutex> lock(dlMutex());
+                dlDoneSlot() = gameId;
+            }
+            setDownloadToast("In cache: \"" + gameId + "\"");
+            dlLastFinishedLaunch().store(true);
+            dlProgressAtom().store(1.f);
+            return;
         }
-        setDownloadToast("In cache: \"" + gameId + "\"");
-        dlLastFinishedLaunch().store(true);
-        dlProgressAtom().store(1.f);
-        return;
+        setDownloadToast("Aggiorno \"" + gameId + "\"...");
     }
 
     bool expected = false;

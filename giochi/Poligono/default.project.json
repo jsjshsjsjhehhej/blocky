@@ -1,0 +1,11 @@
+{
+  "name": "Poligono",
+  "tree": {
+    "$className": "DataModel",
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": { "$path": "src/client" }
+      }
+    }
+  }
+}

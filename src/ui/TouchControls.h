@@ -136,17 +136,17 @@ inline void draw() {
         const float limit = kStickRadius - kKnobRadius * 0.4f;
         const ImVec2 knob(center.x + st.x * limit, center.y - st.y * limit);
 
-        dl->AddCircleFilled(center, kStickRadius, IM_COL32(15, 25, 40, moving ? 130 : 95), 48);
-        dl->AddCircle(center, kStickRadius, IM_COL32(255, 255, 255, moving ? 190 : 120), 48, 4.f);
-        dl->AddCircleFilled(knob, kKnobRadius, IM_COL32(245, 248, 252, moving ? 250 : 205), 36);
-        dl->AddCircle(knob, kKnobRadius, IM_COL32(40, 90, 170, 220), 36, 3.f);
+        dl->AddCircleFilled(center, kStickRadius, IM_COL32(6, 24, 52, moving ? 150 : 110), 48);
+        dl->AddCircle(center, kStickRadius, IM_COL32(0, 162, 255, moving ? 230 : 150), 48, 4.f);
+        dl->AddCircleFilled(knob, kKnobRadius, IM_COL32(0, 162, 255, moving ? 250 : 210), 36);
+        dl->AddCircle(knob, kKnobRadius, IM_COL32(255, 255, 255, 230), 36, 3.f);
     }
 
     // ---- Salto, in basso a destra ----
     {
         const ImVec2 center(jumpPos.x + kJumpRadius, jumpPos.y + kJumpRadius);
-        const ImU32 fill = st.jumpDown ? IM_COL32(22, 190, 110, 245)
-                                       : IM_COL32(16, 165, 92, 205);
+        const ImU32 fill = st.jumpDown ? IM_COL32(40, 190, 255, 250)
+                                       : IM_COL32(0, 150, 230, 220);
         dl->AddCircleFilled(center, kJumpRadius, fill, 40);
         dl->AddCircle(center, kJumpRadius, IM_COL32(255, 255, 255, 210), 40, 4.f);
 

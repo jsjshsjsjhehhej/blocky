@@ -294,7 +294,7 @@ public:
             stats.wins++;
             stats.coins += winCoins;
             wonThisFrame = true;
-            pushAnnounce("Vittoria!", 3.f, 2);
+            pushAnnounce("Hai vinto", 3.f, 2);
             if (stats.surviveTime > 0.f
                 && (stats.bestTime <= 0.f || stats.surviveTime < stats.bestTime))
                 stats.bestTime = stats.surviveTime;
@@ -418,6 +418,7 @@ public:
                 if (matchTimeLeft <= 0.f) {
                     matchTimeLeft = 0.f;
                     endMatch(false);
+                    if (!announce.empty()) announce.back().text = "Tempo scaduto";
                 }
             }
         }

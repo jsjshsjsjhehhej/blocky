@@ -144,7 +144,7 @@ void applyGizmoOp(StudioState& s, WorkspacePart* part, const GizmoDrag& drag, in
     }
     case GizmoOp::Scale: {
         glm::vec3 sz = drag.startSize;
-        sz[axis] = std::max(0.05f, s.snap(sz[axis] + amount * 2.f, s.snapStuds));
+        sz[axis] = std::max(kMinPartSize, s.snap(sz[axis] + amount * 2.f, s.snapStuds));
         part->size = sz;
         break;
     }
@@ -525,7 +525,7 @@ void drawRibbon(StudioState& s, const glm::vec3& spawnPoint, int& tab) {
         ImGui::Checkbox("Snap", &s.snapEnabled);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(78.f);
-        ImGui::DragFloat("studs", &s.snapStuds, 0.25f, 0.25f, 16.f, "%.2f");
+        ImGui::DragFloat("studs", &s.snapStuds, 0.001f, kMinPartSize, 16.f, "%.3f");
         ImGui::SetNextItemWidth(78.f);
         ImGui::DragFloat("gradi", &s.snapDegrees, 1.f, 1.f, 90.f, "%.0f");
         ribbonEndGroup("Snap");
@@ -862,7 +862,7 @@ int Blocky_RunEditorImpl() {
             // mancava del tutto: prima ci si poteva solo orbitare/pannare/
             // zoomare attorno a un punto fisso, mai "volare" nella scena.
             if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-                const float speed = (io.KeyShift ? 44.f : 18.f) * dt;
+                const float speed = std::clamp(viewport.camera.distance, 0.02f, 80.f) * (io.KeyShift ? 2.2f : 0.9f) * dt;
                 glm::vec3 local(0.f);
                 if (ImGui::IsKeyDown(ImGuiKey_W)) local.z += speed;
                 if (ImGui::IsKeyDown(ImGuiKey_S)) local.z -= speed;

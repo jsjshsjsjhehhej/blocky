@@ -56,6 +56,45 @@ struct Texture2D {
         return true;
     }
 
+    /**
+     * Come load, ma la texture viene ridotta a side x side (media dei pixel che
+     * ogni pixel nuovo copre). Per gli stud della qualita' Low: stesso disegno,
+     * molta meno memoria da leggere per ogni pixel dello schermo.
+     */
+    bool loadDownscaled(const std::string& path, int side) {
+        blk::gfx::installGlDeviceIfNeeded();
+        stbi_set_flip_vertically_on_load(true);
+        int sw = 0, sh = 0;
+        unsigned char* px = stbi_load(path.c_str(), &sw, &sh, nullptr, 4);
+        if (!px) {
+            std::fprintf(stderr, "Texture2D: impossibile caricare '%s'\n", path.c_str());
+            return false;
+        }
+        side = std::max(1, std::min(side, std::min(sw, sh)));
+        std::vector<unsigned char> out((size_t)side * side * 4);
+        for (int y = 0; y < side; ++y)
+            for (int x = 0; x < side; ++x) {
+                const int x0 = x * sw / side, x1 = std::max(x0 + 1, (x + 1) * sw / side);
+                const int y0 = y * sh / side, y1 = std::max(y0 + 1, (y + 1) * sh / side);
+                unsigned sum[4] = {0, 0, 0, 0};
+                for (int yy = y0; yy < y1; ++yy)
+                    for (int xx = x0; xx < x1; ++xx)
+                        for (int c = 0; c < 4; ++c) sum[c] += px[((size_t)yy * sw + xx) * 4 + c];
+                const unsigned n = (unsigned)((x1 - x0) * (y1 - y0));
+                for (int c = 0; c < 4; ++c) out[((size_t)y * side + x) * 4 + c] = (unsigned char)(sum[c] / n);
+            }
+        stbi_image_free(px);
+        blk::gfx::TextureDesc desc;
+        desc.pixels = out.data();
+        desc.width = side;
+        desc.height = side;
+        desc.mipmaps = false;
+        if (!blk::gfx::device().createTexture2D(desc, handle)) return false;
+        w = h = side;
+        id = (GLuint)handle.backend;
+        return true;
+    }
+
     void bind(int unit = 0) const {
         if (blk::gfx::hasDevice()) blk::gfx::device().bindTexture2D(handle, unit);
     }

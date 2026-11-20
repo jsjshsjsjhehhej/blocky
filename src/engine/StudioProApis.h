@@ -8,6 +8,7 @@
 
 #include "ScriptControls.h"
 #include "PlaceInstance.h"
+#include "systems/Social.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -615,42 +616,111 @@ inline int luaTeleportGetFailedSignal(lua_State* L) {
 
 inline int luaPromptProductPurchase(lua_State* L) {
     int base = lua_istable(L, 1) ? 2 : 1;
-    // player, productId
-    int productId = (int)luaL_optinteger(L, base + 1, 0);
-    std::fprintf(stderr, "[Marketplace] PromptProductPurchase id=%d (no-op locale)\n", productId);
+    int productId = (int)luaL_optinteger(L, base + 1, (int)luaL_optinteger(L, base, 0));
+    socialPrompt(productId, false);
+    (void)L;
     return 0;
 }
 
 inline int luaPromptGamePassPurchase(lua_State* L) {
     int base = lua_istable(L, 1) ? 2 : 1;
-    int passId = (int)luaL_optinteger(L, base + 1, 0);
-    std::fprintf(stderr, "[Marketplace] PromptGamePassPurchase id=%d (no-op)\n", passId);
+    int passId = (int)luaL_optinteger(L, base + 1, (int)luaL_optinteger(L, base, 0));
+    socialPrompt(passId, true);
+    (void)L;
     return 0;
 }
 
 inline int luaPromptPremiumPurchase(lua_State* L) {
     (void)L;
-    std::fprintf(stderr, "[Marketplace] PromptPremiumPurchase (no-op)\n");
+    socialPrompt(0, true);
+    social().promptName = "Premium";
+    social().promptPrice = 0;
+    social().promptError = "Premium qui e' solo un nome: non si paga davvero.";
     return 0;
 }
 
 inline int luaUserOwnsGamePassAsync(lua_State* L) {
-    lua_pushboolean(L, 0);
+    int base = lua_istable(L, 1) ? 2 : 1;
+    int passId = (int)luaL_optinteger(L, base + 1, (int)luaL_optinteger(L, base, 0));
+    lua_pushboolean(L, socialOwns(passId) ? 1 : 0);
     return 1;
 }
 
 inline int luaGetProductInfo(lua_State* L) {
     int base = lua_istable(L, 1) ? 2 : 1;
     int id = (int)luaL_optinteger(L, base, 0);
+    const SocialProduct* p = socialFind(id);
     lua_newtable(L);
     lua_pushinteger(L, id);
     lua_setfield(L, -2, "ProductId");
-    lua_pushstring(L, "BlockyProduct");
+    lua_pushstring(L, p ? p->name.c_str() : "Sconosciuto");
     lua_setfield(L, -2, "Name");
-    lua_pushinteger(L, 0);
+    lua_pushinteger(L, p ? p->price : 0);
     lua_setfield(L, -2, "PriceInRobux");
-    lua_pushboolean(L, 1);
+    lua_pushboolean(L, p ? 1 : 0);
     lua_setfield(L, -2, "IsForSale");
+    return 1;
+}
+
+inline int luaMarketplaceRegister(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    int id = (int)luaL_checkinteger(L, base);
+    const char* name = luaL_checkstring(L, base + 1);
+    int price = (int)luaL_optinteger(L, base + 2, 0);
+    const char* kind = luaL_optstring(L, base + 3, "Product");
+    bool pass = kind && (std::strcmp(kind, "GamePass") == 0 || std::strcmp(kind, "Pass") == 0);
+    lua_pushboolean(L, socialRegister(id, name, price, pass) ? 1 : 0);
+    return 1;
+}
+
+inline int luaMarketplaceBalance(lua_State* L) {
+    lua_pushinteger(L, ecoBalance(social().user.c_str()));
+    (void)L;
+    return 1;
+}
+
+inline int luaGroupCreate(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    int id = socialCreateGroup(luaL_checkstring(L, base));
+    if (id <= 0) lua_pushnil(L);
+    else lua_pushinteger(L, id);
+    return 1;
+}
+
+inline int luaGroupJoin(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    lua_pushboolean(L, socialJoin((int)luaL_checkinteger(L, base)) ? 1 : 0);
+    return 1;
+}
+
+inline int luaGroupLeave(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    lua_pushboolean(L, socialLeave((int)luaL_checkinteger(L, base)) ? 1 : 0);
+    return 1;
+}
+
+inline int luaGroupRank(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    int id = (int)luaL_optinteger(L, base + 1, (int)luaL_optinteger(L, base, 0));
+    lua_pushinteger(L, socialRank(id));
+    return 1;
+}
+
+inline int luaGroupInfo(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    const SocialGroup* g = socialGroup((int)luaL_checkinteger(L, base));
+    if (!g) { lua_pushnil(L); return 1; }
+    lua_newtable(L);
+    lua_pushinteger(L, g->id); lua_setfield(L, -2, "Id");
+    lua_pushstring(L, g->name.c_str()); lua_setfield(L, -2, "Name");
+    lua_pushstring(L, g->owner.c_str()); lua_setfield(L, -2, "Owner");
+    lua_pushinteger(L, (int)g->members.size()); lua_setfield(L, -2, "MemberCount");
+    return 1;
+}
+
+inline int luaPlayerIsInGroup(lua_State* L) {
+    int base = lua_istable(L, 1) ? 2 : 1;
+    lua_pushboolean(L, socialRank((int)luaL_checkinteger(L, base)) > 0 ? 1 : 0);
     return 1;
 }
 
@@ -1011,10 +1081,16 @@ inline int luaNumberRangeNew(lua_State* L) {
 
 inline int luaNumberSequenceKeypointNew(lua_State* L) {
     int base = lua_istable(L, 1) ? 2 : 1;
+    // Gli argomenti PRIMA di creare la tabella: con NumberSequenceKeypoint.new(t, v)
+    // (il caso normale, senza Envelope) la tabella nuova finiva al posto del 3o
+    // argomento e veniva letta come Envelope -> "number expected, got table".
+    const double t = luaL_optnumber(L, base, 0);
+    const double v = luaL_optnumber(L, base + 1, 0);
+    const double env = luaL_optnumber(L, base + 2, 0);
     lua_newtable(L);
-    lua_pushnumber(L, luaL_optnumber(L, base, 0)); lua_setfield(L, -2, "Time");
-    lua_pushnumber(L, luaL_optnumber(L, base + 1, 0)); lua_setfield(L, -2, "Value");
-    lua_pushnumber(L, luaL_optnumber(L, base + 2, 0)); lua_setfield(L, -2, "Envelope");
+    lua_pushnumber(L, t); lua_setfield(L, -2, "Time");
+    lua_pushnumber(L, v); lua_setfield(L, -2, "Value");
+    lua_pushnumber(L, env); lua_setfield(L, -2, "Envelope");
     return 1;
 }
 
@@ -1314,20 +1390,21 @@ inline void registerEnum(lua_State* L) {
     lua_setfield(L, -2, "KeyCode");
 
     lua_newtable(L);
+    // Numeri di Roblox (UserInputType nell'API dump).
     setEnumItem(L, "MouseButton1", 0);
     setEnumItem(L, "MouseButton2", 1);
     setEnumItem(L, "MouseButton3", 2);
-    setEnumItem(L, "Keyboard", 10);
-    setEnumItem(L, "MouseMovement", 11);
-    setEnumItem(L, "MouseWheel", 12);
-    setEnumItem(L, "Touch", 13);
-    setEnumItem(L, "Gamepad1", 20);
-    setEnumItem(L, "Focus", 30);
-    setEnumItem(L, "Accelerometer", 40);
-    setEnumItem(L, "Gyro", 41);
-    setEnumItem(L, "TextInput", 50);
-    setEnumItem(L, "InputMethod", 60);
-    setEnumItem(L, "None", 99);
+    setEnumItem(L, "MouseWheel", 3);
+    setEnumItem(L, "MouseMovement", 4);
+    setEnumItem(L, "Touch", 7);
+    setEnumItem(L, "Keyboard", 8);
+    setEnumItem(L, "Gamepad1", 12);
+    setEnumItem(L, "Focus", 9);
+    setEnumItem(L, "Accelerometer", 10);
+    setEnumItem(L, "Gyro", 11);
+    setEnumItem(L, "TextInput", 20);
+    setEnumItem(L, "InputMethod", 21);
+    setEnumItem(L, "None", 22);
     lua_setfield(L, -2, "UserInputType");
 
     lua_newtable(L);
@@ -1829,6 +1906,12 @@ inline void registerApis(lua_State* L) {
     lua_setfield(L, -2, "UserOwnsGamePassAsync");
     pushC(L, luaGetProductInfo, "GetProductInfo");
     lua_setfield(L, -2, "GetProductInfo");
+    pushC(L, luaMarketplaceRegister, "Register");
+    lua_setfield(L, -2, "Register");
+    pushC(L, luaMarketplaceBalance, "GetBalance");
+    lua_setfield(L, -2, "GetBalance");
+    lua_pushstring(L, "MarketplaceService");
+    lua_setfield(L, -2, "Name");
     lua_newtable(L);
     pushC(L, luaMarketplaceIndex, "__index");
     lua_setfield(L, -2, "__index");
@@ -1836,6 +1919,21 @@ inline void registerApis(lua_State* L) {
     lua_setfield(L, -2, "__newindex");
     lua_setmetatable(L, -2);
     lua_setglobal(L, "MarketplaceService");
+
+    lua_newtable(L);
+    lua_pushstring(L, "GroupService");
+    lua_setfield(L, -2, "Name");
+    pushC(L, luaGroupCreate, "CreateGroup");
+    lua_setfield(L, -2, "CreateGroup");
+    pushC(L, luaGroupJoin, "Join");
+    lua_setfield(L, -2, "Join");
+    pushC(L, luaGroupLeave, "Leave");
+    lua_setfield(L, -2, "Leave");
+    pushC(L, luaGroupRank, "GetRankInGroup");
+    lua_setfield(L, -2, "GetRankInGroup");
+    pushC(L, luaGroupInfo, "GetGroupInfoAsync");
+    lua_setfield(L, -2, "GetGroupInfoAsync");
+    lua_setglobal(L, "GroupService");
 
     // Attributes globals
     pushC(L, luaSetAttribute, "SetAttribute");

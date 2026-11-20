@@ -7,6 +7,7 @@ uniform vec3 uOccHalf[8];
 uniform mat3 uOccRot[8];
 uniform int uSunShadow;   // 1 = ombre proiettate da sole/luna (default 0 = off)
 uniform float uNight;     // 0 = pieno giorno, 1 = piena notte (default 0)
+uniform int uShadeLite;   // 1 = percorso leggero (mobile, o PC sotto lag)
 // 1.0 se un box interseca il raggio entro maxT
 float rayBlocked(vec3 P,vec3 dir,float maxT){
   int nOcc=min(uOccCount,8);
@@ -29,6 +30,7 @@ float rayBlocked(vec3 P,vec3 dir,float maxT){
   return 0.0;
 }
 float lightVisibility(vec3 P,vec3 Lp){
+  if(uShadeLite!=0) return 1.0; // niente raggio-box per luce: e' il costo che fa scattare il fill
   vec3 seg=Lp-P;
   float segLen=length(seg);
   if(segLen<1e-3) return 1.0;
@@ -46,15 +48,16 @@ float skyLightVisibility(vec3 P,vec3 N,vec3 toSky){
   vec3 pr=lp.xyz/lp.w*0.5+0.5;
   if(pr.z>1.0||pr.x<0.0||pr.x>1.0||pr.y<0.0||pr.y>1.0) return 1.0;
   float bias=0.0006;
+  if(uShadeLite!=0)
+    return texture(uShadowMap,vec3(pr.xy,pr.z-bias)); // 1 tap, non 9: stesso bordo, meno banda
   float s=0.0;
   for(int y=-1;y<=1;++y)
     for(int x=-1;x<=1;++x)
       s+=texture(uShadowMap,vec3(pr.xy+vec2(x,y)*uShadowTexel,pr.z-bias));
   return s/9.0;
 }
-// Illuminazione direzionale con ora del giorno + ombra portata.
-// Riempimento ambientale alto e sole morbido = look "default Roblox":
-// luminoso, ombre soffici (i lati/le ombre non crollano nel nero).
+// Illuminazione di giorno vero: sole bianco, ombre chiare ma quasi bianche.
+// Il cielo tinge pochissimo, così il colore della part resta il suo.
 uniform vec3 uSunColor;    // tinta reale del sole (calda ad alba/tramonto, bianca a mezzogiorno, blu di notte)
 uniform vec3 uAmbientTint; // fill ambientale: Ambient/OutdoorAmbient del Lighting Service
 uniform vec3 uSkyZenith;   // colore del cielo allo zenit in questo istante (stesso gradiente di SunSky)
@@ -66,6 +69,7 @@ uniform vec3 uSkyHorizon;  // colore del cielo all'orizzonte in questo istante
 // per dare peso/contatto alle giunture senza un vero G-buffer AO.
 uniform int uAoOccStart; // indici < questo sono box-corpo player/remoti: esclusi dall'AO (autoscurimento)
 float contactAO(vec3 P){
+  if(uShadeLite!=0) return 1.0;
   int nOcc=min(uOccCount,8);
   if(nOcc<=0) return 1.0;
   float occ=0.0;
@@ -104,6 +108,7 @@ vec3 fakeSkyReflection(vec3 R){
 // Il colore base resta sempre presente (envAmt tetto a 0.85) cosi' il
 // materiale non diventa mai uno specchio puro, solo "riflesso finto".
 vec3 applyEnvReflection(vec3 base,vec3 N,vec3 V,float specular,float roughness){
+  if(uShadeLite!=0) return base; // il riflesso finto e' pow+reflect su ogni pixel, anche sulla plastica
   vec3 R=reflect(-V,N);
   float NdotV=clamp(dot(N,V),0.0,1.0);
   float fresnel=pow(1.0-NdotV,5.0);
@@ -114,12 +119,19 @@ vec3 applyEnvReflection(vec3 base,vec3 N,vec3 V,float specular,float roughness){
   return mix(base,env*1.05,envAmt);
 }
 vec3 skyLightTerm(vec3 N,vec3 toSky,vec3 P){
-  float amb=mix(0.18,0.08,uNight);        // fill basso = ombre profonde (quasi nere)
-  float dir=mix(0.82,0.18,uNight);        // sole forte: le facce illuminate restano brillanti
+  // Il cielo dice solo quanta luce c'è. Il colore della part resta il suo:
+  // un filo di tinta del cielo (8% di giorno), il resto è bianco.
+  float hemi=clamp(N.y*0.5+0.5,0.0,1.0);
+  vec3 skyCol=mix(uSkyHorizon,uSkyZenith,hemi);
+  float luma=dot(skyCol,vec3(0.2126,0.7152,0.0722));
+  vec3 fillCol=mix(vec3(luma),skyCol,mix(0.08,0.35,uNight));
+  float amb=mix(0.36,0.12,uNight);
+  float dir=mix(0.9,0.18,uNight);
   float vis=skyLightVisibility(P,N,toSky);
-  // ombra portata scende fino a 0.12 = quasi nera ma non del tutto
-  float lam=max(dot(N,toSky),0.0)*dir*mix(0.12,1.0,vis);
-  return uAmbientTint*amb*contactAO(P)+uSunColor*lam;
+  float ndl=max(dot(N,toSky),0.0);
+  vec3 sunLit=uSunColor*ndl*dir*vis;
+  vec3 bounce=vec3(1.0)*ndl*dir*0.18*(1.0-vis);
+  return fillCol*amb*uAmbientTint*contactAO(P)+sunLit+bounce;
 }
 )"
 
@@ -136,6 +148,8 @@ uniform int uLightCount;
 uniform vec3 uLightPos[8];
 uniform vec3 uLightCol[8];
 uniform float uLightRange[8];
+uniform vec3 uLightDir[8];
+uniform float uLightAngle[8];
 )" BLOCKY_SHADOW_GLSL R"(
 // Box-mapping: sceglie la faccia dall'asse dominante della normale locale,
 // cosi' la texture non appare stirata sui lati come farebbe una singola
@@ -163,29 +177,53 @@ void main(){
     float lam=max(dot(N,Ld),0.0);
     // ombra solo sulle facce rivolte alla luce (le altre sono gia' scure)
     float vis=(lam>0.0)?lightVisibility(vW,uLightPos[i]):1.0;
-    dyn+=uLightCol[i]*a*(0.35+lam*0.90)*mix(0.25,1.0,vis);
+    float cone=1.0;
+    if(uLightAngle[i]>1.0){
+      float cd=dot(Ld,normalize(uLightDir[i]));
+      float lim=cos(radians(uLightAngle[i]*0.5));
+      cone=smoothstep(lim,mix(lim,1.0,0.35),cd);
+    }
+    dyn+=uLightCol[i]*a*(0.35+lam*0.90)*mix(0.25,1.0,vis)*cone;
   }
   // specular Blinn (Metal/Glass)
   vec3 V=normalize(uCamPos-vW);
-  vec3 H=normalize(Ls+V);
-  float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
-  float spec=pow(max(dot(N,H),0.0),shiny)*uSpecular;
-  // Texture materiale (PNG/JPG) se caricata; altrimenti pattern procedurali.
+  float spec=0.0;
+  if(uShadeLite==0){
+    vec3 H=normalize(Ls+V);
+    float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
+    spec=pow(max(dot(N,H),0.0),shiny)*uSpecular;
+  }
+  // Texture = dettaglio grigio. Il colore della parte lo moltiplica,
+  // come i materiali di Roblox: un muro rosso resta rosso.
+  // 1 tile = 4 stud (un mattone, un'asse).
   vec3 base=uColor;
+  vec3 ln=normalize(vLocalN);
   if(uHasMaterialTex==1){
-    vec2 uv=boxUV(vLocalPos,vLocalN)/8.0; // 1 tile / 8 stud
+    vec2 uv=boxUV(vLocalPos,ln)*0.25;
     vec3 tex=texture(uMaterialTex,uv).rgb;
-    base=tex*mix(vec3(1.0),uColor,0.35);
+    if(uMaterial==6){
+      float up=smoothstep(0.18,0.75,ln.y);
+      float nse=fract(sin(dot(floor(vLocalPos.xy*6.0),vec2(12.9898,78.233)))*43758.5453);
+      vec3 dirt=vec3(0.58,0.44,0.30)*mix(0.82,1.12,nse);
+      vec3 side=mix(dirt,uColor*dirt,0.30);
+      base=mix(side,uColor*tex,up);
+    } else {
+      base=uColor*tex;
+    }
   } else if(uMaterial==5){ // Concrete fallback
     float nse=fract(sin(dot(vW.xz,vec2(12.9898,78.233)))*43758.5453);
     base*=mix(0.88,1.05,nse);
-  } else if(uMaterial==6){ // Grass fallback
-    base*=mix(vec3(0.75,1.05,0.7),vec3(1.0),0.35+0.15*sin(vW.x*2.0));
-  } else if(uMaterial==9){ // Brick fallback
-    float bx=floor(vW.x*2.0);
-    float by=floor(vW.y*2.5);
-    float cell=mod(bx+by,2.0);
-    base*=mix(0.82,1.08,cell);
+  } else if(uMaterial==6){ // Grass fallback: sopra erba, di lato terra
+    float up=smoothstep(0.18,0.75,ln.y);
+    vec3 dirt=vec3(0.58,0.44,0.30);
+    vec3 top=uColor*mix(vec3(0.82,1.06,0.76),vec3(1.0),0.45+0.15*sin(vLocalPos.x*4.0));
+    base=mix(dirt,top,up);
+  } else if(uMaterial==9){ // Brick fallback: corsi sfalsati
+    vec2 buv=boxUV(vLocalPos,ln);
+    float row=floor(buv.y*2.0);
+    vec2 cell=fract(vec2(buv.x+mod(row,2.0)*0.5, buv.y*2.0));
+    float mortar=step(0.08,cell.x)*step(cell.x,0.94)*step(0.10,cell.y)*step(cell.y,0.90);
+    base*=mix(0.42,1.0,mortar);
   }
   float em=clamp(uEmissive,0.0,2.0);
   if(uMaterial==10){ // ForceField pulse
@@ -213,6 +251,8 @@ uniform int uLightCount;
 uniform vec3 uLightPos[8];
 uniform vec3 uLightCol[8];
 uniform float uLightRange[8];
+uniform vec3 uLightDir[8];
+uniform float uLightAngle[8];
 )" BLOCKY_SHADOW_GLSL R"(
 void main(){
   vec3 N=normalize(vN);
@@ -230,12 +270,21 @@ void main(){
     vec3 Ld=toL/max(d,1e-4);
     float lam=max(dot(N,Ld),0.0);
     float vis=(lam>0.0)?lightVisibility(vW,uLightPos[i]):1.0;
-    dyn+=uLightCol[i]*a*(0.35+lam*0.90)*mix(0.25,1.0,vis);
+    float cone=1.0;
+    if(uLightAngle[i]>1.0){
+      float cd=dot(Ld,normalize(uLightDir[i]));
+      float lim=cos(radians(uLightAngle[i]*0.5));
+      cone=smoothstep(lim,mix(lim,1.0,0.35),cd);
+    }
+    dyn+=uLightCol[i]*a*(0.35+lam*0.90)*mix(0.25,1.0,vis)*cone;
   }
   vec3 V=normalize(uCamPos-vW);
-  vec3 H=normalize(Ls+V);
-  float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
-  float spec=pow(max(dot(N,H),0.0),shiny)*uSpecular;
+  float spec=0.0;
+  if(uShadeLite==0){
+    vec3 H=normalize(Ls+V);
+    float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
+    spec=pow(max(dot(N,H),0.0),shiny)*uSpecular;
+  }
   vec3 base=uColor;
   // Faccia +Y in spazio oggetto → stud restano attaccati al Part se ruoti
   if(normalize(vLocalN).y>0.85){
@@ -342,6 +391,8 @@ uniform int uLightCount;
 uniform vec3 uLightPos[8];
 uniform vec3 uLightCol[8];
 uniform float uLightRange[8];
+uniform vec3 uLightDir[8];
+uniform float uLightAngle[8];
 )" BLOCKY_SHADOW_GLSL R"(
 void main(){
   vec3 N=normalize(vN), L=normalize(-uSun);
@@ -357,7 +408,14 @@ void main(){
     att*=att;
     float lam=max(dot(N,toL/max(d,1e-4)),0.0);
     float vis=(lam>0.0)?lightVisibility(vW,uLightPos[i]):1.0;
-    dyn+=uLightCol[i]*att*(0.35+lam*0.90)*mix(0.25,1.0,vis);
+    float cone=1.0;
+    if(uLightAngle[i]>1.0){
+      vec3 Ld=toL/max(d,1e-4);
+      float cd=dot(Ld,normalize(uLightDir[i]));
+      float lim=cos(radians(uLightAngle[i]*0.5));
+      cone=smoothstep(lim,mix(lim,1.0,0.35),cd);
+    }
+    dyn+=uLightCol[i]*att*(0.35+lam*0.90)*mix(0.25,1.0,vis)*cone;
   }
   vec3 base=uColor*vCol;
   float a=uAlpha;
@@ -369,9 +427,12 @@ void main(){
   }
   // Riflesso speculare dal metallic/roughness del materiale
   vec3 V=normalize(uCamPos-vW);
-  vec3 Hv=normalize(L+V);
-  float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
-  float spec=pow(max(dot(N,Hv),0.0),shiny)*uSpecular*(1.0-uNight*0.7);
+  float spec=0.0;
+  if(uShadeLite==0){
+    vec3 Hv=normalize(L+V);
+    float shiny=mix(8.0,96.0,clamp(1.0-uRoughness,0.0,1.0));
+    spec=pow(max(dot(N,Hv),0.0),shiny)*uSpecular*(1.0-uNight*0.7);
+  }
   // Emissive: additiva come in glTF (non moltiplica il base color)
   vec3 emis=uEmissiveCol;
   if(uUseEmissiveTex!=0){

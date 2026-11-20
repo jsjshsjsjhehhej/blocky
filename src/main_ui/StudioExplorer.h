@@ -194,6 +194,12 @@ struct ExInsertTarget {
 };
 static ExInsertTarget g_exInsert;
 static ImGuiID g_exInsertPopupId = 0;   // preso al livello dell'albero: le righe hanno ID annidati
+// Quando la selezione cambia (clic nel viewport), l albero si apre fino alla
+// part e ci scorre sopra, come l Esploratore di Roblox Studio.
+static int g_exRevealPart = -1;
+static int g_exLastSelPart = -1;
+// Ordine delle part come appaiono nell'albero (per le frecce su/giu').
+static std::vector<int> g_exRowOrder;
 static int g_exRenamePart = -1;       // part in rinomina (F2 / doppio clic)
 static bool g_exRenameFocus = false;
 static char g_exRenameBuf[96] = {};
@@ -229,7 +235,7 @@ static ExRow exRow(const char* id, ExIcon icon, const char* name, bool selected,
     ImDrawList* dl = ImGui::GetWindowDrawList();
     exDrawIcon(dl, {mn.x + ImGui::GetTreeNodeToLabelSpacing() + 7.f, (mn.y + mx.y) * 0.5f}, icon);
     if (hovered && cls && cls[0] && !ImGui::IsMouseDown(0)) ImGui::SetTooltip("%s  (%s)", name, cls);
-    if (insert.kind != ExInsert::None && hovered) {
+    if (insert.kind != ExInsert::None && (hovered || selected)) {
         const ImVec2 pc{mx.x - 11.f, (mn.y + mx.y) * 0.5f};
         const ImVec2 m = ImGui::GetIO().MousePos;
         const bool over = std::fabs(m.x - pc.x) < 8.f && std::fabs(m.y - pc.y) < 8.f;
@@ -280,6 +286,311 @@ static void exInsertPartInto(int gid, PartShape shape) {
     }
 }
 
+static bool exCanParentPart(int child, int parent);
+
+/** Inserisce un oggetto del catalogo. Se parentPart è una Part, la nuova Part ci finisce dentro. */
+static void exInsertKindUnder(int parentPart, int gid, int kind) {
+    if (partIndexValid(parentPart)) selectPart(parentPart);
+    const int before = (int)g_world.parts.size();
+    studioRunInsertKind(kind);
+    if (!partIndexValid(g_selectedPart) || (int)g_world.parts.size() <= before) return;
+    if (partIndexValid(parentPart) && g_selectedPart != parentPart && exCanParentPart(g_selectedPart, parentPart)) {
+        g_world.parts[(size_t)g_selectedPart].parentIndex = parentPart;
+        g_world.parts[(size_t)g_selectedPart].groupId = g_world.parts[(size_t)parentPart].groupId;
+        markPlaceDirty();
+    } else if (gid > 0) {
+        studioMultiClear();
+        studioMovePartsToGroup(g_selectedPart, gid);
+        markPlaceDirty();
+    }
+}
+
+static void exInsertContainer(int parentGroup, bool folder) {
+    const int id = partgroups::addGroup(g_world, folder ? "Folder" : "Model", parentGroup);
+    if (PartGroup* g = partgroups::find(g_world, id)) g->folder = folder;
+    markPlaceDirty();
+    g_exportMsg = folder ? "Folder" : "Model";
+}
+
+/** Tutte le categorie di Inserisci oggetto, come sottomenu del +. */
+static void exMenuCatalog(int parentPart, int gid) {
+    const char* cats[16] = {};
+    int n = 0;
+    for (int i = 0; i < kInsertItemCount; ++i) {
+        bool seen = false;
+        for (int c = 0; c < n; ++c)
+            if (std::strcmp(cats[c], kInsertItems[i].category) == 0) seen = true;
+        if (!seen && n < 16) cats[n++] = kInsertItems[i].category;
+    }
+    for (int c = 0; c < n; ++c) {
+        if (!ImGui::BeginMenu(cats[c])) continue;
+        for (int i = 0; i < kInsertItemCount; ++i) {
+            if (std::strcmp(kInsertItems[i].category, cats[c]) != 0) continue;
+            if (ImGui::MenuItem(kInsertItems[i].name))
+                exInsertKindUnder(parentPart, gid, kInsertItems[i].kind);
+        }
+        ImGui::EndMenu();
+    }
+}
+
+static void studioCsgCombine(int mode);   // StudioCsg.h
+static void studioCsgNegate();
+static void studioCsgSeparate();
+static bool studio_csg_isUnion(int modelIndex);   // StudioCsg.h
+static void studioGroupSelectionAsFolder();         // piu' sotto
+
+static void exSelectChild(int part, ExChild kind, int index = -1) {
+    studioMultiClear();
+    selectPart(part);
+    g_exChild = kind;
+    g_exChildIndex = index;
+    g_editingPartScript = false;
+    g_showProps = true;
+}
+
+static int exOtherPart(int part) {
+    for (int m : g_multiParts)
+        if (m != part && partIndexValid(m)) return m;
+    if (!partIndexValid(part)) return -1;
+    const glm::vec3 at = g_world.parts[(size_t)part].position;
+    int best = -1;
+    float bestD = 1e12f;
+    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+        if (i == part) continue;
+        const float d = glm::length(g_world.parts[(size_t)i].position - at);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+static void exEnableChild(int index, ExChild kind) {
+    if (!partIndexValid(index)) return;
+    WorkspacePart& p = g_world.parts[(size_t)index];
+    switch (kind) {
+    case ExChild::PointLight:
+        p.pointLight = true;
+        if (p.lightRange < 4.f) p.lightRange = 20.f;
+        if (p.lightBrightness < 0.2f) p.lightBrightness = 1.25f;
+        break;
+    case ExChild::Decal: p.decalEnabled = true; break;
+    case ExChild::Texture: p.textureEnabled = true; break;
+    case ExChild::Highlight: p.highlightEnabled = true; break;
+    case ExChild::SelectionBox: p.selectionBox = true; break;
+    case ExChild::SelectionSphere: p.selectionSphere = true; break;
+    case ExChild::DragDetector: p.dragDetector = true; break;
+    case ExChild::Seat: p.seat = true; break;
+    case ExChild::VehicleSeat: p.vehicleSeat = true; p.anchored = false; break;
+    case ExChild::Ladder: p.ladder = true; break;
+    case ExChild::Spawn: p.spawnPoint = true; break;
+    case ExChild::Mesh: if (p.meshFile.empty()) p.meshFile = "mesh.obj"; break;
+    default: break;
+    }
+    exSelectChild(index, kind);
+    markPlaceDirty();
+}
+
+static void exAddConstraint(int index, ConstraintKind kind) {
+    if (!partIndexValid(index)) return;
+    const bool mover = kind == ConstraintKind::LinearVelocity || kind == ConstraintKind::AngularVelocity
+                    || kind == ConstraintKind::VectorForce || kind == ConstraintKind::Torque;
+    const int other = mover ? index : exOtherPart(index);
+    if (!mover && other < 0) { g_exportMsg = "Servono due part per questo vincolo"; return; }
+    const int wi = partconstraints::create(g_world, kind, index, other);
+    if (wi < 0) { g_exportMsg = "Vincolo non creato"; return; }
+    exSelectChild(index, ExChild::Weld, wi);
+    markPlaceDirty();
+    g_exportMsg = std::string(constraintKindName(kind)) + " sotto " + g_world.parts[(size_t)index].name;
+}
+
+static void exRemoveSelectedChild() {
+    if (!partIndexValid(g_selectedPart) || g_exChild == ExChild::None) return;
+    WorkspacePart& p = g_world.parts[(size_t)g_selectedPart];
+    switch (g_exChild) {
+    case ExChild::PointLight: p.pointLight = false; break;
+    case ExChild::Decal: p.decalEnabled = false; break;
+    case ExChild::Texture: p.textureEnabled = false; break;
+    case ExChild::Highlight: p.highlightEnabled = false; break;
+    case ExChild::SelectionBox: p.selectionBox = false; break;
+    case ExChild::SelectionSphere: p.selectionSphere = false; break;
+    case ExChild::DragDetector: p.dragDetector = false; break;
+    case ExChild::Seat: p.seat = false; break;
+    case ExChild::VehicleSeat: p.vehicleSeat = false; break;
+    case ExChild::Ladder: p.ladder = false; break;
+    case ExChild::Spawn: p.spawnPoint = false; break;
+    case ExChild::Mesh: p.meshFile.clear(); break;
+    case ExChild::Emitter:
+        if (g_exChildIndex >= 0 && g_exChildIndex < (int)g_lua.scriptEmitters_.size())
+            g_lua.scriptEmitters_.erase(g_lua.scriptEmitters_.begin() + g_exChildIndex);
+        break;
+    case ExChild::Attachment:
+        if (g_exChildIndex >= 0 && g_exChildIndex < (int)scriptControls().attachments.size())
+            scriptControls().attachments.erase(scriptControls().attachments.begin() + g_exChildIndex);
+        break;
+    case ExChild::Trail:
+        if (g_exChildIndex >= 0 && g_exChildIndex < (int)scriptControls().trails.size())
+            scriptControls().trails.erase(scriptControls().trails.begin() + g_exChildIndex);
+        break;
+    case ExChild::Click:
+        scriptControls().clickReach.erase(g_selectedPart);
+        break;
+    case ExChild::Weld:
+        if (g_exChildIndex >= 0 && g_exChildIndex < (int)g_world.welds.size())
+            g_world.welds.erase(g_world.welds.begin() + g_exChildIndex);
+        break;
+    default: break;
+    }
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
+    markPlaceDirty();
+}
+
+static void exAddEmitter(int index, const char* cls) {
+    if (!partIndexValid(index)) return;
+    LuaRuntime::ScriptParticleEmitter e;
+    e.partIndex = index;
+    e.enabled = true;
+    if (std::strcmp(cls, "Smoke") == 0) {
+        e.preset = (int)ParticlePreset::Smoke;
+        e.rate = 8.f;
+        e.life = 1.4f;
+        e.color = {0.55f, 0.55f, 0.55f};
+    } else if (std::strcmp(cls, "Sparkles") == 0) {
+        e.preset = (int)ParticlePreset::Sparks;
+        e.rate = 18.f;
+        e.color = {1.f, 0.95f, 0.45f};
+    } else {
+        e.preset = (int)ParticlePreset::Sparks;
+        e.rate = 14.f;
+        e.speed = 4.f;
+        e.life = 0.7f;
+        e.color = {1.f, 0.35f, 0.05f};
+        e.customMotion = true;
+    }
+    e.className = cls;
+    e.name = cls;
+    g_lua.scriptEmitters_.push_back(e);
+    exSelectChild(index, ExChild::Emitter, (int)g_lua.scriptEmitters_.size() - 1);
+    g_exportMsg = std::string(cls) + " — le particelle escono in Play";
+}
+
+static void exAddAttachment(int index) {
+    if (!partIndexValid(index)) return;
+    ScriptControls::ScriptAttachment a;
+    a.name = "Attachment" + std::to_string(scriptControls().attachments.size() + 1);
+    a.partIndex = index;
+    a.oy = g_world.parts[(size_t)index].size.y * 0.5f;
+    scriptControls().attachments.push_back(a);
+    exSelectChild(index, ExChild::Attachment, (int)scriptControls().attachments.size() - 1);
+}
+
+static void exAddTrail(int index) {
+    if (!partIndexValid(index)) return;
+    ScriptControls::ScriptTrail t;
+    t.name = "Trail" + std::to_string(scriptControls().trails.size() + 1);
+    t.partIndex = index;
+    scriptControls().trails.push_back(std::move(t));
+    exSelectChild(index, ExChild::Trail, (int)scriptControls().trails.size() - 1);
+}
+
+static void exAddClick(int index) {
+    if (!partIndexValid(index)) return;
+    scriptControls().clickReach[index] = 32.f;
+    exSelectChild(index, ExChild::Click);
+    g_exportMsg = "ClickDetector — in Play il clic sulla Part arriva allo script";
+}
+
+static const char* exEmitterName(const LuaRuntime::ScriptParticleEmitter& e) {
+    if (!e.className.empty()) return e.className.c_str();
+    if (e.preset == (int)ParticlePreset::Smoke) return "Smoke";
+    if (e.customMotion) return "Fire";
+    return "Sparkles";
+}
+
+/** Il menu del "+" e di "Inserisci nella Part": le classi che la Part puo' contenere. */
+static void exInsertPartMenu(int index) {
+    if (!partIndexValid(index)) return;
+    if (ImGui::BeginMenu("Script")) {
+        if (ImGui::MenuItem("Script")) { selectPart(index); studioAddScriptOfType(ScriptType::Server); g_editingPartScript = true; g_showProps = true; }
+        if (ImGui::MenuItem("LocalScript")) { selectPart(index); studioAddScriptOfType(ScriptType::Client); g_editingPartScript = true; g_showProps = true; }
+        if (ImGui::MenuItem("ModuleScript")) { selectPart(index); studioAddScriptOfType(ScriptType::ModuleScript); g_editingPartScript = true; g_showProps = true; }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Parti")) {
+        exMenuCatalog(index, 0);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Luci")) {
+        if (ImGui::MenuItem("PointLight")) {
+            exEnableChild(index, ExChild::PointLight);
+            g_world.parts[(size_t)index].lightKind = 0.f;
+        }
+        if (ImGui::MenuItem("SpotLight")) {
+            exEnableChild(index, ExChild::PointLight);
+            g_world.parts[(size_t)index].lightKind = 1.f;
+            g_world.parts[(size_t)index].lightAngle = 90.f;
+        }
+        if (ImGui::MenuItem("SurfaceLight")) {
+            exEnableChild(index, ExChild::PointLight);
+            g_world.parts[(size_t)index].lightKind = 2.f;
+            g_world.parts[(size_t)index].lightAngle = 90.f;
+            g_world.parts[(size_t)index].lightFace = 1.f;
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Aspetto")) {
+        if (ImGui::MenuItem("Decal")) exEnableChild(index, ExChild::Decal);
+        if (ImGui::MenuItem("Decal (altra faccia)")) {
+            WorkspacePart& p = g_world.parts[(size_t)index];
+            if ((int)p.extraDecals.size() < 4) {
+                WorkspacePart::FaceDecal fd;
+                fd.face = ((int)p.extraDecals.size() + 1) % 6;
+                fd.image = "brick";
+                p.extraDecals.push_back(fd);
+                p.decalEnabled = true;
+                markPlaceDirty();
+            }
+            exSelectChild(index, ExChild::Decal);
+        }
+        if (ImGui::MenuItem("Texture")) exEnableChild(index, ExChild::Texture);
+        if (ImGui::MenuItem("SpecialMesh")) exEnableChild(index, ExChild::Mesh);
+        if (ImGui::MenuItem("Highlight")) exEnableChild(index, ExChild::Highlight);
+        if (ImGui::MenuItem("SelectionBox")) exEnableChild(index, ExChild::SelectionBox);
+        if (ImGui::MenuItem("SelectionSphere")) exEnableChild(index, ExChild::SelectionSphere);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Effetti")) {
+        if (ImGui::MenuItem("Fire")) exAddEmitter(index, "Fire");
+        if (ImGui::MenuItem("Smoke")) exAddEmitter(index, "Smoke");
+        if (ImGui::MenuItem("Sparkles")) exAddEmitter(index, "Sparkles");
+        if (ImGui::MenuItem("Attachment")) exAddAttachment(index);
+        if (ImGui::MenuItem("Trail")) exAddTrail(index);
+        if (ImGui::MenuItem("ClickDetector")) exAddClick(index);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Comportamento")) {
+        if (ImGui::MenuItem("DragDetector")) exEnableChild(index, ExChild::DragDetector);
+        if (ImGui::MenuItem("Seat")) exEnableChild(index, ExChild::Seat);
+        if (ImGui::MenuItem("VehicleSeat")) exEnableChild(index, ExChild::VehicleSeat);
+        if (ImGui::MenuItem("Ladder")) exEnableChild(index, ExChild::Ladder);
+        if (ImGui::MenuItem("SpawnLocation")) exEnableChild(index, ExChild::Spawn);
+        ImGui::EndMenu();
+    }
+    if (ImGui::MenuItem("BillboardGui")) { selectPart(index); insertRobloxWidget("BillboardGui"); }
+    if (ImGui::MenuItem("SurfaceGui")) { selectPart(index); insertRobloxWidget("SurfaceGui"); }
+    if (ImGui::MenuItem("Sound")) { selectPart(index); insertSound(); }
+    if (ImGui::BeginMenu("Vincoli")) {
+        static const ConstraintKind ks[] = {
+            ConstraintKind::Weld, ConstraintKind::Hinge, ConstraintKind::Rope, ConstraintKind::Spring,
+            ConstraintKind::Rod, ConstraintKind::BallSocket, ConstraintKind::Prismatic, ConstraintKind::Cylindrical,
+            ConstraintKind::NoCollision, ConstraintKind::AlignPosition, ConstraintKind::AlignOrientation,
+            ConstraintKind::LinearVelocity, ConstraintKind::AngularVelocity, ConstraintKind::VectorForce, ConstraintKind::Torque
+        };
+        for (ConstraintKind k : ks)
+            if (ImGui::MenuItem(constraintKindName(k))) exAddConstraint(index, k);
+        ImGui::EndMenu();
+    }
+}
+
 /** Il menu del tasto destro, come in Roblox Studio (Taglia, Copia, Incolla, Raggruppa...). */
 static void drawStudioObjectMenuItems() {
     const std::vector<int> sel = studioActivePartIndices();
@@ -301,7 +612,12 @@ static void drawStudioObjectMenuItems() {
     if (ImGui::MenuItem("Rinomina", "F2", false, one || !wholeGroups.empty())) studioExplorerBeginRename();
     ImGui::Separator();
     if (ImGui::MenuItem("Raggruppa come modello", "Ctrl+G", false, any)) studioGroupSelection();
+    if (ImGui::MenuItem("Raggruppa come cartella", "Ctrl+Alt+G", false, any)) studioGroupSelectionAsFolder();
     if (ImGui::MenuItem("Sciogli gruppo", "Ctrl+U", false, !wholeGroups.empty())) studioUngroupSelection();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Unione", "Ctrl+Maiusc+G", false, sel.size() >= 2)) studioCsgCombine(0);
+    if (ImGui::MenuItem("Interseca", nullptr, false, sel.size() >= 2)) studioCsgCombine(1);
+    if (ImGui::MenuItem("Nega", "Ctrl+Maiusc+N", false, any)) studioCsgNegate();
     ImGui::Separator();
     if (ImGui::MenuItem("Seleziona Parent", nullptr, false, topGroup > 0 && wholeGroups.empty())) studioSelectGroup(topGroup, g_selectedPart);
     if (ImGui::MenuItem("Seleziona simili (colore)", nullptr, false, one)) studioSelectSimilar(0);
@@ -342,11 +658,7 @@ static void drawStudioObjectMenuItems() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Inserisci nella Part")) {
-            if (ImGui::MenuItem("Script")) studioAddScriptOfType(ScriptType::Server);
-            if (ImGui::MenuItem("LocalScript")) studioAddScriptOfType(ScriptType::Client);
-            if (ImGui::MenuItem("ModuleScript")) studioAddScriptOfType(ScriptType::ModuleScript);
-            ImGui::Separator();
-            if (ImGui::MenuItem("PointLight", nullptr, p.pointLight)) { p.pointLight = !p.pointLight; markPlaceDirty(); }
+            exInsertPartMenu(g_selectedPart);
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Tag...")) g_showTagsWindow = true;
@@ -368,48 +680,54 @@ static void drawExplorerInsertPopup() {
     case ExInsert::Workspace:
     case ExInsert::Group: {
         const int gid = t.kind == ExInsert::Group ? t.index : 0;
-        if (ImGui::MenuItem("Part")) exInsertPartInto(gid, PartShape::Block);
-        if (ImGui::MenuItem("Part (sfera)")) exInsertPartInto(gid, PartShape::Ball);
-        if (ImGui::MenuItem("Part (cilindro)")) exInsertPartInto(gid, PartShape::Cylinder);
-        if (ImGui::MenuItem("WedgePart")) exInsertPartInto(gid, PartShape::Wedge);
-        if (gid == 0) {
-            ImGui::Separator();
-            if (ImGui::MenuItem("MeshPart (importa modello)")) insertImportedModel();
-            if (ImGui::MenuItem("SpawnLocation")) studioRunInsertKind(7);
-            if (ImGui::MenuItem("Part con PointLight")) insertPointLightPart();
+        if (ImGui::BeginMenu("Contenitori")) {
+            if (ImGui::MenuItem("Folder")) exInsertContainer(gid, true);
+            if (ImGui::MenuItem("Model")) exInsertContainer(gid, false);
+            ImGui::EndMenu();
         }
+        exMenuCatalog(-1, gid);
         ImGui::Separator();
         if (ImGui::MenuItem("Altro...", "Ctrl+I")) g_showInsertObject = true;
         break;
     }
     case ExInsert::Part:
-        if (partIndexValid(t.index)) {
-            selectPart(t.index);
-            if (ImGui::MenuItem("Script")) studioAddScriptOfType(ScriptType::Server);
-            if (ImGui::MenuItem("LocalScript")) studioAddScriptOfType(ScriptType::Client);
-            if (ImGui::MenuItem("ModuleScript")) studioAddScriptOfType(ScriptType::ModuleScript);
-            ImGui::Separator();
-            WorkspacePart& p = g_world.parts[(size_t)t.index];
-            if (ImGui::MenuItem("PointLight", nullptr, p.pointLight)) { p.pointLight = !p.pointLight; markPlaceDirty(); }
-        }
+        exInsertPartMenu(t.index);
         break;
     case ExInsert::StarterGui:
-        if (ImGui::MenuItem("TextLabel")) insertNewTextLabel();
-        if (ImGui::MenuItem("TextButton")) insertNewTextButton();
-        if (ImGui::MenuItem("Frame")) insertNewFrame();
-        if (ImGui::MenuItem("ImageLabel")) insertNewImageLabel();
+        if (ImGui::MenuItem("ScreenGui")) insertRobloxWidget("ScreenGui");
+        if (ImGui::MenuItem("Frame")) insertRobloxWidget("Frame");
+        if (ImGui::MenuItem("ScrollingFrame")) insertRobloxWidget("ScrollingFrame");
+        if (ImGui::MenuItem("TextLabel")) insertRobloxWidget("TextLabel");
+        if (ImGui::MenuItem("TextButton")) insertRobloxWidget("TextButton");
+        if (ImGui::MenuItem("TextBox")) insertRobloxWidget("TextBox");
+        if (ImGui::MenuItem("ImageLabel")) insertRobloxWidget("ImageLabel");
+        if (ImGui::MenuItem("ImageButton")) insertRobloxWidget("ImageButton");
+        ImGui::Separator();
+        if (ImGui::MenuItem("UIListLayout")) insertRobloxWidget("UIListLayout");
+        if (ImGui::MenuItem("UIGridLayout")) insertRobloxWidget("UIGridLayout");
+        if (ImGui::MenuItem("UIPadding")) insertRobloxWidget("UIPadding");
+        if (ImGui::MenuItem("UICorner")) insertRobloxWidget("UICorner");
+        if (ImGui::MenuItem("UIStroke")) insertRobloxWidget("UIStroke");
+        ImGui::Separator();
+        if (ImGui::MenuItem("BillboardGui")) insertRobloxWidget("BillboardGui");
+        if (ImGui::MenuItem("SurfaceGui")) insertRobloxWidget("SurfaceGui");
         break;
     case ExInsert::StarterPack:
         if (ImGui::MenuItem("Tool")) g_world.addBackpackItem("Tool", (int)g_world.backpack.size());
+        if (ImGui::MenuItem("Tool + Handle")) studioRunInsertKind(31);
         if (ImGui::MenuItem("Tool: spada")) g_world.addBackpackItem("Sword", 3, BackpackTool::Sword);
         if (ImGui::MenuItem("Tool: pistola")) g_world.addBackpackItem("Pistola", 4, BackpackTool::Pistol);
+        if (ImGui::MenuItem("Tool: torcia")) g_world.addBackpackItem("Torcia", (int)g_world.backpack.size(), BackpackTool::Torch);
         break;
     case ExInsert::Sound:
         if (ImGui::MenuItem("Sound")) insertSound();
         break;
     case ExInsert::Shared: {
         const SharedService svc = (SharedService)t.index;
-        static const char* kCls[] = {"Script", "LocalScript", "ModuleScript", "RemoteEvent", "RemoteFunction", "Folder"};
+        static const char* kCls[] = {
+            "Folder", "Configuration", "Script", "LocalScript", "ModuleScript",
+            "RemoteEvent", "RemoteFunction"
+        };
         for (const char* c : kCls) {
             if (svc == SharedService::ServerScriptService && std::string(c) == "LocalScript") continue;
             if (ImGui::MenuItem(c)) {
@@ -429,6 +747,55 @@ static void drawExplorerInsertPopup() {
 // ---- Albero ---------------------------------------------------------------------------------
 
 static void exPartRow(int i);
+
+/** Il genitore valido di una part (-1 = nessuno o non valido). */
+static int exPartParent(int i) {
+    const int p = partIndexValid(i) ? g_world.parts[(size_t)i].parentIndex : -1;
+    return partIndexValid(p) && p != i ? p : -1;
+}
+
+/** "child" puo' andare dentro "parent" senza fare un cerchio? */
+static bool exCanParentPart(int child, int parent) {
+    for (int p = parent, steps = 0; p >= 0 && steps < 512; p = exPartParent(p), ++steps)
+        if (p == child) return false;
+    return true;
+}
+
+/** Trascinare part su una part = metterle dentro (Parent), come nell'Esploratore di Roblox. */
+static void exDropPartsOnPart(int target) {
+    if (!ImGui::BeginDragDropTarget()) return;
+    if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("BLOCKY_PART")) {
+        const int dragged = *(const int*)pl->Data;
+        std::vector<int> moving = studioMultiContains(dragged) ? studioActivePartIndices() : std::vector<int>{dragged};
+        int n = 0;
+        for (int c : moving) {
+            if (!partIndexValid(c) || c == target || !exCanParentPart(c, target)) continue;
+            const WorkspacePart before = g_world.parts[(size_t)c];
+            g_world.parts[(size_t)c].parentIndex = target;
+            g_world.parts[(size_t)c].groupId = g_world.parts[(size_t)target].groupId;   // stesso Model del genitore
+            g_undo.recordEdit(c, before, g_world.parts[(size_t)c]);
+            ++n;
+        }
+        if (n) {
+            markPlaceDirty();
+            g_exportMsg = std::to_string(n) + " part dentro \"" + g_world.parts[(size_t)target].name + "\"";
+        }
+    }
+    ImGui::EndDragDropTarget();
+}
+
+/** Raggruppa come Folder (Ctrl+Alt+G): come Model, ma cliccando una part si seleziona solo lei. */
+static void studioGroupSelectionAsFolder() {
+    const std::vector<int> sel = studioActivePartIndices();
+    if (sel.empty()) { g_exportMsg = "Folder: seleziona prima delle part"; return; }
+    const std::vector<PartGroup> before = g_world.groups;
+    const std::vector<int> partsBefore = UndoStack::partGroups(g_world);
+    const int gid = partgroups::group(g_world, sel, "Folder");
+    if (PartGroup* g = partgroups::find(g_world, gid)) g->folder = true;
+    g_undo.recordGroupChange(before, partsBefore, g_world);
+    markPlaceDirty();
+    g_exportMsg = "Folder creata con " + std::to_string(sel.size()) + " part";
+}
 
 static void exGroupRow(int gid) {
     const PartGroup* g = partgroups::find(g_world, gid);
@@ -450,7 +817,12 @@ static void exGroupRow(int gid) {
         ImGui::PopID();
         return;
     }
-    const ExRow r = exRow("##g", ExIcon::Model, g->name.c_str(), whole, true, false, "Model", {ExInsert::Group, gid});
+    if (g_exRevealPart >= 0 && partIndexValid(g_exRevealPart)) {
+        for (int m : members)
+            if (m == g_exRevealPart) { ImGui::SetNextItemOpen(true); break; }
+    }
+    const ExRow r = exRow("##g", g->folder ? ExIcon::Folder : ExIcon::Model, g->name.c_str(), whole, true, false,
+                          g->folder ? "Folder" : "Model", {ExInsert::Group, gid});
     studioDropTargetForGroup(gid);
     if (r.clicked) {
         if (ImGui::GetIO().KeyCtrl) {
@@ -469,7 +841,7 @@ static void exGroupRow(int gid) {
     if (r.open) {
         for (int child : partgroups::childGroups(g_world, gid)) exGroupRow(child);
         for (int i = 0; i < (int)g_world.parts.size(); ++i)
-            if (g_world.parts[(size_t)i].groupId == gid) exPartRow(i);
+            if (g_world.parts[(size_t)i].groupId == gid && exPartParent(i) < 0) exPartRow(i);   // i figli stanno sotto il genitore
         ImGui::TreePop();
     }
     ImGui::PopID();
@@ -496,10 +868,37 @@ static void exPartRow(int i) {
         ImGui::PopID();
         return;
     }
-    const bool sel = (i == g_selectedPart && !g_editingPartScript) || studioMultiContains(i);
+    g_exRowOrder.push_back(i);
+    const bool sel = ((i == g_selectedPart && !g_editingPartScript && g_exChild == ExChild::None) || studioMultiContains(i))
+                  && !(i == g_selectedPart && g_exChild != ExChild::None);
     const bool hasScript = !p.script.empty();
+    bool hasKids = false;
+    for (int k = 0; k < (int)g_world.parts.size() && !hasKids; ++k) hasKids = exPartParent(k) == i;
+    bool hasWeld = false;
+    for (const auto& w : g_world.welds)
+        if (w.part0 == i || w.part1 == i) { hasWeld = true; break; }
+    bool hasGui = false;
+    for (const auto& l : g_world.labels)
+        if (l.adorneePart == i && l.isWorldGui()) { hasGui = true; break; }
+    bool hasFx = scriptControls().clickReach.count(i) > 0;
+    if (!hasFx)
+        for (const auto& e : g_lua.scriptEmitters_) if (e.partIndex == i) { hasFx = true; break; }
+    if (!hasFx)
+        for (const auto& a : scriptControls().attachments) if (a.partIndex == i) { hasFx = true; break; }
+    if (!hasFx)
+        for (const auto& tr : scriptControls().trails) if (tr.partIndex == i) { hasFx = true; break; }
+    const bool adorn = p.pointLight || p.decalEnabled || p.textureEnabled || p.highlightEnabled
+                    || p.dragDetector || p.selectionBox || p.selectionSphere || p.seat
+                    || p.vehicleSeat || p.ladder || p.spawnPoint || !p.meshFile.empty()
+                    || !p.extraDecals.empty() || hasWeld || hasGui || hasFx;
+    if (g_selectedPart == i && (g_exChild != ExChild::None || g_editingPartScript))
+        ImGui::SetNextItemOpen(true);
+    if (g_exRevealPart >= 0 && g_exRevealPart != i)   // la part da mostrare e' una mia discendente?
+        for (int q = exPartParent(g_exRevealPart), steps = 0; q >= 0 && steps < 512; q = exPartParent(q), ++steps)
+            if (q == i) { ImGui::SetNextItemOpen(true); break; }
     const ExRow r = exRow("##p", exPartIcon(p), p.locked ? (p.name + " (bloccata)").c_str() : p.name.c_str(), sel,
-                          hasScript, false, exPartClass(p), {ExInsert::Part, i});
+                          hasScript || hasKids || adorn, false, exPartClass(p), {ExInsert::Part, i});
+    exDropPartsOnPart(i);
     if (r.clicked) {
         if (ImGui::GetIO().KeyCtrl) { studioMultiToggle(i); selectPart(i); }
         else if (ImGui::GetIO().KeyShift && partIndexValid(g_selectedPart)) {
@@ -509,6 +908,7 @@ static void exPartRow(int i) {
             selectPart(i);
         } else { studioMultiClear(); selectPart(i); g_editingPartScript = false; }
     }
+    if (g_exRevealPart == i) { ImGui::SetScrollHereY(0.4f); g_exRevealPart = -1; }
     if (r.rclicked && !studioMultiContains(i) && i != g_selectedPart) { studioMultiClear(); selectPart(i); }
     if (r.dbl) exBeginRename(i);
     if (ImGui::BeginDragDropSource()) {
@@ -520,14 +920,125 @@ static void exPartRow(int i) {
         drawStudioObjectMenuItems();
         ImGui::EndPopup();
     }
-    if (r.open) {
+    if (r.open && hasKids)
+        for (int k = 0; k < (int)g_world.parts.size(); ++k)
+            if (exPartParent(k) == i) exPartRow(k);
+    if (r.open && hasScript) {
         const bool scriptSel = i == g_selectedPart && g_editingPartScript;
         const ExRow s = exRow("##s", exScriptIcon(p.scriptType), exScriptClass(p.scriptType), scriptSel, false, false,
                               exScriptClass(p.scriptType));
         if (s.clicked || s.dbl) { selectPart(i); g_editingPartScript = true; g_showProps = true; }
-        if (s.dbl) g_showScript = true;
-        ImGui::TreePop();
+        if (s.dbl) g_showPartScriptWin = true;   // doppio clic = apri lo script
+        if (ImGui::BeginPopupContextItem("##sctx")) {
+            if (ImGui::MenuItem("Apri")) { selectPart(i); g_editingPartScript = true; g_showPartScriptWin = true; }
+            if (ImGui::MenuItem("Elimina", "Canc")) { selectPart(i); removeScriptFromSelected(); g_editingPartScript = false; }
+            ImGui::EndPopup();
+        }
     }
+    if (r.open && adorn) {
+        auto kid = [&](const char* id, const char* name, ExIcon ic, ExChild kind, bool on) {
+            if (!on) return;
+            const bool ksel = i == g_selectedPart && g_exChild == kind;
+            const ExRow row = exRow(id, ic, name, ksel, false, false, name);
+            if (row.clicked || row.dbl) exSelectChild(i, kind);
+            if (ImGui::BeginPopupContextItem(id)) {
+                if (ImGui::MenuItem("Elimina", "Canc")) { exSelectChild(i, kind); exRemoveSelectedChild(); }
+                if (ImGui::MenuItem("Proprieta'")) exSelectChild(i, kind);
+                ImGui::EndPopup();
+            }
+        };
+        kid("##pl", "PointLight", ExIcon::Light, ExChild::PointLight, p.pointLight);
+        kid("##dec", "Decal", ExIcon::Image, ExChild::Decal, p.decalEnabled);
+        kid("##tex", "Texture", ExIcon::Image, ExChild::Texture, p.textureEnabled);
+        kid("##mesh", "SpecialMesh", ExIcon::MeshPart, ExChild::Mesh, !p.meshFile.empty());
+        kid("##hi", "Highlight", ExIcon::Gui, ExChild::Highlight, p.highlightEnabled);
+        kid("##sb", "SelectionBox", ExIcon::Gui, ExChild::SelectionBox, p.selectionBox);
+        kid("##ss", "SelectionSphere", ExIcon::Ball, ExChild::SelectionSphere, p.selectionSphere);
+        kid("##dd", "DragDetector", ExIcon::Tool, ExChild::DragDetector, p.dragDetector);
+        kid("##seat", "Seat", ExIcon::Spawn, ExChild::Seat, p.seat);
+        kid("##vs", "VehicleSeat", ExIcon::Spawn, ExChild::VehicleSeat, p.vehicleSeat);
+        kid("##lad", "Ladder", ExIcon::Part, ExChild::Ladder, p.ladder);
+        kid("##sp", "SpawnLocation", ExIcon::Spawn, ExChild::Spawn, p.spawnPoint);
+        kid("##ck", "ClickDetector", ExIcon::Tool, ExChild::Click, scriptControls().clickReach.count(i) > 0);
+        for (int d = 0; d < (int)p.extraDecals.size(); ++d) {
+            ImGui::PushID(8000 + d);
+            const ExRow row = exRow("##xd", ExIcon::Image, "Decal", false, false, false, "Decal");
+            if (row.clicked) exSelectChild(i, ExChild::Decal);
+            ImGui::PopID();
+        }
+        for (int ei = 0; ei < (int)g_lua.scriptEmitters_.size(); ++ei) {
+            const auto& e = g_lua.scriptEmitters_[(size_t)ei];
+            if (e.partIndex != i) continue;
+            ImGui::PushID(8500 + ei);
+            const bool ksel = i == g_selectedPart && g_exChild == ExChild::Emitter && g_exChildIndex == ei;
+            const ExRow row = exRow("##em", ExIcon::Light, exEmitterName(e), ksel, false, false, exEmitterName(e));
+            if (row.clicked || row.dbl) exSelectChild(i, ExChild::Emitter, ei);
+            if (ImGui::BeginPopupContextItem("##emctx")) {
+                if (ImGui::MenuItem("Elimina", "Canc")) { exSelectChild(i, ExChild::Emitter, ei); exRemoveSelectedChild(); }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        for (int ai = 0; ai < (int)scriptControls().attachments.size(); ++ai) {
+            const auto& a = scriptControls().attachments[(size_t)ai];
+            if (a.partIndex != i) continue;
+            ImGui::PushID(8700 + ai);
+            const bool ksel = i == g_selectedPart && g_exChild == ExChild::Attachment && g_exChildIndex == ai;
+            const ExRow row = exRow("##at", ExIcon::Part, a.name.c_str(), ksel, false, false, "Attachment");
+            if (row.clicked || row.dbl) exSelectChild(i, ExChild::Attachment, ai);
+            if (ImGui::BeginPopupContextItem("##atctx")) {
+                if (ImGui::MenuItem("Elimina", "Canc")) { exSelectChild(i, ExChild::Attachment, ai); exRemoveSelectedChild(); }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        for (int ti = 0; ti < (int)scriptControls().trails.size(); ++ti) {
+            const auto& tr = scriptControls().trails[(size_t)ti];
+            if (tr.partIndex != i) continue;
+            ImGui::PushID(8900 + ti);
+            const bool ksel = i == g_selectedPart && g_exChild == ExChild::Trail && g_exChildIndex == ti;
+            const ExRow row = exRow("##tr", ExIcon::Part, tr.name.c_str(), ksel, false, false, "Trail");
+            if (row.clicked || row.dbl) exSelectChild(i, ExChild::Trail, ti);
+            if (ImGui::BeginPopupContextItem("##trctx")) {
+                if (ImGui::MenuItem("Elimina", "Canc")) { exSelectChild(i, ExChild::Trail, ti); exRemoveSelectedChild(); }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        for (int w = 0; w < (int)g_world.welds.size(); ++w) {
+            const WeldConstraint& c = g_world.welds[(size_t)w];
+            if (c.part0 != i && c.part1 != i) continue;
+            ImGui::PushID(4000 + w);
+            const bool ksel = i == g_selectedPart && g_exChild == ExChild::Weld && g_exChildIndex == w;
+            const ExRow row = exRow("##weld", ExIcon::Model, c.name.c_str(), ksel, false, false, constraintKindName(c.kind));
+            if (row.clicked || row.dbl) exSelectChild(i, ExChild::Weld, w);
+            if (ImGui::BeginPopupContextItem("##wctx")) {
+                if (ImGui::MenuItem("Elimina", "Canc")) { exSelectChild(i, ExChild::Weld, w); exRemoveSelectedChild(); }
+                if (ImGui::MenuItem("Proprieta'")) exSelectChild(i, ExChild::Weld, w);
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        for (int li = 0; li < (int)g_world.labels.size(); ++li) {
+            const WorkspaceLabel& lab = g_world.labels[(size_t)li];
+            if (lab.adorneePart != i || !lab.isWorldGui()) continue;
+            ImGui::PushID(6000 + li);
+            const ExRow row = exRow("##ador", ExIcon::Gui, lab.name.c_str(), g_selectedLabel == li, false, false, lab.className.c_str());
+            if (row.clicked || row.dbl) selectLabel(li);
+            if (ImGui::BeginPopupContextItem("##actx")) {
+                if (ImGui::MenuItem("Elimina", "Canc")) {
+                    selectLabel(li);
+                    deleteSelected();
+                    markPlaceDirty();
+                    break;
+                }
+                if (ImGui::MenuItem("Proprieta'")) selectLabel(li);
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (r.open) ImGui::TreePop();
     ImGui::PopID();
 }
 
@@ -539,7 +1050,7 @@ static void exSharedChildren(SharedService svc, int parent) {
         for (const auto& c : g_world.instances) if (c.service == svc && c.parentIndex == i) { kids = true; break; }
         ImGui::PushID(1000 + i);
         const ExRow r = exRow("##sh", exClassIcon(s.className), s.name.c_str(), g_selectedSharedInstance == i, kids, true,
-                              s.className.c_str());
+                              s.className.c_str(), {ExInsert::Shared, (int)svc});
         if (r.clicked) {
             const int svcId = svc == SharedService::ReplicatedStorage ? studio::platform::Svc_ReplicatedStorage
                             : svc == SharedService::ServerStorage ? studio::platform::Svc_ServerStorage
@@ -552,11 +1063,129 @@ static void exSharedChildren(SharedService svc, int parent) {
     }
 }
 
+static int exLabelParent(int i) {
+    const int p = i >= 0 && i < (int)g_world.labels.size() ? g_world.labels[(size_t)i].parentIndex : -1;
+    return p >= 0 && p < (int)g_world.labels.size() && p != i ? p : -1;
+}
+
+/** Una GUI con le sue figlie; trascinandone una sopra un'altra la si mette dentro. */
+static void exLabelRow(int i, int depth = 0) {
+    if (depth > 32) return;
+    const auto& l = g_world.labels[(size_t)i];
+    bool kids = false;
+    for (int k = 0; k < (int)g_world.labels.size() && !kids; ++k) kids = exLabelParent(k) == i;
+    ImGui::PushID(9000 + i);
+    const ExRow r = exRow("##lab", exClassIcon(l.className), l.name.c_str(), i == g_selectedLabel, kids, true,
+                          l.className.c_str(), {ExInsert::StarterGui, 0});
+    if (r.clicked) selectLabel(i);
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("BLOCKY_GUI", &i, sizeof(int));
+        ImGui::Text("%s", l.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("BLOCKY_GUI")) {
+            const int c = *(const int*)pl->Data;
+            bool cycle = c == i;
+            for (int q = i, steps = 0; q >= 0 && steps < 64 && !cycle; q = exLabelParent(q), ++steps) cycle = q == c;
+            if (!cycle && c >= 0 && c < (int)g_world.labels.size()) { g_world.labels[(size_t)c].parentIndex = i; markPlaceDirty(); }
+        }
+        ImGui::EndDragDropTarget();
+    }
+    if (r.open) {
+        for (int k = 0; k < (int)g_world.labels.size(); ++k)
+            if (exLabelParent(k) == i) exLabelRow(k, depth + 1);
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+}
+
 static bool exServiceRow(const char* id, ExIcon icon, const char* name, int svcId, bool hasChildren, bool open = false,
                          ExInsertTarget ins = {}) {
     const ExRow r = exRow(id, icon, name, svcId >= 0 && g_selectedService == svcId, hasChildren, open, name, ins);
     if (r.clicked && svcId >= 0) toggleService(svcId);
     return r.open;
+}
+
+/**
+ * Ricerca come in Roblox: oltre alle part (gia filtrate nel Workspace) trova
+ * Model, MeshPart, GUI, suoni, Tool, script dei servizi e i servizi stessi.
+ */
+static void exSearchOtherObjects() {
+    std::string q = g_explorerFilterBuf;
+    for (char& c : q) c = (char)std::tolower((unsigned char)c);
+    auto hit = [&](const std::string& name, const char* cls) {
+        std::string h = name + " " + cls;
+        for (char& c : h) c = (char)std::tolower((unsigned char)c);
+        return h.find(q) != std::string::npos;
+    };
+    int shown = 0;
+    auto header = [&]() { if (shown++ == 0) ImGui::TextDisabled("Altri risultati"); };
+    for (const auto& g : g_world.groups)
+        if (hit(g.name, "Model")) {
+            header();
+            ImGui::PushID(20000 + g.id);
+            if (exRow("##sg", ExIcon::Model, g.name.c_str(), false, false, false, "Model").clicked) studioSelectGroup(g.id);
+            ImGui::PopID();
+        }
+    for (int i = 0; i < (int)g_world.models.size(); ++i)
+        if (hit(g_world.models[(size_t)i].name, "MeshPart")) {
+            header();
+            ImGui::PushID(21000 + i);
+            if (exRow("##sm", ExIcon::MeshPart, g_world.models[(size_t)i].name.c_str(), i == g_selectedModel, false, false, "MeshPart").clicked) { selectModel(i); g_showProps = true; }
+            ImGui::PopID();
+        }
+    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+        const auto& l = g_world.labels[(size_t)i];
+        if (!hit(l.name, l.className.c_str())) continue;
+        header();
+        ImGui::PushID(22000 + i);
+        if (exRow("##sl", exClassIcon(l.className), l.name.c_str(), i == g_selectedLabel, false, false, l.className.c_str()).clicked) selectLabel(i);
+        ImGui::PopID();
+    }
+    for (int i = 0; i < (int)g_sounds.sounds.size(); ++i)
+        if (hit(g_sounds.sounds[(size_t)i].name, "Sound")) {
+            header();
+            ImGui::PushID(23000 + i);
+            if (exRow("##ss", ExIcon::Sound, g_sounds.sounds[(size_t)i].name.c_str(), i == g_selectedSound, false, false, "Sound").clicked) { selectSound(i); g_showProps = true; }
+            ImGui::PopID();
+        }
+    for (int i = 0; i < (int)g_world.backpack.size(); ++i)
+        if (hit(g_world.backpack[(size_t)i].name, "Tool")) {
+            header();
+            ImGui::PushID(24000 + i);
+            if (exRow("##st", ExIcon::Tool, g_world.backpack[(size_t)i].name.c_str(), i == g_selectedBackpack, false, false, "Tool").clicked) {
+                clearAllSelection();
+                g_selectedBackpack = i;
+                g_showProps = true;
+            }
+            ImGui::PopID();
+        }
+    for (int i = 0; i < (int)g_world.instances.size(); ++i) {
+        const SharedInstance& si = g_world.instances[(size_t)i];
+        if (!hit(si.name, si.className.c_str())) continue;
+        header();
+        ImGui::PushID(25000 + i);
+        if (exRow("##si", exClassIcon(si.className), si.name.c_str(), g_selectedSharedInstance == i, false, false, si.className.c_str()).clicked) {
+            const int svcId = si.service == SharedService::ReplicatedStorage ? studio::platform::Svc_ReplicatedStorage
+                            : si.service == SharedService::ServerStorage ? studio::platform::Svc_ServerStorage
+                                                                          : studio::platform::Svc_ServerScriptService;
+            selectService(svcId);
+            g_selectedSharedInstance = i;
+        }
+        ImGui::PopID();
+    }
+    int count = 0;
+    const studio::platform::ServiceInfo* svcs = studio::platform::services(&count);
+    for (int k = 0; k < count; ++k)
+        if (hit(svcs[k].name, "Service")) {
+            header();
+            ImGui::PushID(26000 + k);
+            if (exRow("##sv", ExIcon::Service, svcs[k].name, g_selectedService == (int)svcs[k].id, false, false, "Service").clicked)
+                toggleService((int)svcs[k].id);
+            ImGui::PopID();
+        }
+    if (shown) ImGui::Separator();
 }
 
 static void drawRobloxExplorer() {
@@ -583,14 +1212,32 @@ static void drawRobloxExplorer() {
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && !g_studioTesting) {
         const ImGuiIO& io = ImGui::GetIO();
         if (ImGui::IsKeyPressed(ImGuiKey_F2, false)) studioExplorerBeginRename();
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !studioActivePartIndices().empty()) exDeleteSelection();
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+            if (g_editingPartScript && partIndexValid(g_selectedPart)) {
+                removeScriptFromSelected();
+                g_editingPartScript = false;
+            } else if (g_exChild != ExChild::None) {
+                exRemoveSelectedChild();
+            } else if (g_selectedLabel >= 0) {
+                deleteSelected();
+            } else if (!studioActivePartIndices().empty()) {
+                exDeleteSelection();
+            }
+        }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) studioDuplicateSelection();
     }
     ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 14.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.f, 1.f});
     const bool filtering = g_explorerFilterBuf[0] || g_explorerScriptsOnly || g_explorerLockedOnly || g_explorerUnanchoredOnly;
+    if (g_selectedPart != g_exLastSelPart) {
+        g_exLastSelPart = g_selectedPart;
+        // solo se non l hai cliccata qui (l albero e gia aperto dove serve)
+        if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) g_exRevealPart = g_selectedPart;
+    }
+    if (g_explorerFilterBuf[0]) exSearchOtherObjects();
 
     // Workspace
+    if (g_exRevealPart >= 0) ImGui::SetNextItemOpen(true);
     if (exRow("Workspace##ws", ExIcon::Workspace, "Workspace", false, true, true, "Workspace", {ExInsert::Workspace, 0}).open) {
         if (!filtering) {
             exRow("##cam", ExIcon::Camera, "Camera", false, false, false, "Camera");
@@ -609,6 +1256,7 @@ static void drawRobloxExplorer() {
                 if (m.clicked || m.rclicked) { selectModel(i); g_showProps = true; }
                 if (ImGui::BeginPopupContextItem("##mctx")) {
                     if (ImGui::MenuItem("Ingrandisci", "F")) studioFocusSelection();
+                    if (studio_csg_isUnion(i) && ImGui::MenuItem("Separa", "Ctrl+Maiusc+U")) studioCsgSeparate();
                     if (ImGui::MenuItem("Elimina", "Canc")) deleteSelected();
                     if (ImGui::MenuItem("Proprieta'")) g_showProps = true;
                     ImGui::EndPopup();
@@ -618,9 +1266,19 @@ static void drawRobloxExplorer() {
             for (int gid : partgroups::childGroups(g_world, 0)) exGroupRow(gid);
         }
         for (int i = 0; i < (int)g_world.parts.size(); ++i)
-            if (filtering || !partgroups::find(g_world, g_world.parts[(size_t)i].groupId)) exPartRow(i);
+            if (filtering || (!partgroups::find(g_world, g_world.parts[(size_t)i].groupId) && exPartParent(i) < 0)) exPartRow(i);
         if (const ImGuiPayload* pl = ImGui::GetDragDropPayload(); pl && pl->IsDataType("BLOCKY_PART")) {
-            ImGui::Selectable("      (rilascia qui: fuori dai Model)", false);
+            ImGui::Selectable("      (rilascia qui: direttamente nel Workspace)", false);
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* in = ImGui::AcceptDragDropPayload("BLOCKY_PART", ImGuiDragDropFlags_AcceptPeekOnly)) {
+                    const int dragged = *(const int*)in->Data;
+                    if (in->IsDelivery()) {
+                        for (int c : studioMultiContains(dragged) ? studioActivePartIndices() : std::vector<int>{dragged})
+                            if (partIndexValid(c)) g_world.parts[(size_t)c].parentIndex = -1;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
             studioDropTargetForGroup(0);
         }
         ImGui::TreePop();
@@ -672,14 +1330,17 @@ static void drawRobloxExplorer() {
 
     // StarterGui: le etichette e i bottoni a schermo
     if (exServiceRow("StarterGui##svc", ExIcon::Gui, "StarterGui", Svc_StarterGui, true, false, {ExInsert::StarterGui, 0})) {
-        if (exRow("##sgui", ExIcon::Gui, "ScreenGui", false, !g_world.labels.empty(), true, "ScreenGui", {ExInsert::StarterGui, 0}).open) {
-            for (int i = 0; i < (int)g_world.labels.size(); ++i) {
-                const auto& l = g_world.labels[(size_t)i];
-                ImGui::PushID(9000 + i);
-                if (exRow("##lab", exClassIcon(l.className), l.name.c_str(), i == g_selectedLabel, false, false, l.className.c_str()).clicked)
-                    selectLabel(i);
-                ImGui::PopID();
+        const bool sguiOpen = exRow("##sgui", ExIcon::Gui, "ScreenGui", false, !g_world.labels.empty(), true, "ScreenGui", {ExInsert::StarterGui, 0}).open;
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("BLOCKY_GUI")) {
+                const int c = *(const int*)pl->Data;
+                if (c >= 0 && c < (int)g_world.labels.size()) { g_world.labels[(size_t)c].parentIndex = -1; markPlaceDirty(); }
             }
+            ImGui::EndDragDropTarget();
+        }
+        if (sguiOpen) {
+            for (int i = 0; i < (int)g_world.labels.size(); ++i)
+                if (exLabelParent(i) < 0) exLabelRow(i);
             ImGui::TreePop();
         }
         ImGui::TreePop();
@@ -733,6 +1394,28 @@ static void drawRobloxExplorer() {
         ImGui::TreePop();
     }
     drawExplorerInsertPopup();
+    g_exRevealPart = -1;   // un frame solo: poi puoi richiudere quello che vuoi
+    // Frecce su/giu' (Shift = allarga la selezione), Home/Fine: come l'Esploratore di Studio.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && !g_exRowOrder.empty()) {
+        int dir = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) dir = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) dir = -1;
+        const bool home = ImGui::IsKeyPressed(ImGuiKey_Home, false), end = ImGui::IsKeyPressed(ImGuiKey_End, false);
+        if (dir || home || end) {
+            int pos = -1;
+            for (int k = 0; k < (int)g_exRowOrder.size(); ++k)
+                if (g_exRowOrder[(size_t)k] == g_selectedPart) { pos = k; break; }
+            int next = home ? 0 : end ? (int)g_exRowOrder.size() - 1 : std::clamp(pos < 0 ? 0 : pos + dir, 0, (int)g_exRowOrder.size() - 1);
+            const int part = g_exRowOrder[(size_t)next];
+            if (ImGui::GetIO().KeyShift) { if (partIndexValid(g_selectedPart)) studioMultiAdd(g_selectedPart); studioMultiAdd(part); }
+            else studioMultiClear();
+            selectPart(part);
+            g_editingPartScript = false;
+            g_exRevealPart = part;   // scorre fin li' al prossimo frame
+            g_exLastSelPart = part;
+        }
+    }
+    g_exRowOrder.clear();
     ImGui::PopStyleVar(2);
     ImGui::EndChild();
 }

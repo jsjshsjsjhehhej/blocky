@@ -25,6 +25,7 @@ enum class PartMaterial : int {
     CorrodedMetal,
     Granite,
     Asphalt,
+    Water,
     Count
 };
 
@@ -49,6 +50,7 @@ inline const char* partMaterialName(PartMaterial m) {
     case PartMaterial::CorrodedMetal: return "CorrodedMetal";
     case PartMaterial::Granite: return "Granite";
     case PartMaterial::Asphalt: return "Asphalt";
+    case PartMaterial::Water: return "Water";
     default: return "Plastic";
     }
 }
@@ -69,6 +71,7 @@ inline const char* partMaterialTextureStem(PartMaterial m) {
     case PartMaterial::CorrodedMetal: return "corrodedmetal";
     case PartMaterial::Granite: return "granite";
     case PartMaterial::Asphalt: return "asphalt";
+    case PartMaterial::Water: return nullptr;
     default: return nullptr;
     }
 }
@@ -98,6 +101,18 @@ inline PartMaterial partMaterialFromName(const std::string& name) {
     if (s == "marble") return PartMaterial::Marble;
     if (s == "granite") return PartMaterial::Granite;
     if (s == "asphalt" || s == "pavement" || s == "road") return PartMaterial::Asphalt;
+    if (s == "water") return PartMaterial::Water;
+    // Materiali di Roblox che Blocky non ha: il piu' simile, invece della plastica.
+    if (s == "sandstone" || s == "salt" || s == "mud") return PartMaterial::Sand;
+    if (s == "pebble" || s == "basalt" || s == "rock" || s == "crackedlava" || s == "cobble") return PartMaterial::Slate;
+    if (s == "limestone" || s == "plaster" || s == "pavement2") return PartMaterial::Concrete;
+    if (s == "leafygrass" || s == "moss") return PartMaterial::Grass;
+    if (s == "snow" || s == "glacier") return PartMaterial::Ice;
+    if (s == "carpet" || s == "cardboard" || s == "leather") return PartMaterial::Fabric;
+    if (s == "ceramictiles") return PartMaterial::Marble;
+    if (s == "claytiles" || s == "roofshingles") return PartMaterial::Brick;
+    if (s == "foil" || s == "aluminum" || s == "steel") return PartMaterial::Metal;
+    if (s == "rubber" || s == "cardboardsmooth") return PartMaterial::SmoothPlastic;
     return PartMaterial::Plastic;
 }
 
@@ -160,6 +175,11 @@ inline void partMaterialShading(PartMaterial m, float& specular, float& roughnes
     case PartMaterial::Marble:
         specular = 0.55f;
         roughness = 0.28f;
+        break;
+    case PartMaterial::Water:
+        specular = 0.8f;
+        roughness = 0.08f;
+        alpha = 0.42f;
         break;
     case PartMaterial::ForceField:
         specular = 0.6f;

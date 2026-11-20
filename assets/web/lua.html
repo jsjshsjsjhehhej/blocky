@@ -525,16 +525,25 @@
         <ul class="api-list">
           <li><code>workspace:Add(part)</code><span class="hint">Aggiunge e restituisce Part live</span></li>
           <li><code>workspace:FindFirstChild(name)</code><span class="hint">Part live oppure nil</span></li>
+          <li><code>part:FindFirstChild("Fire")</code><span class="hint">anche Smoke, Sparkles, Attachment, Trail, ClickDetector</span></li>
           <li><code>workspace:GetChildren()</code><span class="hint">Lista snapshot delle parti</span></li>
           <li><code>workspace:SetPartPosition(name, Vector3)</code></li>
           <li><code>workspace:Raycast(origin, dir, maxDist?)</code><span class="hint">→ {Instance, Position, Distance} o nil</span></li>
+          <li><code>workspace.CurrentCamera:WorldToScreenPoint(pos)</code><span class="hint">→ pixel, dentro schermo. ViewportPointToRay(x, y)</span></li>
+          <li><code>game:GetService("Terrain"):FillBlock(cframe, size, materiale)</code><span class="hint">Stesso oggetto di workspace.Terrain</span></li>
         </ul>
       </div>
 
       <div class="api-panel" id="tab-part" role="tabpanel">
         <h3>Part live</h3>
         <ul class="api-list">
-          <li><code>.Name .Position .Size .CanCollide .ClassName</code></li>
+          <li><code>.Name .Position .Size .CanCollide .ClassName</code><span class="hint">Size fino a 0.001 stud</span></li>
+          <li><code>.DecalEnabled .HighlightEnabled .SelectionBox .DragDetector</code><span class="hint">Decal sulla faccia, contorno, trascinamento della part</span></li>
+          <li><code>Models.SetDragDetector(nome, true)</code><span class="hint">In Play il Model si trascina tutto insieme</span></li>
+          <li><code>Beam Trail ParticleEmitter Seat Texture Shirt Pants Hat</code><span class="hint">Si vedono. CameraType Scriptable stacca la camera</span></li>
+          <li><code>ProximityPrompt.ActionText .ObjectText .KeyboardKeyCode .HoldDuration</code><span class="hint">In Play: E Open sull'oggetto. Si salva nel posto</span></li>
+          <li><code>GameKit.StartMatch(45, 3) GameKit.AddPad(nome, "Win", x, y, z, 5, 3, 5)</code><span class="hint">Quick Actions: Giro di partita. Cammina sul traguardo.</span></li>
+          <li><code>ColorCorrectionEffect BloomEffect BlurEffect DepthOfFieldEffect SunRaysEffect</code><span class="hint">Figli di Lighting, cambiano l'immagine</span></li>
           <li><code>:SetPosition(v)</code> · <code>:GetPosition()</code> · <code>:Destroy()</code> · <code>:Explode([n])</code></li>
           <li><code>.Touched:Connect(fn)</code><span class="hint">fn(other, partName) quando il player entra nell’AABB</span></li>
           <li><code>script.Parent</code><span class="hint">Solo negli script attaccati a una Part</span></li>
@@ -547,6 +556,7 @@
           <li><code>game.RunService.Heartbeat:Connect(fn)</code><span class="hint">fn(dt) ogni frame</span></li>
           <li><code>game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")</code></li>
           <li><code>game.SoundService:Play(path [, looped])</code> · <code>:Stop()</code></li>
+          <li><code>Instance.new("Sound")</code> <code>SoundId</code> <code>Volume</code> <code>Parent = part</code> <code>:Play()</code> <code>:Stop()</code><span class="hint">3D, Stop ferma solo quello</span></li>
           <li><code>game.Animator:Play("Wave"|"Walk"|"Dance"|"Idle"|id)</code></li>
           <li><code>game.Animator:SetWalkAnim(id)</code> · <code>SetJumpAnim(id)</code> · <code>Stop()</code> · <code>List()</code></li>
           <li><code>game.Particles:Emit / Sparks / Smoke / Coins / Explode(pos [, count] [, color])</code></li>
@@ -556,9 +566,17 @@
       <div class="api-panel" id="tab-humanoid" role="tabpanel">
         <h3>Humanoid / input</h3>
         <ul class="api-list">
+          <li><code>Humanoid.Jump = true</code><span class="hint">Fa saltare. Humanoid.Jump è vero mentre sale</span></li>
+          <li><code>LocalPlayer:GetMouse()</code><span class="hint">Hit, Target, X, Y, Button1Down</span></li>
+          <li><code>LocalPlayer:DistanceFromCharacter(pos)</code></li>
+          <li><code>UserInputService:IsMouseButtonPressed</code></li>
           <li><code>Humanoid.SetJumpEnabled(bool)</code> · <code>SetWalkEnabled</code></li>
           <li><code>Humanoid.SetWalkSpeed(n)</code> · <code>SetJumpPower(n)</code></li>
           <li><code>Humanoid.Get()</code><span class="hint">→ JumpEnabled, WalkEnabled, WalkSpeed, JumpPower</span></li>
+          <li><code>Humanoid:EquipTool(tool)</code> · <code>UnequipTools()</code><span class="hint">hotbar 1-9, Handle in mano</span></li>
+          <li><code>Backpack:Drop()</code> · Backspace<span class="hint">CanBeDropped: a terra, si riprende camminandoci sopra</span></li>
+          <li><code>game:GetService("Actors"):Spawn(nome, pos)</code> <code>:MoveTo</code> <code>:TakeDamage</code> <code>:EquipTool</code> <code>Died</code></li>
+          <li><code>Instance.new("Tool")</code><span class="hint">RequiresHandle, Shape in mano, MeshId (.glb .obj .fbx), Equipped, Activated</span></li>
           <li><code>UserInputService.DisableJump()</code> / <code>EnableJump()</code></li>
         </ul>
       </div>
@@ -578,8 +596,12 @@
         <ul class="api-list">
           <li><code>Events.Create / Connect / Fire / DisconnectAll</code></li>
           <li><code>BindableEvent:Fire(...)</code> · <code>.Event:Connect(fn)</code></li>
-          <li><code>RemoteEvent:FireServer(string)</code> · <code>:FireAllClients(string)</code></li>
-          <li><code>.OnServerEvent:Connect</code> · <code>.OnClientEvent:Connect</code><span class="hint">Payload = stringa; LAN Host/Client</span></li>
+          <li><code>RemoteEvent:FireServer(...)</code> · <code>:FireAllClients(...)</code></li>
+          <li><code>.OnServerEvent:Connect</code> · <code>.OnClientEvent:Connect</code><span class="hint">Numeri, testi, Vector3, Color3 e tabelle arrivano anche in Wi-Fi. Un testo vecchio resta un testo.</span></li>
+          <li><code>npc:LoadAnimation(anim)</code><span class="hint">Clip blkanim sul personaggio, poi :Play()</span></li>
+          <li><code>BadgeService:AwardBadge</code><span class="hint">Resta nel file badges del dispositivo</span></li>
+          <li><code>buffer</code> · <code>debug.info</code> · <code>debug.traceback</code> · <code>tick()</code></li>
+          <li><code>Humanoid:Move</code> · <code>Humanoid:MoveTo</code> · <code>part:GetTouchingParts()</code></li>
         </ul>
       </div>
 
@@ -598,6 +620,13 @@
         <h3>Altro</h3>
         <ul class="api-list">
           <li><code>print(...)</code></li>
+          <li><code>game:GetService("Dev")</code><span class="hint">Blocky, non Roblox. Stati, cooldown, easing, griglia, PathGrid, lavagna. Vedi LuaHelp, sezione DEV</span></li>
+          <li><code>Enum.Material.Wood.Name</code><span class="hint">EnumItem: .Name .Value typeof. WeldConstraint.Part0 / Part1</span></li>
+          <li><code>PhysicsService:RegisterCollisionGroup("Train")</code><span class="hint">nome, non solo il numero. part.CollisionGroup = "Train". Spherecast, Blockcast, Region3</span></li>
+          <li><code>GeometryService:UnionAsync(a, {b})</code><span class="hint">anche SubtractAsync, IntersectAsync, SeparateAsync. part.MeshId, SpecialMesh</span></li>
+          <li><code>PathfindingService:CreatePath({AgentRadius=2, AgentCanJump=true})</code><span class="hint">ComputeAsync, GetWaypoints. Action Walk o Jump</span></li>
+          <li><code>MemoryStoreService:GetHashMap(nome)</code><span class="hint">SetAsync, GetAsync, coda. Si svuota alla chiusura. InsertService:LoadAsset(file). Voce spenta, senza microfono</span></li>
+          <li><code>Instance.new("LinearVelocity")</code><span class="hint">VectorVelocity, Parent = part. Anche VectorForce, Beam, Trail, Highlight. Cilindro lungo su Size.X. Part nuova non ancorata</span></li>
           <li><code>AnimateFrame(frame, Vector3)</code><span class="hint">Keyframe su Model</span></li>
           <li><code>pcall(fn)</code></li>
           <li>Guida: <code>assets/scripts/scripting_guide.lua</code></li>

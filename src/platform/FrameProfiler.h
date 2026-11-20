@@ -41,6 +41,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 namespace plat {
 namespace prof {
@@ -135,6 +137,20 @@ inline double* manualStarts() { static double t[(int)Phase::Count] = {0}; return
 inline void begin(Phase p) { manualStarts()[(int)p] = nowMs(); }
 inline void end(Phase p) { addSample(p, (float)(nowMs() - manualStarts()[(int)p])); }
 
+/**
+ * Segnaposto con l'ora (BLOCKY_PROFILE=1): prof::mark("dopo fisica") in vari punti
+ * del ciclo; nei frame lenti endFrame stampa quanto e' durato ogni tratto.
+ * Serve a trovare il tempo che nessuna fase misura.
+ */
+struct Mark { const char* name; double t; };
+inline Mark* marks() { static Mark m[48]; return m; }
+inline int& markCount() { static int n = 0; return n; }
+inline void mark(const char* name) {
+    static const bool on = std::getenv("BLOCKY_PROFILE") != nullptr;
+    if (!on || markCount() >= 48) return;
+    marks()[markCount()++] = {name, nowMs()};
+}
+
 /** Chiudi il frame: aggiorna il totale e fa calare i picchi. */
 inline void endFrame(float dt) {
     State& s = state();
@@ -142,6 +158,29 @@ inline void endFrame(float dt) {
 
     s.frameMs = dt * 1000.f;
     s.frameAvgMs = s.frameAvgMs * 0.9f + s.frameMs * 0.1f;
+
+    // BLOCKY_PROFILE=1 (per chi sviluppa): ogni frame oltre 25 ms, fase per fase,
+    // in stderr. Serve a trovare gli scatti, che la media nasconde.
+    static const bool logSlow = std::getenv("BLOCKY_PROFILE") != nullptr;
+    // Il frame si misura con l'orologio, da una chiusura alla successiva: il dt del
+    // motore e' quello del frame PRIMA (calcolato in cima al ciclo) e in piu' e'
+    // limitato a 50 ms, quindi metteva i tempi di un frame accanto ai tratti dell'altro.
+    static double lastEnd = 0.0;
+    const double nowEnd = nowMs();
+    const double wallMs = lastEnd > 0.0 ? nowEnd - lastEnd : 0.0;
+    lastEnd = nowEnd;
+    if (logSlow && wallMs > 25.0) {
+        std::fprintf(stderr, "[profilo] frame %.1f ms (dt motore %.1f):", wallMs, s.frameMs);
+        for (int i = 0; i < (int)Phase::Count; ++i)
+            std::fprintf(stderr, " %s=%.1f", phaseName((Phase)i), s.phase[i].lastMs);
+        std::fprintf(stderr, "\n[profilo]   tratti:");
+        for (int i = 1; i < markCount(); ++i) {
+            const double d = marks()[i].t - marks()[i - 1].t;
+            if (d >= 0.5) std::fprintf(stderr, " [%s -> %s]=%.1f", marks()[i - 1].name, marks()[i].name, d);
+        }
+        std::fprintf(stderr, "\n");
+    }
+    markCount() = 0;
 
     // I picchi calano ogni due secondi, invece di restare per sempre: un
     // singolo scatto all'avvio non deve sporcare la lettura per un'ora.

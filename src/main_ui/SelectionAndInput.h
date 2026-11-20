@@ -74,6 +74,8 @@ static void clearAllSelection() {
     clearPlayerSelection();
     clearSpecialSelection();
     g_editingPartScript = false;
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
     g_scaleDragging = g_moveDragging = g_rotateDragging = false;
 }
 
@@ -106,6 +108,8 @@ static void selectPart(int idx) {
         clearSpecialSelection();
         g_showProps = true;
     }
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
     g_scaleDragging = false;
     g_moveDragging = false;
     g_rotateDragging = false;
@@ -185,6 +189,8 @@ static void selectModel(int idx) {
     clearPlayerSelection();
     clearSpecialSelection();
     g_editingPartScript = false;
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
     g_scaleDragging = g_moveDragging = g_rotateDragging = false;
     if (idx >= 0) g_showProps = true;
 }
@@ -197,6 +203,8 @@ static void selectSound(int idx) {
     clearPlayerSelection();
     clearSpecialSelection();
     g_editingPartScript = false;
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
     if (idx >= 0 && idx < (int)g_sounds.sounds.size())
         std::snprintf(g_soundPathBuf, sizeof(g_soundPathBuf), "%s",
             g_sounds.sounds[idx].soundId.c_str());
@@ -222,6 +230,8 @@ static void selectPlayer(int partIdx = -1) {
     g_selectedLabel = -1;
     clearSpecialSelection();
     g_editingPartScript = false;
+    g_exChild = ExChild::None;
+    g_exChildIndex = -1;
     g_selectedPlayer = true;
     g_selectedPlayerPart = partIdx;
     g_showProps = true;
@@ -325,6 +335,8 @@ static void bindLuaServices() {
     g_lua.classifica = &g_classifica;
     g_lua.proximity = &g_prossimita;
     g_lua.cameraFov = &g_cam.fov;
+    g_lua.viewW = g_w > 0 ? g_w : 1280;
+    g_lua.viewH = g_h > 0 ? g_h : 720;
     g_lua.firstPersonFlag = &g_firstPerson;
     const bool inPlay = (g_screen == AppScreen::Playing)
         || (g_screen == AppScreen::Studio && g_studioTesting);
@@ -478,9 +490,21 @@ static float g_studioSnapRotate = 5.f;
 static float g_studioSnapScale = 0.25f;
 static bool  g_studioLocalSpace = false;
 // Clic destro fermo nel viewport: il menu lo apre drawViewportContextMenu (StudioExplorer.h).
+// Editor dello script della part selezionata (finestra sua, StudioUiPanel.h).
+static bool   g_showPartScriptWin = false;
+// Un place nuovo e' stato caricato: l'Annulla riparte da zero (StudioUndoExtras.h).
+static bool   g_worldReplaced = false;
 static bool   g_viewportCtxRequest = false;
 static ImVec2 g_viewportCtxPos{0.f, 0.f};
-static bool  g_studioGridVisible = true;
+static bool  g_studioGridVisible = false;   // "Mostra griglia" di Roblox: spenta all'inizio
+// Modello > Collisioni (Roblox Studio): spostando / scalando / ruotando una part
+// non entra dentro le altre.
+static bool  g_studioCollisions = true;
+// Strumento vincoli (come Roblox Studio): scegli il tipo, poi clic su un punto
+// della prima part e su un punto della seconda. -1 = spento.
+static int       g_constraintToolKind = -1;
+static int       g_ctPart0 = -1;
+static glm::vec3 g_ctPoint0{0.f}, g_ctNormal0{0.f, 1.f, 0.f};
 static float g_studioGridSize = 4.f;
 static bool  g_viewIsolate = false;
 static int   g_isolatePart = -1;
@@ -490,6 +514,7 @@ static bool  g_showCommandBar = true;
 // Terrain brush (Studio 2020) — state early; paint fn in Studio2020Ui.h
 static bool  g_terrainToolActive = false;
 static bool  g_terrainBrushErase = false;
+static bool  g_terrainBrushFlat = false;
 static int   g_terrainBrushMat = 1; // Terrain::Grass
 static int   g_terrainBrushRadius = 1;
 static void studioTerrainPaintAtMouse(float mx, float my, bool erase);
@@ -500,18 +525,18 @@ static bool studioGizmoShiftKey() {
 }
 static float studioSnapMoveStep() {
     if (!g_studioSnapEnabled) return 0.f;
-    if (studioGizmoShiftKey()) return std::max(0.05f, g_studioSnapMove * 0.2f);
-    return g_studioSnapMove;
+    if (studioGizmoShiftKey()) return std::max(kMinPartSize, g_studioSnapMove * 0.1f);
+    return std::max(kMinPartSize, g_studioSnapMove);
 }
 static float studioSnapRotateStep() {
     if (!g_studioSnapEnabled) return 0.f;
-    if (studioGizmoShiftKey()) return 1.f;
-    return g_studioSnapRotate;
+    if (studioGizmoShiftKey()) return std::max(0.1f, g_studioSnapRotate * 0.1f);
+    return std::max(0.1f, g_studioSnapRotate);
 }
 static float studioSnapScaleStep() {
     if (!g_studioSnapEnabled) return 0.f;
-    if (studioGizmoShiftKey()) return std::max(0.05f, g_studioSnapScale * 0.4f);
-    return g_studioSnapScale;
+    if (studioGizmoShiftKey()) return std::max(kMinPartSize, g_studioSnapScale * 0.1f);
+    return std::max(kMinPartSize, g_studioSnapScale);
 }
 
 #include "main_ui/GizmoSystem.h"
@@ -600,6 +625,7 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
     if (btn == GLFW_MOUSE_BUTTON_LEFT && g_screen == AppScreen::Studio
         && g_mode == CamMode::Studio && !g_rmbLook && !ImGui::GetIO().WantCaptureMouse) {
         if (action == GLFW_RELEASE) {
+            g_studioTouchLook = false;
             endFreeDrag();
             endScaleDrag();
             endMoveDrag();
@@ -610,6 +636,10 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
         if (action == GLFW_PRESS) {
             double mx = 0, my = 0;
             glfwGetCursorPos(win, &mx, &my);
+            if (g_constraintToolKind >= 0) {   // strumento vincoli: i clic scelgono i due punti
+                constraintToolClick((float)mx, (float)my);
+                return;
+            }
             int axis = 0, sign = 0;
             if (g_tool == StudioTool::Scale && pickScaleHandle((float)mx, (float)my, axis, sign)) {
                 beginScaleDrag(axis, sign, (float)mx, (float)my);
@@ -634,7 +664,14 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
                             applyScenePick(hit);
                             studioMultiClear();
                         }
+#ifdef __ANDROID__
+                        // Sul telefono non c'e' il tasto destro: trascinare il dito
+                        // sullo sfondo gira la camera (il riquadro non servirebbe).
+                        g_studioTouchLook = true;
+                        g_firstMouse = true;
+#else
                         studioBeginMarquee((float)mx, (float)my);
+#endif
                     } else {
                         applyScenePick(hit);
                         if (hit.kind == PickKind::Part && !ImGui::GetIO().KeyCtrl) armFreeDrag((float)mx, (float)my);
@@ -650,6 +687,14 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
         if (action == GLFW_PRESS) {
             if (!g_playCursorLocked) {
                 int hit = pickScreenLabelAt((float)mx, (float)my);
+                if (g_lua.guiTextFocus >= 0 && hit != g_lua.guiTextFocus) {
+                    g_lua.fireGuiFocusLost(g_lua.guiTextFocus, false);
+                    g_lua.guiTextFocus = -1;
+                }
+                if (hit >= 0 && g_world.labels[hit].className == "TextBox") {
+                    g_lua.guiTextFocus = hit;
+                    return;
+                }
                 if (hit >= 0 && g_world.labels[hit].isButton()) {
                     g_uiPressedLabel = hit;
                     return;
@@ -658,6 +703,7 @@ static void onMouseBtn(GLFWwindow* win, int btn, int action, int) {
             trySwordAttack();
             tryUseEquippedItem();
         } else if (action == GLFW_RELEASE) {
+            tryReleaseEquippedItem();
             if (g_uiPressedLabel >= 0) {
                 int hit = g_playCursorLocked ? g_uiPressedLabel
                     : pickScreenLabelAt((float)mx, (float)my);

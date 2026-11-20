@@ -228,12 +228,111 @@ inline bool savePlaceFileDialog(std::string&, void* = nullptr, const char* = nul
 inline bool openImageFileDialog(std::string&, void* = nullptr) { return false; }
 #endif
 
+inline void (*&placeLoadedHook())(DataModel&) {
+    static void (*hook)(DataModel&) = nullptr;
+    return hook;
+}
+
+inline void readPlaceSessions(const std::string& json, DataModel& dm) {
+    auto each = [&](const char* key, auto&& onObj) {
+        size_t k = blk::jsonscan::topKey(json, key);
+        if (k == std::string::npos) return;
+        size_t arr = json.find('[', k);
+        if (arr == std::string::npos) return;
+        size_t arrEnd = blk::jsonscan::matchingEnd(json, arr);
+        if (arrEnd == std::string::npos) arrEnd = arr;
+        size_t p = arr;
+        while ((p = json.find('{', p)) != std::string::npos && p < arrEnd) {
+            size_t end = blk::jsonscan::matchingEnd(json, p);
+            if (end == std::string::npos || end > arrEnd) break;
+            onObj(p);
+            p = end + 1;
+        }
+    };
+    each("prompts", [&](size_t p) {
+        DataModel::SavedPrompt s;
+        s.name = jsonFindEscapedStr(json, "name", p);
+        s.text = jsonFindEscapedStr(json, "text", p);
+        s.objectText = jsonFindEscapedStr(json, "object", p);
+        glm::vec3 pos{0};
+        if (jsonFindVec3(json, "pos", p, pos)) { s.x = pos.x; s.y = pos.y; s.z = pos.z; }
+        jsonFindFloat(json, "radius", p, s.radius);
+        s.partIndex = jsonFindInt(json, "part", p);
+        std::string key = jsonFindStr(json, "key", p);
+        s.key = key.empty() ? 'E' : key[0];
+        jsonFindFloat(json, "hold", p, s.hold);
+        s.enabled = jsonFindBool(json, "enabled", p, true);
+        if (!s.name.empty()) dm.savedPrompts.push_back(std::move(s));
+    });
+    each("attachments", [&](size_t p) {
+        DataModel::SavedAttach a;
+        a.name = jsonFindEscapedStr(json, "name", p);
+        a.partIndex = jsonFindInt(json, "part", p);
+        glm::vec3 pos{0};
+        if (jsonFindVec3(json, "pos", p, pos)) { a.ox = pos.x; a.oy = pos.y; a.oz = pos.z; }
+        dm.savedAttachments.push_back(std::move(a));
+    });
+    each("beams", [&](size_t p) {
+        DataModel::SavedBeam b;
+        b.name = jsonFindEscapedStr(json, "name", p);
+        b.a0 = jsonFindInt(json, "a0", p);
+        b.a1 = jsonFindInt(json, "a1", p);
+        jsonFindFloat(json, "w0", p, b.width0);
+        jsonFindFloat(json, "w1", p, b.width1);
+        glm::vec3 col{1};
+        if (jsonFindVec3(json, "color", p, col)) { b.r = col.r; b.g = col.g; b.b = col.b; }
+        b.enabled = jsonFindBool(json, "enabled", p, true);
+        dm.savedBeams.push_back(std::move(b));
+    });
+    each("trails", [&](size_t p) {
+        DataModel::SavedTrail t;
+        t.name = jsonFindEscapedStr(json, "name", p);
+        t.partIndex = jsonFindInt(json, "part", p);
+        jsonFindFloat(json, "width", p, t.width);
+        jsonFindFloat(json, "life", p, t.life);
+        glm::vec3 col{1, 0.85f, 0.3f};
+        if (jsonFindVec3(json, "color", p, col)) { t.r = col.r; t.g = col.g; t.b = col.b; }
+        t.enabled = jsonFindBool(json, "enabled", p, true);
+        dm.savedTrails.push_back(std::move(t));
+    });
+    each("fx", [&](size_t p) {
+        DataModel::SavedEmitter e;
+        e.name = jsonFindEscapedStr(json, "name", p);
+        e.className = jsonFindEscapedStr(json, "class", p);
+        e.partIndex = jsonFindInt(json, "part", p);
+        e.preset = jsonFindInt(json, "preset", p);
+        jsonFindFloat(json, "rate", p, e.rate);
+        jsonFindFloat(json, "speed", p, e.speed);
+        jsonFindFloat(json, "life", p, e.life);
+        glm::vec3 col{-1.f, -1.f, -1.f};
+        if (jsonFindVec3(json, "color", p, col)) { e.r = col.r; e.g = col.g; e.b = col.b; }
+        e.enabled = jsonFindBool(json, "enabled", p, true);
+        e.customMotion = jsonFindBool(json, "fire", p, e.className == "Fire");
+        if (e.className.empty()) e.className = e.customMotion ? "Fire" : "Sparkles";
+        if (e.name.empty()) e.name = e.className;
+        dm.savedEmitters.push_back(std::move(e));
+    });
+    each("clicks", [&](size_t p) {
+        DataModel::SavedClick c;
+        c.partIndex = jsonFindInt(json, "part", p);
+        jsonFindFloat(json, "reach", p, c.reach);
+        if (c.partIndex >= 0) dm.savedClicks.push_back(c);
+    });
+    each("tags", [&](size_t p) {
+        DataModel::SavedTag t;
+        t.tag = jsonFindEscapedStr(json, "tag", p);
+        t.partIndex = jsonFindInt(json, "part", p);
+        if (!t.tag.empty()) dm.savedTags.push_back(std::move(t));
+    });
+}
+
 inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                               LightingService* lighting = nullptr) {
     std::string json = readTextFile(path);
     if (json.empty()) return false;
 
     dm.clear();
+    dm.placeFile = path;
     dm.placeName = jsonFindStr(json, "placeName");
     if (dm.placeName.empty()) dm.placeName = "Published";
 
@@ -250,6 +349,22 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
             jsonFindFloat(json, "brightness", lg, lighting->brightness);
             jsonFindFloat(json, "ambient", lg, lighting->ambient);
             lighting->globalShadows = jsonFindBool(json, "globalShadows", lg, true);
+            lighting->atmosphereEnabled = jsonFindBool(json, "atmosphere", lg, false);
+            jsonFindFloat(json, "atmDensity", lg, lighting->atmosphereDensity);
+            jsonFindFloat(json, "atmHaze", lg, lighting->atmosphereHaze);
+            lighting->sunRaysEnabled = jsonFindBool(json, "sunRays", lg, false);
+            jsonFindFloat(json, "sunRaysIntensity", lg, lighting->sunRaysIntensity);
+            lighting->ccEnabled = jsonFindBool(json, "cc", lg, false);
+            jsonFindFloat(json, "ccBrightness", lg, lighting->ccBrightness);
+            jsonFindFloat(json, "ccContrast", lg, lighting->ccContrast);
+            jsonFindFloat(json, "ccSaturation", lg, lighting->ccSaturation);
+            jsonFindVec3(json, "ccTint", lg, lighting->ccTint);
+            lighting->bloomFx = jsonFindBool(json, "bloomFx", lg, false);
+            jsonFindFloat(json, "bloomFxIntensity", lg, lighting->bloomFxIntensity);
+            lighting->blurFx = jsonFindBool(json, "blurFx", lg, false);
+            jsonFindFloat(json, "blurFxSize", lg, lighting->blurFxSize);
+            lighting->dofFx = jsonFindBool(json, "dofFx", lg, false);
+            jsonFindFloat(json, "dofFar", lg, lighting->dofFar);
             lighting->clampAll();
         }
     }
@@ -281,9 +396,17 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
     }
 
     size_t partsKey = blk::jsonscan::topKey(json, "parts");
-    if (partsKey == std::string::npos) return true;
+    if (partsKey == std::string::npos) {
+        readPlaceSessions(json, dm);
+        if (placeLoadedHook()) placeLoadedHook()(dm);
+        return true;
+    }
     size_t arr = json.find('[', partsKey);
-    if (arr == std::string::npos) return true;
+    if (arr == std::string::npos) {
+        readPlaceSessions(json, dm);
+        if (placeLoadedHook()) placeLoadedHook()(dm);
+        return true;
+    }
     size_t arrEnd = blk::jsonscan::matchingEnd(json, arr);
     if (arrEnd == std::string::npos) arrEnd = arr;
 
@@ -335,9 +458,54 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                 p.parentIndex = jsonFindInt(json, "parentIndex", pos);
                 if (p.parentIndex < -1) p.parentIndex = -1;
             }
+            // Senza la chiave, jsonFindInt torna 0 e ogni part vecchia
+            // finirebbe nel primo slot dello zaino.
+            {
+                size_t tk = json.find("\"toolSlot\"", pos);
+                if (tk != std::string::npos && tk < end)
+                    p.toolSlot = jsonFindInt(json, "toolSlot", pos);
+            }
             auto gk = json.find("\"groupId\"", pos);
             if (gk != std::string::npos && gk < end)
                 p.groupId = std::max(0, jsonFindInt(json, "groupId", pos));
+        }
+        {
+            auto img = json.find("\"decalImage\"", pos);
+            if (img != std::string::npos && img < end)
+                p.decalImage = jsonFindEscapedStr(json, "decalImage", pos);
+            auto cn = json.find("\"className\"", pos);
+            if (cn != std::string::npos && cn < end) {
+                std::string c = jsonFindEscapedStr(json, "className", pos);
+                if (!c.empty()) p.className = c;
+            }
+            auto mf = json.find("\"meshFile\"", pos);
+            if (mf != std::string::npos && mf < end)
+                p.meshFile = jsonFindEscapedStr(json, "meshFile", pos);
+            auto timg = json.find("\"textureImage\"", pos);
+            if (timg != std::string::npos && timg < end)
+                p.textureImage = jsonFindEscapedStr(json, "textureImage", pos);
+            auto st = json.find("\"spawnTeam\"", pos);
+            if (st != std::string::npos && st < end)
+                p.spawnTeam = jsonFindEscapedStr(json, "spawnTeam", pos);
+            auto ex = json.find("\"extraDecals\"", pos);
+            if (ex != std::string::npos && ex < end) {
+                size_t earr = json.find('[', ex);
+                size_t eend = earr == std::string::npos ? end : blk::jsonscan::matchingEnd(json, earr);
+                if (eend == std::string::npos || eend > end) eend = end;
+                size_t ep = earr;
+                while (ep != std::string::npos && (ep = json.find('{', ep)) != std::string::npos && ep < eend) {
+                    size_t ee = blk::jsonscan::matchingEnd(json, ep);
+                    if (ee == std::string::npos || ee > eend) break;
+                    WorkspacePart::FaceDecal fd;
+                    fd.face = jsonFindInt(json, "face", ep);
+                    fd.image = jsonFindEscapedStr(json, "image", ep);
+                    glm::vec3 col{1.f};
+                    if (jsonFindVec3(json, "color", ep, col)) { fd.r = col.r; fd.g = col.g; fd.b = col.b; }
+                    jsonFindFloat(json, "transparency", ep, fd.transparency);
+                    if ((int)p.extraDecals.size() < 4) p.extraDecals.push_back(fd);
+                    ep = ee + 1;
+                }
+            }
         }
         dm.parts.push_back(std::move(p));
         pos = end + 1;
@@ -416,6 +584,10 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                 s.service = (SharedService)svc;
                 s.parentIndex = jsonFindInt(json, "parentIndex", ipos);
                 if (s.parentIndex < -1) s.parentIndex = -1;
+                // "rojo" sta prima di "source" (che puo' essere lungo) e c'e' sempre nei file nuovi.
+                s.rojoFile = jsonFindEscapedStr(json, "rojo", ipos);
+                if (s.rojoFile.size() > 1024 || json.find("\"rojo\"", ipos) > end) s.rojoFile.clear();
+                s.rojoSynced = !s.rojoFile.empty();
                 s.source = jsonFindEscapedStr(json, "source", ipos);
                 int st = jsonFindInt(json, "scriptType", ipos);
                 s.scriptType = (st == 1) ? ScriptType::Server
@@ -462,6 +634,11 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
                 jsonFindVec3(json, "gripOffset", bpos, it.gripOffset);
                 jsonFindVec3(json, "gripRotation", bpos, it.gripRotation);
                 jsonFindFloat(json, "gripScale", bpos, it.gripScale);
+                it.requiresHandle = jsonFindBool(json, "requiresHandle", bpos, true);
+                it.canBeDropped = jsonFindBool(json, "canBeDropped", bpos, true);
+                it.manualActivationOnly = jsonFindBool(json, "manualActivationOnly", bpos, false);
+                it.enabled = jsonFindBool(json, "enabled", bpos, true);
+                it.toolTip = jsonFindEscapedStr(json, "toolTip", bpos);
                 // holdPose: array di {name,pos,rot} dentro l'item
                 {
                     size_t hpKey = json.find("\"holdPose\"", bpos);
@@ -534,6 +711,8 @@ inline bool loadPlaceFromJson(const std::string& path, DataModel& dm,
         }
     }
 
+    readPlaceSessions(json, dm);
+    if (placeLoadedHook()) placeLoadedHook()(dm);
     return true;
 }
 

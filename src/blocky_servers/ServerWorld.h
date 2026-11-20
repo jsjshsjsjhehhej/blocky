@@ -8,7 +8,8 @@
  * per conto suo e gli Script (server) non giravano da nessuna parte — il
  * client li salta (scriptShouldRunHere), il server non aveva Luau. Qui il
  * server fa la parte dell'host di una partita normale:
- *   - carica il place (--place file.json / .blocky);
+ *   - carica il place e accende prompt, beam, trail, attachment e tag
+ *     salvati nel file (gli stessi che vede il telefono);
  *   - esegue gli Script server (part e ServerScriptService), senza finestra;
  *   - un Player Luau per ogni client: PlayerAdded / PlayerRemoving /
  *     GetPlayers, Character con HumanoidRootPart alla posizione che il
@@ -21,15 +22,21 @@
  * anche dai client (assignPlaceNetIds), cosi' gli aggiornamenti del server
  * finiscono sulle part che il client ha gia', invece di aggiungerne copie.
  *
- * Limiti: i giocatori non hanno un corpo fisico sul server (non spingono le
- * casse del server); quello che gli script cambiano su un Player (Health,
- * leaderstats, teletrasporti) resta sul server e non arriva ancora al client.
+ * Quello che gli script cambiano su un Player (Health, MaxHealth, WalkSpeed,
+ * JumpPower, leaderstats, teletrasporti) arriva al suo client 5 volte al
+ * secondo (syncPlayerStates, evento riservato "__blkPlayerState").
+ *
+ * I giocatori hanno un corpo cinematico: si muove dove il client dice e
+ * spinge le casse dinamiche del server.
  */
 
 #include "engine/BlockyPhysics.h"
 #include "engine/DataModel.h"
 #include "engine/GameHub.h"
 #include "engine/LuaRuntime.h"
+#include "engine/WorldSession.h"
+#include "systems/TagLua.h"
+#include "systems/ProssimitaLua.h"
 #include "engine/PartConstraintsLua.h"
 #include "engine/WorldReplication.h"
 
@@ -44,6 +51,9 @@ inline void assignPlaceNetIds(DataModel& world) {
     uint32_t next = 1;
     for (auto& p : world.parts) p.netId = 0;
     WorldReplication::ensureNetIds(world, next);
+    uint32_t nextLabel = 1;
+    for (auto& l : world.labels) l.netId = 0;
+    WorldReplication::ensureLabelNetIds(world, nextLabel);
 }
 
 class ServerWorld {
@@ -74,6 +84,8 @@ public:
         }
         assignPlaceNetIds(world);
         net.nextPartNetId = (uint32_t)world.parts.size() + 1;
+        applyPlaceSession(world, proximity, tags);
+        restoreEmittersAndClicks(world, lua.scriptEmitters_);
 
         lua.soundService = &sounds;
         lua.lighting = &lighting;
@@ -86,6 +98,8 @@ public:
         lua.runIsServer = true;
         lua.runIsClient = false;
         lua.extensions.push_back({"Constraints", &partconstraintslua::registerLua, &world});
+        lua.extensions.push_back({"Tag", &taglua::registerLua, &tags});
+        lua.extensions.push_back({"Prossimita", &prossimitalua::registerLua, &proximity});
         if (physics) bindPhysics();
         if (!lua.init(&world)) {
             log("  Luau: avvio fallito: " + lua.lastError);
@@ -127,14 +141,17 @@ public:
         trackPlayers(net);
         lua.drainRemoteEvents();
         lua.fireHeartbeat(dt);
+        world.tickNpcs(dt);
+        lua.flushNpcSignals();
         if (physics) stepPhysics(dt);
         net.tickWorldReplication(world, dt);
+        syncPlayerStates(net, dt);
     }
 
     int playerCount() const { return (int)known_.size(); }
 
 private:
-    struct Known { std::string name; };
+    struct Known { std::string name; std::string lastState; };
     std::map<int, Known> known_;   // id peer -> giocatore gia' annunciato agli script
     std::vector<glm::vec3> focus_;
     Log log_;
@@ -172,6 +189,24 @@ private:
             if (log_) log_("[Script] PlayerRemoving: " + it->second.name);
             lua.serverPlayerLeft(it->first);
             it = known_.erase(it);
+        }
+    }
+
+    // Vita, velocita', leaderstats e teletrasporti decisi dagli script del server
+    // arrivano al client di quel giocatore (evento riservato "__blkPlayerState").
+    float stateTimer_ = 0.f;
+    void syncPlayerStates(LanNet& net, float dt) {
+        stateTimer_ += dt;
+        if (stateTimer_ < 0.2f) return;
+        stateTimer_ = 0.f;
+        for (auto& [id, k] : known_) {
+            const std::string st = lua.serverPlayerState(id);
+            if (st.empty() || st == k.lastState) continue;
+            if (st.find("T=") != std::string::npos) net.authorizeTeleport((uint8_t)id);
+            // Il teletrasporto vale una volta: non resta nello stato "gia' mandato".
+            const size_t t = st.find(";T=");
+            k.lastState = t == std::string::npos ? st : st.substr(0, t);
+            net.fireRemoteEventToClient((uint8_t)id, "__blkPlayerState", st.c_str());
         }
     }
 
@@ -221,6 +256,7 @@ private:
         phys.setGravity(lua.readWorkspaceGravity());
         phys.sync(world.parts, main, dt);
         phys.syncJoints(world.welds);
+        phys.syncPushers(focus_, dt);
         phys.step(dt);
         phys.writeBack(world.parts, 1.f);
     }

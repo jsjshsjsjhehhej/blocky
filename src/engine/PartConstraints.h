@@ -26,7 +26,10 @@ inline bool validPart(const DataModel& dm, int i) { return i >= 0 && i < (int)dm
 // adesso: corda/asta/molla lunghe quanto la distanza attuale, cerniera a meta'
 // strada con asse verticale (porta). Ritorna l'indice in dm.welds, o -1.
 inline int create(DataModel& dm, ConstraintKind kind, int part0, int part1) {
-    if (!validPart(dm, part0) || !validPart(dm, part1) || part0 == part1) return -1;
+    if (!validPart(dm, part0) || !validPart(dm, part1)) return -1;
+    const bool mover = kind == ConstraintKind::LinearVelocity || kind == ConstraintKind::AngularVelocity
+                    || kind == ConstraintKind::VectorForce || kind == ConstraintKind::Torque;
+    if (part0 == part1 && !mover) return -1;
     // Nome unico (gli script lo usano per ritrovarlo): Rope1, Rope2, ...
     std::string name;
     for (int n = (int)dm.welds.size() + 1;; ++n) {
@@ -41,13 +44,50 @@ inline int create(DataModel& dm, ConstraintKind kind, int part0, int part1) {
     const WorkspacePart& a = dm.parts[(size_t)part0];
     const WorkspacePart& b = dm.parts[(size_t)part1];
     c.length = glm::length(b.position - a.position);
-    if (kind == ConstraintKind::Hinge) {
-        // Il punto a meta' strada, nello spazio locale di part0.
+    if (kind == ConstraintKind::Hinge || kind == ConstraintKind::Prismatic
+        || kind == ConstraintKind::Cylindrical || kind == ConstraintKind::BallSocket) {
         const glm::mat3 r0(partRotationMatrix(a.rotation));
         c.pivot = glm::transpose(r0) * ((a.position + b.position) * 0.5f - a.position);
         c.axis = glm::vec3(0, 1, 0);
     }
+    if (kind == ConstraintKind::LinearVelocity || kind == ConstraintKind::AngularVelocity
+        || kind == ConstraintKind::VectorForce || kind == ConstraintKind::Torque) {
+        const glm::vec3 d = b.position - a.position;
+        c.axis = glm::length(d) > 0.05f ? glm::normalize(d) : glm::vec3(0, 1, 0);
+        if (part0 == part1) {
+            c.length = 0.f;
+            c.stiffness = 0.f;
+        } else {
+            if (kind == ConstraintKind::LinearVelocity) c.length = std::max(4.f, c.length);
+            if (kind == ConstraintKind::VectorForce || kind == ConstraintKind::Torque) c.stiffness = 30.f;
+        }
+    }
+    if (kind == ConstraintKind::AlignPosition) c.stiffness = 4.f;
     return (int)dm.welds.size() - 1;
+}
+
+/**
+ * Come lo strumento vincoli di Roblox Studio: due punti cliccati sulle
+ * superfici (nel mondo) diventano Attachment0 / Attachment1. La cerniera gira
+ * attorno alla normale della superficie cliccata su part0.
+ */
+inline int createAt(DataModel& dm, ConstraintKind kind, int part0, int part1, const glm::vec3& worldA,
+                    const glm::vec3& worldB, const glm::vec3& normalA) {
+    const int idx = create(dm, kind, part0, part1);
+    if (idx < 0) return idx;
+    WeldConstraint& c = dm.welds[(size_t)idx];
+    const WorkspacePart& a = dm.parts[(size_t)part0];
+    const WorkspacePart& b = dm.parts[(size_t)part1];
+    const glm::mat3 r0(partRotationMatrix(a.rotation)), r1(partRotationMatrix(b.rotation));
+    c.attach0 = glm::transpose(r0) * (worldA - a.position);
+    c.attach1 = glm::transpose(r1) * (worldB - b.position);
+    c.length = glm::length(worldB - worldA);
+    if (kind == ConstraintKind::Hinge) {
+        c.pivot = c.attach0;
+        const glm::vec3 n = glm::transpose(r0) * normalA;
+        c.axis = glm::length(n) > 1e-4f ? glm::normalize(n) : glm::vec3(0, 1, 0);
+    }
+    return idx;
 }
 
 // Dopo aver cancellato la part `removed`: i vincoli che la usavano spariscono,
@@ -128,10 +168,11 @@ inline void writeJson(std::ostream& o, const DataModel& dm) {
         std::snprintf(buf, sizeof(buf),
                       "%s{\"name\":\"%s\",\"kind\":%d,\"part0\":%d,\"part1\":%d,\"enabled\":%s,"
                       "\"length\":%g,\"stiffness\":%g,\"damping\":%g,"
-                      "\"pivot\":[%g,%g,%g],\"axis\":[%g,%g,%g]}",
+                      "\"pivot\":[%g,%g,%g],\"axis\":[%g,%g,%g],\"a0\":[%g,%g,%g],\"a1\":[%g,%g,%g]}",
                       k ? "," : "", name.c_str(), (int)c.kind, c.part0, c.part1,
                       c.enabled ? "true" : "false", c.length, c.stiffness, c.damping,
-                      c.pivot.x, c.pivot.y, c.pivot.z, c.axis.x, c.axis.y, c.axis.z);
+                      c.pivot.x, c.pivot.y, c.pivot.z, c.axis.x, c.axis.y, c.axis.z,
+                      c.attach0.x, c.attach0.y, c.attach0.z, c.attach1.x, c.attach1.y, c.attach1.z);
         o << buf;
     }
     o << "],\n";
@@ -188,6 +229,8 @@ inline void readJson(const std::string& json, DataModel& dm) {
         c.damping = (float)num("damping", 0.3);
         c.pivot = vec("pivot", glm::vec3(0.f));
         c.axis = vec("axis", glm::vec3(0, 1, 0));
+        c.attach0 = vec("a0", glm::vec3(0.f));   // place vecchi: il centro
+        c.attach1 = vec("a1", glm::vec3(0.f));
         pos = end;
         if (kind < 0 || kind >= (int)ConstraintKind::Count) continue;
         if (!validPart(dm, c.part0) || !validPart(dm, c.part1) || c.part0 == c.part1) continue;

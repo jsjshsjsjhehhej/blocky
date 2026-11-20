@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "studio/StudioIcons.h"
+#include "studio/StudioTheme.h"
 
 namespace studio {
 
@@ -26,7 +27,7 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
 
     // Tab strip grigio Studio (#242426 / #2E2E30) + underline blu #0078D4
     dl->AddRectFilled(start, {start.x + width, start.y + kRibbonTabHeight},
-                      IM_COL32(36, 36, 38, 255));
+                      studio_theme::pal().tabStrip);
 
     float x = start.x + 6.f;
     for (int i = 0; i < count; ++i) {
@@ -42,14 +43,14 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
 
         const bool active = (i == current);
         if (active) {
-            dl->AddRectFilled(min, max, IM_COL32(51, 51, 54, 255));
+            dl->AddRectFilled(min, max, studio_theme::pal().tabActive);
             dl->AddRectFilled({min.x, max.y - 2.5f}, max, IM_COL32(0, 120, 212, 255));
         } else if (hovered) {
-            dl->AddRectFilled(min, max, IM_COL32(45, 45, 48, 255));
+            dl->AddRectFilled(min, max, studio_theme::pal().tabHover);
         }
 
         dl->AddText({min.x + 13.f, min.y + 6.f},
-                    active ? IM_COL32(242, 242, 245, 255) : IM_COL32(160, 160, 168, 255),
+                    active ? studio_theme::pal().tabTextActive : studio_theme::pal().tabText,
                     names[i]);
 
         if (pressed && !active) { current = i; changed = true; }
@@ -58,7 +59,7 @@ inline bool ribbonTabs(const char* const* names, int count, int& current) {
 
     dl->AddRectFilled({start.x, start.y + kRibbonTabHeight},
                       {start.x + width, start.y + kRibbonHeight},
-                      IM_COL32(51, 51, 54, 255));
+                      studio_theme::pal().ribbonBody);
     // Sotto la tab strip: Dummy subito dopo SetCursor* spegne IsSetPos in sicurezza.
     ImGui::SetCursorScreenPos({start.x, start.y + kRibbonTabHeight});
     ImGui::Dummy({1.f, 1.f});
@@ -78,9 +79,9 @@ inline bool ribbonQuickButton(const char* id, Icon icon, const char* tooltip, Im
     const bool hovered = ImGui::IsItemHovered();
     ImGui::PopID();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    if (hovered && enabled) dl->AddRectFilled(at, {at.x + s, at.y + s}, IM_COL32(58, 66, 80, 255), 3.f);
+    if (hovered && enabled) dl->AddRectFilled(at, {at.x + s, at.y + s}, studio_theme::pal().btnHover, 3.f);
     drawIcon(dl, {at.x + s * 0.5f, at.y + s * 0.5f}, s * 0.62f, icon,
-             enabled ? IM_COL32(205, 214, 228, 255) : IM_COL32(95, 100, 110, 255));
+             enabled ? studio_theme::pal().icon : studio_theme::pal().iconDisabled);
     if (hovered && tooltip && tooltip[0]) ImGui::SetTooltip("%s", tooltip);
     return pressed;
 }
@@ -100,7 +101,7 @@ inline void ribbonEndGroup(const char* label, bool last = false) {
     const float labelY = ImGui::GetWindowPos().y + kRibbonHeight - 18.f;
     const float textW = ImGui::CalcTextSize(label).x;
     dl->AddText({min.x + (max.x - min.x - textW) * 0.5f, labelY},
-                IM_COL32(140, 150, 165, 255), label);
+                studio_theme::pal().groupLabel, label);
 
     if (last) return;
 
@@ -108,7 +109,7 @@ inline void ribbonEndGroup(const char* label, bool last = false) {
     // evita assert ImGui su item a dimensione zero in alcuni path di layout.
     ImGui::SameLine(0.f, 10.f);
     const ImVec2 sep = ImGui::GetCursorScreenPos();
-    dl->AddLine({sep.x, min.y - 2.f}, {sep.x, labelY - 4.f}, IM_COL32(62, 70, 84, 255), 1.f);
+    dl->AddLine({sep.x, min.y - 2.f}, {sep.x, labelY - 4.f}, studio_theme::pal().separator, 1.f);
     ImGui::Dummy({10.f, 1.f});
     ImGui::SameLine(0.f, 0.f);
 }
@@ -127,13 +128,11 @@ inline bool ribbonBigButton(const char* id, Icon icon, const char* label,
     const ImVec2 max(min.x + w, min.y + kBigButtonH);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    if (active)       dl->AddRectFilled(min, max, IM_COL32(38, 96, 168, 255), 4.f);
-    else if (hovered) dl->AddRectFilled(min, max, IM_COL32(58, 66, 80, 255), 4.f);
-    if (active || hovered) dl->AddRect(min, max, IM_COL32(88, 150, 220, 160), 4.f);
+    if (active)       dl->AddRectFilled(min, max, studio_theme::pal().btnActive, 4.f);
+    else if (hovered) dl->AddRectFilled(min, max, studio_theme::pal().btnHover, 4.f);
+    if (active || hovered) dl->AddRect(min, max, studio_theme::pal().btnBorder, 4.f);
 
-    const ImU32 tint = enabled ? (active ? IM_COL32(235, 244, 255, 255)
-                                         : IM_COL32(205, 214, 228, 255))
-                               : IM_COL32(110, 116, 128, 255);
+    const ImU32 tint = enabled ? (active ? studio_theme::pal().iconActive : studio_theme::pal().icon) : studio_theme::pal().iconDisabled;
 
     drawIcon(dl, {min.x + w * 0.5f, min.y + 24.f}, 27.f, icon, tint);
     dl->AddText({min.x + (w - textW) * 0.5f, min.y + 43.f}, tint, label);
@@ -154,7 +153,7 @@ inline bool ribbonMenuButton(const char* id, Icon icon, const char* label, bool 
     const ImVec2 max = ImGui::GetItemRectMax();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddTriangleFilled({max.x - 11.f, max.y - 9.f}, {max.x - 4.f, max.y - 9.f}, {max.x - 7.5f, max.y - 5.f},
-                          IM_COL32(170, 180, 196, 255));
+                          studio_theme::pal().menuArrow);
     ImGui::SetNextWindowPos({ImGui::GetItemRectMin().x, max.y + 2.f});
     return ImGui::BeginPopup(popup);
 }
@@ -172,10 +171,10 @@ inline bool ribbonSmallButton(const char* id, Icon icon, const char* label,
     const ImVec2 max(min.x + w, min.y + kSmallButtonH);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    if (active)       dl->AddRectFilled(min, max, IM_COL32(38, 96, 168, 255), 3.f);
-    else if (hovered) dl->AddRectFilled(min, max, IM_COL32(58, 66, 80, 255), 3.f);
+    if (active)       dl->AddRectFilled(min, max, studio_theme::pal().btnActive, 3.f);
+    else if (hovered) dl->AddRectFilled(min, max, studio_theme::pal().btnHover, 3.f);
 
-    const ImU32 tint = enabled ? IM_COL32(205, 214, 228, 255) : IM_COL32(110, 116, 128, 255);
+    const ImU32 tint = enabled ? studio_theme::pal().icon : studio_theme::pal().iconDisabled;
     drawIcon(dl, {min.x + 12.f, min.y + kSmallButtonH * 0.5f}, 15.f, icon, tint);
     dl->AddText({min.x + 25.f, min.y + 3.f}, tint, label);
 

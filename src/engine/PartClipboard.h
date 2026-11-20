@@ -67,6 +67,11 @@ inline int paste(DataModel& dm, const Clipboard& cb, const glm::vec3& offset) {
             const int parent = inClip(g.parent) ? newGroup[g.parent]
                              : (partgroups::find(dm, g.parent) ? g.parent : 0);
             newGroup[g.id] = partgroups::addGroup(dm, g.name, parent);
+            if (PartGroup* ng = partgroups::find(dm, newGroup[g.id])) {
+                ng->folder = g.folder;
+                ng->dragDetector = g.dragDetector;
+                ng->pivotOffset = g.pivotOffset;
+            }
             pending.erase(pending.begin() + (long)k);
         }
     }

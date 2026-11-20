@@ -136,5 +136,17 @@
  "rb.prefs": "Preferências do Studio",
  "rb.space.world": "Mundo",
  "rb.space.local": "Local",
- "rb.space.tip": "Eixos do gizmo: mundo ou parte (Ctrl+L)"
+ "rb.space.tip": "Eixos do gizmo: mundo ou parte (Ctrl+L)",
+ "rb.publish": "Publicar",
+ "rb.collide.drag": "Colisões",
+ "rb.collide.tip": "Partes movidas não atravessam outras",
+ "rb.csg.union": "União",
+ "rb.csg.negate": "Negar",
+ "rb.csg.intersect": "Interseção",
+ "rb.csg.separate": "Separar",
+ "rb.g.solids": "Sólidos",
+ "rb.c.tool": "Clique em dois pontos",
+ "rb.c.fromsel": "Entre as partes selecionadas",
+ "rb.theme.light": "Tema claro",
+ "rb.theme.dark": "Tema escuro"
 }

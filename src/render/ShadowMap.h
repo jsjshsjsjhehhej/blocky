@@ -14,6 +14,7 @@ struct ShadowMap {
     GLuint fbo = 0;
     GLuint depthTex = 0;
     GLuint depthProg = 0;
+    GLuint depthInstProg = 0;
     int size = 0;
     float extent = 90.f;
     glm::mat4 lightVP{1.f};
@@ -54,6 +55,29 @@ void main(){})";
         glLinkProgram(depthProg);
         glDeleteShader(v);
         glDeleteShader(f);
+
+        // Stessa profondita', ma la matrice arriva dall'istanza: una chiamata
+        // per forma invece di una per part. Senza, una mappa da centinaia di
+        // parti (il lab) fa centinaia di draw solo per l'ombra.
+        static const char* vsInst = R"(#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=4) in mat4 iModel;
+uniform mat4 uLightVP;
+void main(){ gl_Position = uLightVP * iModel * vec4(aPos, 1.0); })";
+        depthInstProg = glCreateProgram();
+        GLuint vi = compile(GL_VERTEX_SHADER, vsInst);
+        GLuint fi = compile(GL_FRAGMENT_SHADER, fs);
+        glAttachShader(depthInstProg, vi);
+        glAttachShader(depthInstProg, fi);
+        glLinkProgram(depthInstProg);
+        glDeleteShader(vi);
+        glDeleteShader(fi);
+        GLint instLinked = GL_FALSE;
+        glGetProgramiv(depthInstProg, GL_LINK_STATUS, &instLinked);
+        if (!instLinked) {
+            glDeleteProgram(depthInstProg);
+            depthInstProg = 0;
+        }
 
         glGenTextures(1, &depthTex);
         glBindTexture(GL_TEXTURE_2D, depthTex);
@@ -107,7 +131,10 @@ void main(){})";
         if (fbo) glDeleteFramebuffers(1, &fbo);
         if (depthTex) glDeleteTextures(1, &depthTex);
         if (depthProg) glDeleteProgram(depthProg);
-        fbo = depthTex = depthProg = 0;
+        if (depthInstProg) glDeleteProgram(depthInstProg);
+        if (instBuf_) glDeleteBuffers(1, &instBuf_);
+        fbo = depthTex = depthProg = depthInstProg = instBuf_ = 0;
+        instVpLoc_ = -1;
         ready = false;
     }
 
@@ -159,6 +186,34 @@ void main(){})";
     }
     mutable GLint modelLoc_ = -1;
     mutable GLuint modelLocProg_ = 0;
+    GLuint instBuf_ = 0;
+    GLint instVpLoc_ = -1;
+
+    /** Un solo draw per tutte le matrici (stessa forma). Il pass deve essere gia' in begin(). */
+    void drawInstanceGroup(GLuint vao, int verts, const glm::mat4* models, int count) {
+        if (!depthInstProg || !vao || verts <= 0 || count <= 0 || !models) return;
+        if (!instBuf_) glGenBuffers(1, &instBuf_);
+        glUseProgram(depthInstProg);
+        if (instVpLoc_ < 0)
+            instVpLoc_ = glGetUniformLocation(depthInstProg, "uLightVP");
+        glUniformMatrix4fv(instVpLoc_, 1, GL_FALSE, glm::value_ptr(lightVP));
+        glBindBuffer(GL_ARRAY_BUFFER, instBuf_);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * (int)sizeof(glm::mat4)),
+                     models, GL_STREAM_DRAW);
+        glBindVertexArray(vao);
+        const GLsizei stride = (GLsizei)sizeof(glm::mat4);
+        for (int c = 0; c < 4; ++c) {
+            glEnableVertexAttribArray(4 + c);
+            glVertexAttribPointer(4 + c, 4, GL_FLOAT, GL_FALSE, stride,
+                                  (void*)(sizeof(glm::vec4) * (size_t)c));
+            glVertexAttribDivisor(4 + c, 1);
+        }
+        glDrawArraysInstanced(GL_TRIANGLES, 0, verts, count);
+        for (int c = 0; c < 4; ++c) {
+            glVertexAttribDivisor(4 + c, 0);
+            glDisableVertexAttribArray(4 + c);
+        }
+    }
 
     // restoreFbo: il framebuffer su cui si stava disegnando la scena prima
     // di questo pass di profondita' (0 = schermo reale, oppure la scena

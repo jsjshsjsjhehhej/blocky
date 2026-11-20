@@ -88,6 +88,16 @@ inline int make(lua_State* L, ConstraintKind kind) {
         }
         break;
     case ConstraintKind::Weld:
+    case ConstraintKind::BallSocket:
+    case ConstraintKind::Prismatic:
+    case ConstraintKind::Cylindrical:
+    case ConstraintKind::NoCollision:
+    case ConstraintKind::AlignPosition:
+    case ConstraintKind::AlignOrientation:
+    case ConstraintKind::LinearVelocity:
+    case ConstraintKind::AngularVelocity:
+    case ConstraintKind::VectorForce:
+    case ConstraintKind::Torque:
     case ConstraintKind::Count:
         break;
     }
@@ -100,6 +110,16 @@ inline int hinge(lua_State* L) { return make(L, ConstraintKind::Hinge); }
 inline int rope(lua_State* L) { return make(L, ConstraintKind::Rope); }
 inline int spring(lua_State* L) { return make(L, ConstraintKind::Spring); }
 inline int rod(lua_State* L) { return make(L, ConstraintKind::Rod); }
+inline int ball(lua_State* L) { return make(L, ConstraintKind::BallSocket); }
+inline int prismatic(lua_State* L) { return make(L, ConstraintKind::Prismatic); }
+inline int cylindrical(lua_State* L) { return make(L, ConstraintKind::Cylindrical); }
+inline int noCollision(lua_State* L) { return make(L, ConstraintKind::NoCollision); }
+inline int alignPos(lua_State* L) { return make(L, ConstraintKind::AlignPosition); }
+inline int alignOri(lua_State* L) { return make(L, ConstraintKind::AlignOrientation); }
+inline int linVel(lua_State* L) { return make(L, ConstraintKind::LinearVelocity); }
+inline int angVel(lua_State* L) { return make(L, ConstraintKind::AngularVelocity); }
+inline int vecForce(lua_State* L) { return make(L, ConstraintKind::VectorForce); }
+inline int torque(lua_State* L) { return make(L, ConstraintKind::Torque); }
 
 inline int setEnabled(lua_State* L) {
     WeldConstraint* c = checkConstraint(L, 1);
@@ -140,6 +160,16 @@ inline void registerLua(lua_State* L, void* ctx) {
     addFn(L, ctx, rope, "Rope", "Constraints.Rope");
     addFn(L, ctx, spring, "Spring", "Constraints.Spring");
     addFn(L, ctx, rod, "Rod", "Constraints.Rod");
+    addFn(L, ctx, ball, "BallSocket", "Constraints.BallSocket");
+    addFn(L, ctx, prismatic, "Prismatic", "Constraints.Prismatic");
+    addFn(L, ctx, cylindrical, "Cylindrical", "Constraints.Cylindrical");
+    addFn(L, ctx, noCollision, "NoCollision", "Constraints.NoCollision");
+    addFn(L, ctx, alignPos, "AlignPosition", "Constraints.AlignPosition");
+    addFn(L, ctx, alignOri, "AlignOrientation", "Constraints.AlignOrientation");
+    addFn(L, ctx, linVel, "LinearVelocity", "Constraints.LinearVelocity");
+    addFn(L, ctx, angVel, "AngularVelocity", "Constraints.AngularVelocity");
+    addFn(L, ctx, vecForce, "VectorForce", "Constraints.VectorForce");
+    addFn(L, ctx, torque, "Torque", "Constraints.Torque");
     addFn(L, ctx, setEnabled, "SetEnabled", "Constraints.SetEnabled");
     addFn(L, ctx, remove, "Remove", "Constraints.Remove");
     addFn(L, ctx, count, "Count", "Constraints.Count");

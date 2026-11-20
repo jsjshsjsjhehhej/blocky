@@ -139,10 +139,30 @@ static void drawStudioSelectionOverlays() {
             case ConstraintKind::Rope:   col = IM_COL32(200, 150, 90, 230); break;
             case ConstraintKind::Spring: col = IM_COL32(90, 200, 240, 230); break;
             case ConstraintKind::Rod:    col = IM_COL32(220, 120, 220, 230); break;
+            case ConstraintKind::BallSocket: col = IM_COL32(240, 140, 80, 230); break;
+            case ConstraintKind::Prismatic:  col = IM_COL32(80, 180, 240, 230); break;
+            case ConstraintKind::Cylindrical: col = IM_COL32(80, 220, 200, 230); break;
+            case ConstraintKind::NoCollision: col = IM_COL32(180, 180, 180, 160); break;
+            case ConstraintKind::AlignPosition:
+            case ConstraintKind::AlignOrientation: col = IM_COL32(140, 220, 120, 220); break;
+            case ConstraintKind::LinearVelocity:
+            case ConstraintKind::AngularVelocity:
+            case ConstraintKind::VectorForce:
+            case ConstraintKind::Torque: col = IM_COL32(240, 100, 100, 220); break;
             case ConstraintKind::Count:  break;
             }
             if (!w.enabled) col = (col & 0x00FFFFFF) | 0x60000000;
-            studioDrawLine3D(dl, a.position, b.position, col, 2.f);
+            // Attachment0 / Attachment1: i punti dove il vincolo e' agganciato (pallini verdi, come Roblox).
+            const glm::vec3 pa = a.position + glm::mat3(partRotationMatrix(a.rotation)) * w.attach0;
+            const glm::vec3 pb = b.position + glm::mat3(partRotationMatrix(b.rotation)) * w.attach1;
+            studioDrawLine3D(dl, pa, pb, col, 2.f);
+            for (const glm::vec3& at : {pa, pb}) {
+                float sx, sy;
+                if (worldToScreen(at, sx, sy)) {
+                    dl->AddCircleFilled({sx, sy}, 4.5f, IM_COL32(20, 30, 20, 200));
+                    dl->AddCircleFilled({sx, sy}, 3.5f, IM_COL32(110, 230, 120, 255));
+                }
+            }
             if (w.kind == ConstraintKind::Hinge) {
                 const glm::mat3 r0(partRotationMatrix(a.rotation));
                 const glm::vec3 pivot = a.position + r0 * w.pivot;

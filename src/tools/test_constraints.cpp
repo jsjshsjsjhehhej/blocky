@@ -223,6 +223,30 @@ int main() {
               "saldatura su part ancorate: segue lo script, anche ruotando");
     }
 
+    {
+        // Attachment0 / Attachment1 (strumento vincoli: due punti cliccati sulle superfici).
+        DataModel dm;
+        dm.addPart("Soffitto", {0, 10, 0}, {4, 1, 4}, {1, 1, 1});
+        dm.addPart("Lampada", {0, 4, 0}, {1, 1, 1}, {1, 1, 1});
+        const glm::vec3 top{0, 9.5f, 0}, lamp{0, 4.5f, 0};   // sotto il soffitto, sopra la lampada
+        const int r = partconstraints::createAt(dm, ConstraintKind::Rope, 0, 1, top, lamp, {0, -1, 0});
+        const WeldConstraint& c = dm.welds[(size_t)r];
+        check(r >= 0 && glm::length(c.attach0 - glm::vec3(0, -0.5f, 0)) < 1e-4f && glm::length(c.attach1 - glm::vec3(0, 0.5f, 0)) < 1e-4f,
+              "gli agganci sono nei punti cliccati (spazio locale di ogni part)");
+        check(std::fabs(c.length - 5.f) < 1e-4f, "la corda e' lunga quanto la distanza fra i due agganci (5), non fra i centri (6)");
+        const int h = partconstraints::createAt(dm, ConstraintKind::Hinge, 0, 1, top, lamp, {0, -1, 0});
+        check(glm::length(dm.welds[(size_t)h].axis - glm::vec3(0, -1, 0)) < 1e-4f, "la cerniera gira attorno alla normale della superficie cliccata");
+        Humanoid hum;
+        const std::string path = "test_constraints_attach.blocky";
+        { std::ofstream fo(path, std::ios::binary); fo << PlaceExporter::exportPlace(dm, hum, {0, 0, 0}, 0.f); }
+        DataModel back;
+        const bool ok = loadPlaceFromJson(path, back);
+        std::remove(path.c_str());
+        check(ok && back.welds.size() == 2 && glm::length(back.welds[0].attach0 - c.attach0) < 1e-4f
+                  && glm::length(back.welds[0].attach1 - c.attach1) < 1e-4f,
+              "salva e ricarica: gli agganci restano");
+    }
+
     std::printf("\n%s (%d falliti)\n", g_fail ? "FALLITO" : "TUTTO OK", g_fail);
     return g_fail ? 1 : 0;
 }

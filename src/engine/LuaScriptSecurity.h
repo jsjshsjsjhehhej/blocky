@@ -49,7 +49,10 @@ inline constexpr float kMaxJumpPower = 70.f;
 // il limite duro ora e' in tempo reale: se un singolo script gira oltre
 // questa soglia senza restituire il controllo, viene fermato — stessa
 // funzione di prima (bloccare un "while true do end"), granularita' diversa.
-inline constexpr int kScriptHardTimeoutMs = 50;
+// 10 secondi, come il timeout di uno Script su Roblox: 50 ms fermava i
+// giochi che costruiscono la mappa in un colpo solo. Un ciclo infinito
+// resta fermato, solo piu' tardi.
+inline constexpr int kScriptHardTimeoutMs = 10000;
 
 inline bool isLockedGlobal(const char* k) {
     if (!k) return false;
@@ -70,8 +73,16 @@ inline bool isLockedGlobal(const char* k) {
 
 inline int luaProtectedNewIndex(lua_State* ls) {
     const char* k = lua_tostring(ls, 2);
-    return blockyLuaError(ls, "API Blocky protetta (anti-executor): non modificare '%s'",
-                      k ? k : "?");
+    // Vietato: mettere una FUNZIONE in una tabella del motore (e' quello che fa un
+    // executor per dirottare le API), o toccare una tabella di sola lettura.
+    // Permesso: un DATO, cioe' una proprieta' come su Roblox
+    // (Players.CharacterAutoLoads = false, Players.RespawnTime = 5): prima davano
+    // errore e fermavano lo script del gioco.
+    if (!k || lua_isfunction(ls, 3) || lua_getreadonly(ls, 1))
+        return blockyLuaError(ls, "API Blocky protetta (anti-executor): non modificare '%s'",
+                          k ? k : "?");
+    lua_rawset(ls, 1);
+    return 0;
 }
 
 inline int luaGlobalNewIndex(lua_State* ls) {

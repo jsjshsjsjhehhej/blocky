@@ -15,12 +15,16 @@
 
 #include "DataModel.h"
 #include "../platform/QualityProfile.h"
+#include "RuntimeScale.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
+#include <mutex>
+#include <thread>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -36,6 +40,9 @@
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
+#include <Jolt/Physics/Constraints/SixDOFConstraint.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
@@ -50,6 +57,7 @@
 #include <glm/gtx/euler_angles.hpp>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -139,8 +147,10 @@ public:
     const bool* groupMatrix = nullptr; // [kCollisionGroups * kCollisionGroups]
     const int*  partGroup = nullptr;   // per-part collision group
     int         partCount = 0;
+    const std::pair<int, int>* noPairs = nullptr;
+    int         noCount = 0;
 
-    void ResetFrame() { pairs_.clear(); }
+    void ResetFrame() { std::lock_guard<std::mutex> lk(mu_); pairs_.clear(); }
     const std::vector<TouchPair>& pairs() const { return pairs_; }
 
     bool groupCollide(int ga, int gb) const {
@@ -162,6 +172,11 @@ public:
             return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
         if (!groupCollide(partGroup[i1], partGroup[i2]))
             return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        for (int n = 0; n < noCount; ++n) {
+            const int a = noPairs[n].first, b = noPairs[n].second;
+            if ((a == i1 && b == i2) || (a == i2 && b == i1))
+                return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
         return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
     }
 
@@ -174,6 +189,8 @@ public:
         if (u1 == u2) return;
         TouchPair p{(int)u1, (int)u2};
         if (p.a > p.b) std::swap(p.a, p.b);
+        // Con la fisica su piu' core Jolt chiama qui da piu' thread insieme.
+        std::lock_guard<std::mutex> lk(mu_);
         for (const TouchPair& e : pairs_)
             if (e.a == p.a && e.b == p.b) return;
         if (pairs_.size() < 512) pairs_.push_back(p);
@@ -181,6 +198,7 @@ public:
 
 private:
     std::vector<TouchPair> pairs_;
+    std::mutex mu_;
 };
 
 class BpLayers final : public JPH::BroadPhaseLayerInterface {
@@ -270,6 +288,48 @@ public:
     // Altri punti attorno a cui la fisica resta sveglia, oltre a quello di
     // sync(): sul server dedicato ogni giocatore e' un centro di attivita'.
     void setExtraFocus(const std::vector<glm::vec3>& pts) { extraFocus_ = pts; }
+
+    // Un corpo cinematico per giocatore sul server: si sposta dove il client
+    // dice di essere e spinge le casse dinamiche. Un salto lungo si teletrasporta,
+    // cosi' non lancia via il mondo.
+    void syncPushers(const std::vector<glm::vec3>& feet, float dt) {
+        if (!sys_ || dt <= 0.f) return;
+        JPH::BodyInterface& bi = sys_->GetBodyInterface();
+        while (pushers_.size() > feet.size()) {
+            JPH::BodyID id = pushers_.back();
+            if (!id.IsInvalid()) {
+                bi.RemoveBody(id);
+                bi.DestroyBody(id);
+            }
+            pushers_.pop_back();
+            pusherFeet_.pop_back();
+        }
+        JPH::RefConst<JPH::Shape> capsule = new JPH::RotatedTranslatedShape(
+            JPH::Vec3(0.f, 0.5f * kCharHeight, 0.f), JPH::Quat::sIdentity(),
+            new JPH::CapsuleShape(std::max(0.05f, 0.5f * kCharHeight - kCharRadius), kCharRadius));
+        while (pushers_.size() < feet.size()) {
+            const glm::vec3& f = feet[pushers_.size()];
+            JPH::BodyCreationSettings bcs(capsule, JPH::RVec3(f.x, f.y, f.z), JPH::Quat::sIdentity(),
+                                          JPH::EMotionType::Kinematic, layers::Player);
+            JPH::Body* body = bi.CreateBody(bcs);
+            if (!body) break;
+            JPH::BodyID id = body->GetID();
+            bi.AddBody(id, JPH::EActivation::Activate);
+            pushers_.push_back(id);
+            pusherFeet_.push_back(f);
+        }
+        const float step = std::max(dt, 1.f / 60.f);
+        for (size_t i = 0; i < pushers_.size(); ++i) {
+            const glm::vec3& f = feet[i];
+            const glm::vec3& prev = pusherFeet_[i];
+            const float hop = glm::length(glm::vec2(f.x - prev.x, f.z - prev.z));
+            if (hop > 12.f)
+                bi.SetPosition(pushers_[i], JPH::RVec3(f.x, f.y, f.z), JPH::EActivation::Activate);
+            else
+                bi.MoveKinematic(pushers_[i], JPH::RVec3(f.x, f.y, f.z), JPH::Quat::sIdentity(), step);
+            pusherFeet_[i] = f;
+        }
+    }
 
     // workspace.Gravity (stud/s^2): part e personaggio. Default kGravity.
     void setGravity(float g) {
@@ -369,12 +429,15 @@ public:
         }
         charSeated_ = false;
         character_ = nullptr;   // prima del sistema: distrugge anche il suo corpo interno
+        pushers_.clear();       // i corpi muoiono col sistema
+        pusherFeet_.clear();
         if (sys_) {
             destroyJoints();    // i vincoli prima dei corpi che collegano
             JPH::BodyInterface& bi = sys_->GetBodyInterface();
             for (Slot& s : slots_) destroyBody(bi, s);
         }
         slots_.clear();
+        watch_.clear();
         if (sys_) sys_->SetContactListener(nullptr);
         sys_.reset();
         temp_.reset();
@@ -397,9 +460,19 @@ public:
     void syncJoints(const std::vector<WeldConstraint>& cs) {
         if (!sys_) return;
         const uint64_t h = jointsSignature(cs);
-        if (h == jointsHash_) return;
+        if (h == jointsHash_) {
+            contacts_.noPairs = noPairs_.empty() ? nullptr : noPairs_.data();
+            contacts_.noCount = (int)noPairs_.size();
+            return;
+        }
         destroyJoints();
         jointsHash_ = h;
+        noPairs_.clear();
+        for (const WeldConstraint& c : cs)
+            if (c.enabled && c.kind == ConstraintKind::NoCollision)
+                noPairs_.push_back({c.part0, c.part1});
+        contacts_.noPairs = noPairs_.empty() ? nullptr : noPairs_.data();
+        contacts_.noCount = (int)noPairs_.size();
 
         JPH::BodyInterface& bi = sys_->GetBodyInterface();
         for (const WeldConstraint& c : cs) {
@@ -446,37 +519,57 @@ public:
             createBody(bi, parts[slots_.size() - 1], slots_.back(), slots_.size() - 1);
         }
 
-        if (partGroupCache_.size() != parts.size())
-            partGroupCache_.assign(parts.size(), 0);
+        auto groupOf = [](const WorkspacePart& p) {
+            return std::clamp((int)std::lround(p.collisionGroup), 0, kCollisionGroups - 1);
+        };
+        if (partGroupCache_.size() != parts.size()) {
+            partGroupCache_.resize(parts.size());
+            for (size_t i = 0; i < parts.size(); ++i) partGroupCache_[i] = groupOf(parts[i]);
+        }
+        // Mappe grandi: le part ancorate ferme si guardano a turno. Sotto le
+        // 200 si guarda tutto. Dal lab in su (qualche centinaio) solo un quarto
+        // per frame: la firma di 400 part grosse, ogni frame, era una fetta
+        // dei 6 ms di fisica sul telefono. Le libere si guardano sempre.
+        if (watch_.size() != slots_.size()) {
+            watch_.resize(slots_.size());
+            for (size_t i = 0; i < slots_.size(); ++i) watch_[i] = slots_[i].dynamic ? kWatchAlways : 0;
+        }
+        const unsigned turn = ++sigTurn_;
+        const unsigned mask = parts.size() < 200 ? 0u : parts.size() < 16000 ? 3u : 7u;
         for (size_t i = 0; i < parts.size(); ++i) {
+            if (watch_[i] == 0 && ((i + turn) & mask) != 0) continue;   // ancorata ferma: tocca a un altro frame
             WorkspacePart& p = parts[i];
             Slot& s = slots_[i];
-            partGroupCache_[i] = std::clamp((int)std::lround(p.collisionGroup), 0, kCollisionGroups - 1);
-            s.collisionGroup = partGroupCache_[i];
+            if (watch_[i] != kWatchAlways && watch_[i] > 0) --watch_[i];
             if (s.sig != signature(p)) {
                 destroyBody(bi, s);
                 createBody(bi, p, s, i);
+                partGroupCache_[i] = groupOf(p);
+                s.collisionGroup = partGroupCache_[i];
+                watch_[i] = s.dynamic ? kWatchAlways : 0;
                 continue;
             }
+            s.collisionGroup = partGroupCache_[i];
             if (s.id.IsInvalid() || s.fallen) continue;
-            // Live material updates without full rebuild (friction / bounce / drag).
-            if (s.dynamic && s.tier == Tier::Active) {
-                bi.SetFriction(s.id, p.friction);
-                bi.SetRestitution(s.id, p.elasticity);
-                JPH::BodyLockWrite lock(sys_->GetBodyLockInterface(), s.id);
-                if (lock.Succeeded() && lock.GetBody().IsDynamic()) {
-                    auto* mp = lock.GetBody().GetMotionProperties();
-                    mp->SetLinearDamping(std::clamp(p.linearDamping, 0.f, 2.f));
-                    mp->SetAngularDamping(std::clamp(p.angularDamping, 0.f, 2.f));
-                }
-            }
+            // Attrito, rimbalzo e smorzamento sono nella firma (signature): se
+            // cambiano il corpo si ricostruisce gia' qui sopra. Prima venivano
+            // reimpostati a ogni frame su ogni part libera, con un lucchetto per
+            // corpo: lavoro buttato, pesante sui telefoni.
             if (p.position != s.writtenPos || p.rotation != s.writtenRot) {
                 // Qualcuno (Lua, gizmo) ha spostato la part: il corpo la segue.
+                // Per 2 secondi la si controlla a ogni frame (piattaforme mobili).
+                // Una statica spostata ogni frame ricostruisce il broadphase: la
+                // prima volta diventa cinematica e i frame dopo costano poco.
+                if (watch_[i] != kWatchAlways) watch_[i] = 120;
+                if (!s.dynamic && !s.kinematic) {
+                    bi.SetMotionType(s.id, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+                    s.kinematic = true;
+                }
                 glm::quat r = eulerDegToQuat(p.rotation);
                 bi.SetPositionAndRotation(s.id, JPH::RVec3(p.position.x, p.position.y, p.position.z),
                                           JPH::Quat(r.x, r.y, r.z, r.w),
-                                          s.tier == Tier::Active ? JPH::EActivation::Activate
-                                                                 : JPH::EActivation::DontActivate);
+                                          s.dynamic && s.tier == Tier::Active ? JPH::EActivation::Activate
+                                                                              : JPH::EActivation::DontActivate);
                 s.prevPos = s.curPos = s.writtenPos = p.position;
                 s.prevRot = s.curRot = r;
                 s.writtenRot = p.rotation;
@@ -692,21 +785,39 @@ public:
     void step(float dt) {
         if (!sys_) return;
         contacts_.ResetFrame();
-        for (Slot& s : slots_) {
+        refreshDynamicList();
+        for (int i : dynSlots_) {
+            Slot& s = slots_[(size_t)i];
             s.prevPos = s.curPos;
             s.prevRot = s.curRot;
         }
         // Auto / tanti dinamici: piu' substep = meno tunneling, stacking piu' solido.
+        // Un frame gia' in ritardo ha dt grande: raddoppiare i substep proprio
+        // li rendeva la fisica piu' lenta e il frame dopo ancora piu' in
+        // ritardo (sul lab: ~5 ms fissi). Sul telefono un passo basta; due
+        // solo con un veicolo, che senza buca i muri.
         int substeps = 1;
         if (activeVehicles_ > 0 && dt > 1.f / 50.f) substeps = 2;
-        if (stats_.active >= 24 && dt > 1.f / 55.f) substeps = std::max(substeps, 2);
-        if (stats_.active >= 80) substeps = std::max(substeps, 3);
+        if (budget_.maxActive > 48) {
+            if (stats_.active >= 24 && dt > 1.f / 55.f) substeps = std::max(substeps, 2);
+            if (stats_.active >= 80) substeps = std::max(substeps, 3);
+        }
         sys_->Update(dt, substeps, temp_.get(), jobs_.get());
 
         JPH::BodyInterface& bi = sys_->GetBodyInterface();
-        for (Slot& s : slots_) {
+        for (int i : dynSlots_) {
+            Slot& s = slots_[(size_t)i];
             if (s.id.IsInvalid() || s.fallen || s.tier != Tier::Active) continue;
             if (!bi.IsActive(s.id)) continue;
+            JPH::Vec3 lv = bi.GetLinearVelocity(s.id);
+            JPH::Vec3 av = bi.GetAngularVelocity(s.id);
+            // Fermo davvero: dorme. Un urto lo risveglia. Veicoli e vincoli no,
+            // altrimenti una cerniera resta appesa a un corpo spento.
+            if (!s.vehicle && !s.jointed && lv.LengthSq() < 0.05f && av.LengthSq() < 0.05f) {
+                bi.DeactivateBody(s.id);
+                ++blk::scale::stats().slept;
+                continue;
+            }
             JPH::RVec3 pos;
             JPH::Quat rot;
             bi.GetPositionAndRotation(s.id, pos, rot);
@@ -730,7 +841,9 @@ public:
     void writeBack(std::vector<WorkspacePart>& parts, float alpha) {
         if (!sys_ || parts.size() != slots_.size()) return;
         alpha = std::clamp(alpha, 0.f, 1.f);
-        for (size_t i = 0; i < parts.size(); ++i) {
+        refreshDynamicList();
+        for (int di : dynSlots_) {
+            const size_t i = (size_t)di;
             Slot& s = slots_[i];
             if (s.id.IsInvalid() || !s.dynamic) continue;
             if (s.prevPos == s.curPos && s.prevRot == s.curRot && parts[i].position == s.writtenPos)
@@ -798,17 +911,46 @@ private:
         JPH::Ref<JPH::VehicleConstraint> vehicle;
         bool vehicleLive = false;   // controller registrato nel sistema fisico
         bool jointed = false;       // collegata ad altre part da un vincolo
+        bool kinematic = false;     // ancorata che qualcuno ha spostato: non piu' statica
         int collisionGroup = 0;
     };
 
+    // Indici degli slot con corpo libero (dinamico): step e writeBack guardano
+    // solo questi. In una mappa grande sono poche decine su decine di migliaia.
+    std::vector<int> dynSlots_;
+    // sync(): 0 = ancorata ferma (a turno), 1..254 = frame in cui guardarla sempre, 255 = libera.
+    static constexpr uint8_t kWatchAlways = 255;
+    std::vector<uint8_t> watch_;
+    uint32_t dynEpoch_ = 0;
+    size_t dynSlotCount_ = (size_t)-1;
+    void refreshDynamicList() {
+        if (dynEpoch_ == bodyEpoch_ && dynSlotCount_ == slots_.size()) return;
+        dynSlots_.clear();
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (slots_[i].dynamic) dynSlots_.push_back((int)i);
+        dynEpoch_ = bodyEpoch_;
+        dynSlotCount_ = slots_.size();
+    }
+
     static uint32_t signature(const WorkspacePart& p) {
+        // Calcolata per OGNI part a OGNI frame (sync): a parole di 4 byte invece
+        // che byte per byte, 4 volte meno giri. Con 30.000 part (open world) era
+        // il costo principale della fisica, anche con tutto fermo.
         uint32_t h = 2166136261u;
         auto mix = [&](const void* d, size_t n) {
             const unsigned char* c = (const unsigned char*)d;
-            for (size_t i = 0; i < n; ++i) { h ^= c[i]; h *= 16777619u; }
+            size_t i = 0;
+            for (; i + 4 <= n; i += 4) {
+                uint32_t w;
+                std::memcpy(&w, c + i, 4);
+                h = (h ^ w) * 0x9E3779B1u;
+                h ^= h >> 15;
+            }
+            for (; i < n; ++i) { h ^= c[i]; h *= 16777619u; }
         };
         uint8_t flags = (uint8_t)((p.anchored ? 1 : 0) | (p.canCollide ? 2 : 0) | (p.netDriven ? 4 : 0));
         mix(&flags, 1);
+        mix(&p.toolSlot, sizeof(p.toolSlot));
         mix(&p.shape, sizeof(p.shape));
         mix(&p.size, sizeof(p.size));
         mix(&p.hitboxScaleX, sizeof(p.hitboxScaleX));
@@ -834,8 +976,13 @@ private:
         case PartShape::Ball:
             return new JPH::SphereShape(minHalf);
         case PartShape::Cylinder: {
-            float r = std::min(h.x, h.z);
-            return new JPH::CylinderShape(h.y, r, std::min(convex, r * 0.5f));
+            // Roblox: lungo su Size.X. La forma Jolt e' lunga su Y, poi ruota -90° su Z.
+            float rad = std::min(h.y, h.z);
+            float hh = std::max(h.x, 0.01f);
+            rad = std::max(rad, 0.01f);
+            JPH::RefConst<JPH::Shape> cyl = new JPH::CylinderShape(hh, rad, std::min(convex, rad * 0.5f));
+            JPH::Quat q = JPH::Quat::sRotation(JPH::Vec3::sAxisZ(), -1.5707963f);
+            return new JPH::RotatedTranslatedShape(JPH::Vec3::sZero(), q, cyl);
         }
         case PartShape::Wedge: {
             // Stessi vertici di PartMeshes::buildWedge(): base piena, spigolo
@@ -869,7 +1016,14 @@ private:
         const unsigned contacts = budget_.maxActive <= 24 ? 1024u : 4096u;
 
         temp_ = std::make_unique<JPH::TempAllocatorImplWithMallocFallback>(budget_.tempBytes);
-        jobs_ = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
+        // Fisica su piu' core: meta' dei core meno uno (telefono a 8 core: 3
+        // thread di lavoro), il resto resta al disegno e agli script.
+        const int hw = (int)std::thread::hardware_concurrency();
+        const int workers = std::clamp(hw / 2 - 1, 0, 4);
+        if (workers > 0)
+            jobs_ = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, workers);
+        else
+            jobs_ = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
         sys_ = std::make_unique<JPH::PhysicsSystem>();
         sys_->Init((JPH::uint)capacity_, 0, pairs, contacts, bpLayers_, objVsBp_, layerPairs_);
         sys_->SetGravity(JPH::Vec3(0.f, -gravity_, 0.f));
@@ -906,6 +1060,7 @@ private:
 
         JPH::BodyInterface& bi = sys_->GetBodyInterface();
         slots_.resize(parts.size());
+        watch_.clear();   // sync lo rifa dai corpi nuovi
         for (size_t i = 0; i < parts.size(); ++i)
             createBody(bi, parts[i], slots_[i], i);
         sys_->OptimizeBroadPhase();
@@ -938,6 +1093,13 @@ private:
         s.writtenRot = p.rotation;
         s.prevRot = s.curRot = eulerDegToQuat(p.rotation);
 
+        // Pezzo di un Tool (Handle): vive nello zaino, non nel mondo.
+        if (p.toolSlot >= 0) {
+            s.dynamic = false;
+            s.tier = Tier::Culled;
+            return;
+        }
+
         // netDriven (client): la muove il server, qui e' cinematica — spinge
         // le casse locali e ci si sbatte contro, ma non la simula due volte.
         s.dynamic = !p.anchored && !p.netDriven;
@@ -955,6 +1117,10 @@ private:
         // entrambe le part (un pavimento di ghiaccio fa scivolare le casse).
         bcs.mFriction = p.friction;
         bcs.mRestitution = p.elasticity;
+        // Una statica spostata (ruota visibile, piattaforma, script) diventa
+        // cinematica. Senza questo Jolt non ha le proprieta' di moto e
+        // SetMotionType va in crash.
+        if (!s.dynamic) bcs.mAllowDynamicOrKinematic = true;
         bcs.mLinearDamping = std::clamp(p.linearDamping, 0.f, 2.f);
         bcs.mAngularDamping = std::clamp(p.angularDamping, 0.f, 2.f);
         s.collisionGroup = std::clamp((int)std::lround(p.collisionGroup), 0, kCollisionGroups - 1);
@@ -969,6 +1135,7 @@ private:
             // Motore, freni e molle sono tarati su questa massa: con quella da
             // densita' un'auto di plastica leggera si impennerebbe a ogni accelerata.
             if (p.vehicleSeat && p.canCollide) bcs.mMassPropertiesOverride.mMass = kVehicleMass;
+            bcs.mAllowSleeping = true;
         }
         JPH::Body* body = bi.CreateBody(bcs);
         if (!body) return;
@@ -1205,14 +1372,18 @@ private:
     std::unique_ptr<JPH::PhysicsSystem> sys_;
     std::vector<Slot> slots_;
     JPH::Ref<JPH::CharacterVirtual> character_;
+    std::vector<JPH::BodyID> pushers_;
+    std::vector<glm::vec3> pusherFeet_;
     bool charSeated_ = false;
     CharacterSolidFilter charFilter_;
     TouchFilter touchFilter_;
     size_t capacity_ = 0;
     float lodClock_ = 0.f;
+    unsigned sigTurn_ = 0;   // sync(): a quale quarto delle part ancorate tocca il controllo della firma
     int activeVehicles_ = 0;
     std::vector<JPH::Ref<JPH::TwoBodyConstraint>> joints_;
     std::vector<std::pair<int, int>> jointParts_;
+    std::vector<std::pair<int, int>> noPairs_;
     uint64_t jointsHash_ = 0;
     uint32_t bodyEpoch_ = 1;   // cambia quando un corpo nasce o muore: i vincoli vanno rifatti
 
@@ -1243,8 +1414,9 @@ private:
         };
         for (const WeldConstraint& c : cs) {
             const int head[4] = {(int)c.kind, c.part0, c.part1, c.enabled ? 1 : 0};
-            const float tail[9] = {c.length, c.stiffness, c.damping, c.pivot.x, c.pivot.y, c.pivot.z,
-                                   c.axis.x, c.axis.y, c.axis.z};
+            const float tail[15] = {c.length, c.stiffness, c.damping, c.pivot.x, c.pivot.y, c.pivot.z,
+                                    c.axis.x, c.axis.y, c.axis.z, c.attach0.x, c.attach0.y, c.attach0.z,
+                                    c.attach1.x, c.attach1.y, c.attach1.z};
             mix(head, sizeof(head));
             mix(tail, sizeof(tail));
         }
@@ -1256,7 +1428,10 @@ private:
     JPH::Ref<JPH::TwoBodyConstraintSettings> jointSettings(const WeldConstraint& c, JPH::BodyInterface& bi,
                                                           JPH::BodyID a, JPH::BodyID b) {
         const JPH::RMat44 ta = bi.GetWorldTransform(a);
-        const JPH::RVec3 pa = bi.GetPosition(a), pb = bi.GetPosition(b);
+        const JPH::RMat44 tb = bi.GetWorldTransform(b);
+        // Attachment0 / Attachment1: i punti di aggancio (0,0,0 = il centro della part)
+        const JPH::RVec3 pa = ta * JPH::Vec3(c.attach0.x, c.attach0.y, c.attach0.z);
+        const JPH::RVec3 pb = tb * JPH::Vec3(c.attach1.x, c.attach1.y, c.attach1.z);
         const float current = (float)(pb - pa).Length();
         const float len = c.length > 0.f ? c.length : current;
         switch (c.kind) {
@@ -1289,6 +1464,51 @@ private:
                                                                std::clamp(c.damping, 0.f, 1.f));
             return s;
         }
+        case ConstraintKind::BallSocket: {
+            auto* s = new JPH::PointConstraintSettings;
+            s->mPoint1 = pa;
+            s->mPoint2 = pb;
+            return s;
+        }
+        case ConstraintKind::Prismatic: {
+            JPH::Vec3 axis = ta.Multiply3x3(toJ(c.axis));
+            if (axis.LengthSq() < 1e-8f) axis = JPH::Vec3::sAxisY();
+            axis = axis.Normalized();
+            auto* s = new JPH::SliderConstraintSettings;
+            s->mPoint1 = s->mPoint2 = pa;
+            s->mSliderAxis1 = s->mSliderAxis2 = axis;
+            s->mNormalAxis1 = s->mNormalAxis2 = axis.GetNormalizedPerpendicular();
+            return s;
+        }
+        case ConstraintKind::Cylindrical: {
+            JPH::Vec3 axis = ta.Multiply3x3(toJ(c.axis));
+            if (axis.LengthSq() < 1e-8f) axis = JPH::Vec3::sAxisY();
+            axis = axis.Normalized();
+            const JPH::Vec3 side = axis.GetNormalizedPerpendicular();
+            auto* s = new JPH::SixDOFConstraintSettings;
+            s->mPosition1 = pa;
+            s->mPosition2 = pb;
+            s->mAxisX1 = s->mAxisX2 = axis;
+            s->mAxisY1 = s->mAxisY2 = side;
+            const float lock = FLT_MAX;
+            for (int ax = 0; ax < JPH::SixDOFConstraintSettings::EAxis::Num; ++ax) {
+                s->mLimitMin[ax] = lock;
+                s->mLimitMax[ax] = -lock;
+            }
+            s->mLimitMin[JPH::SixDOFConstraintSettings::TranslationX] = -FLT_MAX;
+            s->mLimitMax[JPH::SixDOFConstraintSettings::TranslationX] = FLT_MAX;
+            s->mLimitMin[JPH::SixDOFConstraintSettings::RotationX] = -FLT_MAX;
+            s->mLimitMax[JPH::SixDOFConstraintSettings::RotationX] = FLT_MAX;
+            return s;
+        }
+        case ConstraintKind::NoCollision:
+        case ConstraintKind::AlignPosition:
+        case ConstraintKind::AlignOrientation:
+        case ConstraintKind::LinearVelocity:
+        case ConstraintKind::AngularVelocity:
+        case ConstraintKind::VectorForce:
+        case ConstraintKind::Torque:
+            return nullptr;
         case ConstraintKind::Count:
             break;
         }

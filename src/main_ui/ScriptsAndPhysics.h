@@ -5,6 +5,8 @@
 // globali di main.cpp (g_world, g_player, g_playerPos, g_lua, ecc.).
 // Compila solo se incluso da main.cpp esattamente in questo punto.
 
+#include "engine/PartGroups.h"
+
 // Part non ancorate: vive solo mentre si gioca (Playing o Test in Studio).
 static bphys::World g_bphys;
 static partconstraints::AnchoredWeldFollow g_anchoredWelds;
@@ -205,6 +207,7 @@ static void addScriptToSelected() {
     syncPartEditors();
     g_editingPartScript = true;
     g_showProps = true;
+    g_showPartScriptWin = true;   // come Roblox: lo script nuovo si apre nell editor
     g_luaRunMsg = "Script vuoto su " + p.name + " — scrivilo, poi Esegui / Test";
     if (wasEmpty) g_showScriptCreatedGuide = true;
 }
@@ -357,6 +360,24 @@ static void pumpScriptInput(GLFWwindow* win) {
     double mx = 0, my = 0;
     glfwGetCursorPos(win, &mx, &my);
     const ImGuiIO& io = ImGui::GetIO();
+    if (g_lua.proximity) {
+        g_lua.proximity->clickHint().clear();
+        if (inGame && !io.WantCaptureMouse) {
+            int idx = pickPartAtMouse((float)mx, (float)my);
+            for (int guard = 0; idx >= 0 && idx < (int)g_world.parts.size() && guard < 32; ++guard) {
+                if (g_lua.partHasClick(idx)) {
+                    const WorkspacePart& p = g_world.parts[(size_t)idx];
+                    float reach = 32.f;
+                    auto it = scriptControls().clickReach.find(idx);
+                    if (it != scriptControls().clickReach.end()) reach = it->second;
+                    if (glm::length(p.position - g_playerPos) <= reach + 0.5f * glm::length(p.size))
+                        g_lua.proximity->clickHint() = "Clic";
+                    break;
+                }
+                idx = g_world.parts[(size_t)idx].parentIndex;
+            }
+        }
+    }
     for (size_t i = 0; i < sizeof(kKeys) / sizeof(kKeys[0]); ++i) {
         const bool down = inGame && glfwGetKey(win, kKeys[i].code) == GLFW_PRESS;
         if (down != keyWas[i])
@@ -375,12 +396,64 @@ static void pumpScriptInput(GLFWwindow* win) {
             for (int guard = 0; idx >= 0 && idx < (int)g_world.parts.size() && guard < 32; ++guard) {
                 if (g_lua.partHasClick(idx)) {
                     const WorkspacePart& p = g_world.parts[(size_t)idx];
-                    const float reach = 32.f + 0.5f * glm::length(p.size);
+                    float reach = 32.f;
+                    auto it = scriptControls().clickReach.find(idx);
+                    if (it != scriptControls().clickReach.end()) reach = it->second;
+                    reach += 0.5f * glm::length(p.size);
                     if (glm::length(p.position - g_playerPos) <= reach) g_lua.firePartClicked(idx);
                     break;
                 }
                 idx = g_world.parts[(size_t)idx].parentIndex;
             }
+        }
+        if (b == 0) {
+            static int dragPart = -1;
+            static int dragGroup = 0;
+            static glm::vec3 dragGrab{0.f};
+            static glm::vec3 dragN{0.f, 1.f, 0.f};
+            if (down && !mouseWas[b] && !io.WantCaptureMouse) {
+                const int hit = pickPartAtMouse((float)mx, (float)my);
+                dragPart = -1;
+                dragGroup = 0;
+                if (hit >= 0) dragGroup = partgroups::dragGroupOf(g_world, hit);
+                if (dragGroup <= 0) {
+                    for (int idx = hit, guard = 0; idx >= 0 && idx < (int)g_world.parts.size() && guard < 32; ++guard) {
+                        if (g_world.parts[(size_t)idx].dragDetector) { dragPart = idx; break; }
+                        idx = g_world.parts[(size_t)idx].parentIndex;
+                    }
+                }
+                const int ref = dragGroup > 0 ? hit : dragPart;
+                if ((dragPart >= 0 || dragGroup > 0) && ref >= 0 && ref < (int)g_world.parts.size()) {
+                    dragPart = ref;
+                    glm::vec3 o, d;
+                    screenToRay((float)mx, (float)my, g_lastView, g_lastProj, o, d);
+                    dragN = glm::length(g_cam.front()) > 0.1f ? glm::normalize(g_cam.front()) : glm::vec3(0.f, 0.f, -1.f);
+                    float t = 0.f;
+                    const glm::vec3 origin = g_world.parts[(size_t)ref].position;
+                    dragGrab = rayPlane(o, d, origin, dragN, t) ? origin - (o + d * t) : glm::vec3(0.f);
+                }
+            }
+            if (down && dragPart >= 0 && dragPart < (int)g_world.parts.size()) {
+                glm::vec3 o, d;
+                screenToRay((float)mx, (float)my, g_lastView, g_lastProj, o, d);
+                float t = 0.f;
+                auto& pref = g_world.parts[(size_t)dragPart];
+                if (rayPlane(o, d, pref.position, dragN, t)) {
+                    const glm::vec3 target = o + d * t + dragGrab;
+                    if (dragGroup > 0) {
+                        const glm::vec3 delta = target - pref.position;
+                        for (int i : partgroups::memberParts(g_world, dragGroup)) {
+                            if (i < 0 || i >= (int)g_world.parts.size()) continue;
+                            auto& mp = g_world.parts[(size_t)i];
+                            if (mp.toolSlot >= 0) continue;
+                            mp.position += delta;
+                        }
+                    } else {
+                        pref.position = target;
+                    }
+                }
+            }
+            if (!down) { dragPart = -1; dragGroup = 0; }
         }
         mouseWas[b] = down;
     }
@@ -388,6 +461,9 @@ static void pumpScriptInput(GLFWwindow* win) {
 
 static void startTestScripts() {
     CrashHandler::note("startTestScripts: inizio");
+    // Il fuoco, gli attachment e i ClickDetector del posto restano. Quello
+    // che gli script creano durante il Test si butta allo Stop.
+    rememberStudioFx(g_lua.scriptEmitters_);
     // Sessione Luau pulita: gli script vedono il workspace C++ così com'è
     // in Studio (Size/Position aggiornati), senza stato vecchio dal test prima.
     g_lua.shutdown();
@@ -397,11 +473,14 @@ static void startTestScripts() {
         return;
     }
     CrashHandler::note("startTestScripts: g_lua.init ok");
+    recallStudioFx(g_lua.scriptEmitters_);
     bindPhysBridgeToLua();
     bindLuaServices();
     g_lua.clearHeartbeats();
     scriptControls().jumpEnabled = true;
     scriptControls().walkEnabled = true;
+    scriptControls().scriptMoveAge = 10.f;
+    scriptControls().moveToActive = false;
     scriptControls().walkSpeedOverride = -1.f;
     scriptControls().jumpPowerOverride = -1.f;
     if (g_activeGame.script[0]) {
@@ -433,10 +512,12 @@ static void startTestScripts() {
 
 static void scaleSelected(float factor) {
     if (g_selectedPart < 0 || g_selectedPart >= (int)g_world.parts.size()) return;
-    auto& s = g_world.parts[g_selectedPart].size;
-    s *= factor;
-    s = glm::max(s, glm::vec3(0.05f));
-    s = glm::min(s, glm::vec3(1.0e5f));
+    auto& part = g_world.parts[g_selectedPart];
+    const glm::vec3 prev = part.size;
+    part.size *= factor;
+    part.size = glm::max(part.size, glm::vec3(kMinPartSize));
+    part.size = glm::min(part.size, glm::vec3(1.0e5f));
+    if (studioCollisionBlocked(part)) part.size = prev;
 }
 
 static void partWorldAabb(const WorkspacePart& p, glm::vec3& outMin, glm::vec3& outMax) {
@@ -457,15 +538,14 @@ static void partWorldAabb(const WorkspacePart& p, glm::vec3& outMin, glm::vec3& 
         return;
     }
     if (p.shape == PartShape::Cylinder) {
-        // Ingombro esatto = componente lungo l'asse + raggio proiettato sul
-        // piano perpendicolare, per ognuno dei tre assi del mondo — non gli
-        // angoli di un cubo che lo racchiude.
-        float r = std::min(h.x, h.z);
+        // Come Roblox: il cilindro e' lungo su Size.X. L'asse locale X e' la
+        // prima colonna della rotazione; il raggio sta su Y e Z.
+        float r = std::min(h.y, h.z);
         glm::mat3 rot(partRotationMatrix(p.rotation));
         glm::vec3 ext;
         for (int i = 0; i < 3; ++i)
-            ext[i] = h.y * std::fabs(rot[1][i])
-                   + r * std::sqrt(rot[0][i] * rot[0][i] + rot[2][i] * rot[2][i]);
+            ext[i] = h.x * std::fabs(rot[0][i])
+                   + r * std::sqrt(rot[1][i] * rot[1][i] + rot[2][i] * rot[2][i]);
         outMin = p.position - ext;
         outMax = p.position + ext;
         return;
@@ -538,9 +618,10 @@ static void pollBackpackEquipChanged() {
         // Un item senza mesh e senza tool incorporato non fa comparire NIENTE in
         // mano, e finora non lo diceva nessuno: si equipaggiava e non succedeva
         // nulla, senza sapere se fosse rotto il modello, l equip o l animazione.
-        if (now_.meshPath.empty() && now_.tool == BackpackTool::None) {
-            g_exportMsg = "\"" + now_.name + "\" non ha un modello: Explorer > Backpack > "
-                          + now_.name + " > \"Scegli modello (mesh in mano)...\"";
+        if (now_.meshPath.empty() && now_.tool == BackpackTool::None
+            && !g_world.backpackHasParts(cur)) {
+            g_exportMsg = "\"" + now_.name + "\" non ha un Handle: metti una Part di nome "
+                          "Handle dentro il Tool, oppure scegli un modello.";
         } else if (!now_.meshPath.empty()) {
             const std::string resolved =
                 resolvePackageAssetPath(g_activeGame.placePath, now_.meshPath);
@@ -762,16 +843,71 @@ static void resolvePlayerAxis(int axis) {
     }
 }
 
-static void respawnPlayerAtSpawn() {
-    g_playerPos = g_world.spawn.position;
-    if (!std::isfinite(g_playerPos.x) || !std::isfinite(g_playerPos.y) || !std::isfinite(g_playerPos.z)
-        || g_playerPos.y < 0.01f) {
-        g_playerPos = {0.f, 0.f, 0.f};
-    } else {
-        g_playerPos.y = std::max(0.f, g_playerPos.y);
+static bool pointInPart(const WorkspacePart& p, const glm::vec3& world) {
+    const glm::vec3 local = glm::vec3(glm::inverse(partRotationMatrix(p.rotation))
+                                      * glm::vec4(world - p.position, 1.f));
+    const glm::vec3 h = p.size * 0.5f;
+    return std::abs(local.x) <= h.x + 0.05f && std::abs(local.y) <= h.y + 0.05f
+        && std::abs(local.z) <= h.z + 0.05f;
+}
+
+static bool playerInWater() {
+    const glm::vec3 chest = g_playerPos + glm::vec3(0.f, 2.2f, 0.f);
+    for (const auto& p : g_world.parts) {
+        if (p.toolSlot >= 0 || p.material != PartMaterial::Water) continue;
+        if (pointInPart(p, chest)) return true;
     }
-    if (g_playerPos.y < 0.05f)
-        g_playerPos.y = 0.05f;
+    return false;
+}
+
+static const WorkspacePart* playerOnLadder() {
+    const glm::vec3 chest = g_playerPos + glm::vec3(0.f, 2.0f, 0.f);
+    const WorkspacePart* best = nullptr;
+    float bestD = 1e9f;
+    for (const auto& p : g_world.parts) {
+        if (p.toolSlot >= 0 || !(p.ladder || p.name == "Ladder")) continue;
+        const glm::vec3 grown = p.size * 0.5f + glm::vec3(1.15f, 0.4f, 1.15f);
+        const glm::vec3 local = glm::vec3(glm::inverse(partRotationMatrix(p.rotation))
+                                          * glm::vec4(chest - p.position, 1.f));
+        if (std::abs(local.x) > grown.x || std::abs(local.y) > grown.y || std::abs(local.z) > grown.z)
+            continue;
+        const float d = glm::length(glm::vec2(chest.x - p.position.x, chest.z - p.position.z));
+        if (d < bestD) { bestD = d; best = &p; }
+    }
+    return best;
+}
+
+static void respawnPlayerAtSpawn() {
+    struct Spot { glm::vec3 pos; float yaw; std::string team; };
+    std::vector<Spot> mine, any;
+    const std::string team = g_teams.mine();
+    for (const auto& p : g_world.parts) {
+        if (p.toolSlot >= 0) continue;
+        if (!p.spawnPoint && p.name != "SpawnLocation") continue;
+        Spot s;
+        s.pos = p.position + glm::vec3(0.f, p.size.y * 0.5f + 0.15f, 0.f);
+        s.yaw = p.rotation.y;
+        s.team = p.spawnTeam;
+        if (!team.empty() && s.team == team) mine.push_back(s);
+        if (s.team.empty()) any.push_back(s);
+    }
+    const std::vector<Spot>& pool = !mine.empty() ? mine : any;
+    if (!pool.empty()) {
+        static int spin = 0;
+        const Spot& s = pool[(size_t)(spin++ % (int)pool.size())];
+        g_playerPos = s.pos;
+        g_playerYaw = s.yaw;
+    } else {
+        g_playerPos = g_world.spawn.position;
+        if (!std::isfinite(g_playerPos.x) || !std::isfinite(g_playerPos.y) || !std::isfinite(g_playerPos.z)
+            || g_playerPos.y < 0.01f) {
+            g_playerPos = {0.f, 0.f, 0.f};
+        } else {
+            g_playerPos.y = std::max(0.f, g_playerPos.y);
+        }
+        if (g_playerPos.y < 0.05f)
+            g_playerPos.y = 0.05f;
+    }
     g_moveVel = {0, 0, 0};
     g_ragdoll.clear();
     g_player.humanoid.respawnFull();
@@ -784,6 +920,8 @@ static void respawnPlayerAtSpawn() {
     acOnLegitimateRespawn();
     g_lua.fireCharacterAdded();
 }
+
+static void tickSeatAndTrails(float dt);
 
 static void stepPlayerPhysicsWithCollision(float dt) {
     auto& h = g_player.humanoid;
@@ -804,6 +942,17 @@ static void stepPlayerPhysicsWithCollision(float dt) {
         }
         return;
     }
+    if (h.scriptPose == 3 || h.ragdoll) {
+        if (!g_ragdoll.active)
+            g_ragdoll.start(h, g_playerPos, g_playerYaw, g_moveVel, 0.f);
+        g_ragdoll.update(dt);
+        if (g_ragdoll.torsoIdx >= 0)
+            g_playerPos = g_ragdoll.focusPos() - glm::vec3(0.f, 3.f, 0.f);
+        g_moveVel = {0, 0, 0};
+        h.velocityY = 0.f;
+        h.grounded = false;
+        return;
+    }
     if (g_ragdoll.active)
         g_ragdoll.clear();
 
@@ -811,17 +960,63 @@ static void stepPlayerPhysicsWithCollision(float dt) {
     if (g_veicoli.seated()) {
         h.velocityY = 0.f;
         h.grounded = true;
+        h.climbing = false;
+        h.swimming = false;
         return;
     }
 
+    static float ladderRelease = 0.f;
+    if (ladderRelease > 0.f) ladderRelease = std::max(0.f, ladderRelease - dt);
+    if (h.velocityY > 8.f) ladderRelease = 0.35f;
+    if (const WorkspacePart* ladder = playerOnLadder(); ladder && ladderRelease <= 0.f && h.velocityY < 8.f) {
+        h.climbing = true;
+        h.swimming = false;
+        h.grounded = true;
+        h.velocityY = 0.f;
+        const float dx = g_playerPos.x - ladder->position.x;
+        const float dz = g_playerPos.z - ladder->position.z;
+        if (dx * dx + dz * dz < 8.f) {
+            g_playerPos.x = ladder->position.x;
+            g_playerPos.z = ladder->position.z;
+        }
+        const float top = ladder->position.y + ladder->size.y * 0.5f;
+        const float bot = ladder->position.y - ladder->size.y * 0.5f;
+        g_playerPos.y += std::clamp(g_climbAxis, -1.f, 1.f) * h.walkSpeed * 0.55f * dt;
+        if (g_playerPos.y > top - 0.05f && g_climbAxis > 0.2f) {
+            g_playerPos.y = top + 0.2f;
+            h.climbing = false;
+        }
+        if (g_playerPos.y < bot) g_playerPos.y = bot;
+        g_moveVel = {0, 0, 0};
+        tickSeatAndTrails(dt);
+        return;
+    }
+    h.climbing = false;
+
+    const bool flying = h.scriptPose == 1 && h.flyEnabled;
+    const bool scriptSwim = h.scriptPose == 2 && h.swimEnabled;
+    const bool inWater = playerInWater() && h.swimEnabled && !flying;
+    h.flying = flying;
+    h.swimming = scriptSwim || inWater;
     const float gravity = bphys::kGravity;
     float prevVy = h.velocityY;
-    h.velocityY -= gravity * dt;
+    if (flying) {
+        h.velocityY = std::clamp(g_climbAxis, -1.f, 1.f) * h.walkSpeed;
+        if (g_bphys.ready()) h.velocityY += gravity * dt;
+        h.grounded = false;
+    } else if (h.swimming) {
+        h.velocityY += (-1.6f - h.velocityY) * std::min(1.f, 3.f * dt);
+        h.velocityY += g_swimUp * 22.f * dt;
+        h.velocityY += std::clamp(g_climbAxis, -1.f, 1.f) * 8.f * dt;
+        h.velocityY = std::clamp(h.velocityY, -5.f, 12.f);
+    } else {
+        h.velocityY -= gravity * dt;
+    }
     if (g_bphys.ready()) {
         const bphys::CharacterStep r = g_bphys.moveCharacter(g_playerPos, h.velocityY, dt);
         g_playerPos = r.feet;
         h.velocityY = r.velY;
-        h.grounded = r.grounded;
+        h.grounded = flying ? false : r.grounded;
         resolvePlayerAxis(1);
         resolvePlayerAxis(0);
         resolvePlayerAxis(2);
@@ -840,14 +1035,190 @@ static void stepPlayerPhysicsWithCollision(float dt) {
         h.takeDamage(dmg);
     }
 
-    const float killY = -12.f;
-    const float mapHalfExtent = 144.f;
+    // Come su Roblox: si muore solo cadendo sotto workspace.FallenPartsDestroyHeight.
+    // (Prima c'era anche un limite di 144 stud in X e Z: mappe piu' grandi di
+    // 288x288 uccidevano il giocatore ai bordi anche col pavimento sotto i piedi.)
+    const float killY = g_lua.ok ? g_lua.readFallenPartsDestroyHeight() : -12.f;
     bool fellOffMap = g_playerPos.y < killY
-        || std::fabs(g_playerPos.x) > mapHalfExtent
-        || std::fabs(g_playerPos.z) > mapHalfExtent
         || !std::isfinite(g_playerPos.x) || !std::isfinite(g_playerPos.y)
         || !std::isfinite(g_playerPos.z);
     if (fellOffMap)
         h.takeDamage(h.maxHealth + 1.f);
+    tickSeatAndTrails(dt);
 }
 
+static void tickSeatAndTrails(float dt) {
+    auto& h = g_player.humanoid;
+    if (!h.climbing) {
+    if (h.velocityY > 1.5f) { h.seated = false; h.seatPart = -1; }
+    if (!h.seated && h.velocityY <= 0.5f) {
+        for (int si = 0; si < (int)g_world.parts.size(); ++si) {
+            const auto& p = g_world.parts[(size_t)si];
+            if (!p.seat || p.toolSlot >= 0) continue;
+            const glm::vec3 d = g_playerPos - p.position;
+            if (std::abs(d.x) < p.size.x * 0.5f + 0.8f && std::abs(d.z) < p.size.z * 0.5f + 0.8f
+                && d.y > -1.2f && d.y < p.size.y * 0.5f + 1.6f) {
+                g_playerPos = p.position + glm::vec3(0.f, p.size.y * 0.5f + 0.05f, 0.f);
+                h.velocityY = 0.f;
+                h.grounded = true;
+                h.seated = true;
+                h.seatPart = si;
+                g_moveVel = {0, 0, 0};
+                break;
+            }
+        }
+    } else if (h.seated) {
+        h.grounded = true;
+        h.velocityY = 0.f;
+        g_moveVel = {0, 0, 0};
+        // come su Roblox: chi e' seduto va con il sedile (treni, veicoli, giostre)
+        if (h.seatPart >= 0 && h.seatPart < (int)g_world.parts.size() && g_world.parts[(size_t)h.seatPart].seat) {
+            const auto& sp = g_world.parts[(size_t)h.seatPart];
+            g_playerPos = sp.position + glm::vec3(0.f, sp.size.y * 0.5f + 0.05f, 0.f);
+        } else {
+            h.seated = false;   // il sedile non c'e' piu'
+            h.seatPart = -1;
+        }
+    }
+    }
+    auto& trails = scriptControls().trails;
+    for (auto& t : trails) {
+        if (!t.enabled || t.partIndex < 0 || t.partIndex >= (int)g_world.parts.size()) continue;
+        const glm::vec3 pos = g_world.parts[(size_t)t.partIndex].position;
+        if (t.pts.empty() || glm::length(pos - t.pts.back()) > 0.15f) {
+            t.pts.push_back(pos);
+            t.age.push_back(0.f);
+        }
+        for (float& a : t.age) a += dt;
+        while (!t.age.empty() && t.age.front() > t.life) {
+            t.age.erase(t.age.begin());
+            t.pts.erase(t.pts.begin());
+        }
+        if (t.pts.size() > 24) {
+            t.pts.erase(t.pts.begin());
+            t.age.erase(t.age.begin());
+        }
+    }
+}
+
+static void applyWaterBuoyancy(float dt) {
+    if (dt <= 0.f || !g_bphys.ready()) return;
+    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+        const WorkspacePart& p = g_world.parts[(size_t)i];
+        if (p.toolSlot >= 0 || p.anchored || p.material == PartMaterial::Water) continue;
+        bool wet = false;
+        for (const auto& w : g_world.parts) {
+            if (w.material != PartMaterial::Water || w.toolSlot >= 0) continue;
+            if (pointInPart(w, p.position)) { wet = true; break; }
+        }
+        if (!wet || p.density >= 1.f) continue;
+        const float vol = std::min(64.f, p.size.x * p.size.y * p.size.z);
+        const float lift = (1.f - p.density) * vol * 6.f * dt;
+        g_bphys.applyImpulse(i, glm::vec3(0.f, lift, 0.f));
+    }
+}
+
+static void applyConstraintMovers(float dt) {
+    if (dt <= 0.f) return;
+    for (const auto& c : g_world.welds) {
+        if (!c.enabled || c.part0 < 0 || c.part1 < 0) continue;
+        if (c.part0 >= (int)g_world.parts.size() || c.part1 >= (int)g_world.parts.size()) continue;
+        const WorkspacePart& a = g_world.parts[(size_t)c.part0];
+        WorkspacePart& b = g_world.parts[(size_t)c.part1];
+        switch (c.kind) {
+        case ConstraintKind::AlignPosition: {
+            const glm::vec3 goal = a.position + c.relPos;
+            glm::vec3 d = goal - b.position;
+            const float step = std::max(1.f, c.stiffness) * dt * 6.f;
+            if (glm::length(d) > step && glm::length(d) > 1e-4f) d = glm::normalize(d) * step;
+            b.position += d;
+            break;
+        }
+        case ConstraintKind::AlignOrientation:
+            b.rotation = a.rotation + c.relRot;
+            break;
+        case ConstraintKind::LinearVelocity:
+            g_bphys.setLinearVelocity(c.part1, c.axis * std::max(0.f, c.length));
+            break;
+        case ConstraintKind::AngularVelocity:
+            g_bphys.setAngularVelocity(c.part1, c.axis);
+            break;
+        case ConstraintKind::VectorForce:
+            g_bphys.applyImpulse(c.part1, c.axis * c.stiffness * dt);
+            break;
+        case ConstraintKind::Torque:
+            g_bphys.setAngularVelocity(c.part1, c.axis * std::max(0.1f, c.stiffness) * 0.15f);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+
+// ---- Stato del giocatore deciso dal server dedicato -----------------------------------------------
+// Il server manda "H=vita;M=max;W=velocita';J=salto;L=Monete:10;T=x,y,z" con
+// l'evento riservato "__blkPlayerState" (blocky_servers/ServerWorld.h): qui lo
+// si applica al giocatore locale prima che gli eventi arrivino agli script.
+static void applyServerPlayerState(const std::string& st) {
+    auto& h = g_player.humanoid;
+    size_t pos = 0;
+    while (pos < st.size()) {
+        size_t end = st.find(';', pos);
+        if (end == std::string::npos) end = st.size();
+        const std::string item = st.substr(pos, end - pos);
+        pos = end + 1;
+        if (item.size() < 3 || item[1] != '=') continue;
+        const std::string v = item.substr(2);
+        switch (item[0]) {
+        case 'M': h.maxHealth = std::max(1.f, (float)std::atof(v.c_str())); break;
+        case 'H': {
+            const float target = std::clamp((float)std::atof(v.c_str()), 0.f, std::max(1.f, h.maxHealth));
+            // Danni e cure passano dal Humanoid: cosi' scattano lampo rosso, morte e respawn.
+            if (target < h.health - 0.01f) h.takeDamage(h.health - target);
+            else if (target > h.health + 0.01f) h.heal(target - h.health);
+            break;
+        }
+        case 'W': h.walkSpeed = std::clamp((float)std::atof(v.c_str()), 0.f, 500.f); break;
+        case 'J': h.jumpPower = std::clamp((float)std::atof(v.c_str()), 0.f, 1000.f); break;
+        case 'L': {
+            // "Monete:10,Livello:2" -> leaderstats del giocatore locale (classifica con Tab)
+            size_t a = 0;
+            while (a < v.size()) {
+                size_t b = v.find(',', a);
+                if (b == std::string::npos) b = v.size();
+                const std::string kv = v.substr(a, b - a);
+                const size_t c = kv.find(':');
+                if (c != std::string::npos) g_classifica.set(kv.substr(0, c), std::atof(kv.c_str() + c + 1));
+                a = b + 1;
+            }
+            break;
+        }
+        case 'T': {
+            float x = 0, y = 0, z = 0;
+            if (std::sscanf(v.c_str(), "%f,%f,%f", &x, &y, &z) == 3) {
+                g_playerPos = {x, y, z};   // piedi
+                g_exportMsg = "Teletrasportato dal server";
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
+/** Toglie dalla coda della rete gli stati del giocatore e li applica. */
+static void consumeServerPlayerStates() {
+    auto& q = g_net.incomingRemotes;
+    // Solo un client accetta lo stato dal server: chi ospita una partita LAN lo scarta,
+    // cosi' un client non puo' cambiare vita o posizione all'host.
+    const bool fromServer = g_net.role == NetRole::Client;
+    for (auto it = q.begin(); it != q.end();) {
+        if (std::strcmp(it->name, "__blkPlayerState") == 0) {
+            if (fromServer && !it->toServer) applyServerPlayerState(it->payload);
+            it = q.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}

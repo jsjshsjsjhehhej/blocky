@@ -26,6 +26,8 @@ struct QualityProfile {
     // che e' la causa piu' diretta di surriscaldamento su mobile.
     int   targetFps       = 0;
     bool  studTextures    = true;
+    // Low: stud sempre visibili ma leggeri (texture 64x64, spariscono prima con la distanza).
+    bool  studLowDetail   = false;
     bool  shadows         = false;
     int   shadowMapSize   = 0;
     int   shadowOccluders = 8;
@@ -67,8 +69,11 @@ inline QualityProfile profileFor(TargetPlatform p) {
         q.name = "PC High";
         q.msaaSamples = 4;
         q.renderScale = 1.f;
-        q.maxDrawDistance = 1400.f;
-        q.maxVisibleParts = 28000;
+        // Come la vista di Roblox su PC: si vede la citta' intorno, non solo
+        // poche centinaia di parti. 64000 e' il tetto, non quante se ne
+        // disegnano sempre: sotto, il frustum le scarta. Piu' su inizia a pesare.
+        q.maxDrawDistance = 2000.f;
+        q.maxVisibleParts = 64000;
         q.vsync = true;
         q.targetFps = 0; // PC: niente tetto, solo vsync — l'utente ha gia' il controllo
         q.studTextures = true;
@@ -190,13 +195,15 @@ inline QualityProfile applyPreset(QualityProfile base, QualityPreset preset) {
         q.renderScale = std::min(q.renderScale, 0.65f);
         q.maxDrawDistance *= 0.5f;
         q.maxVisibleParts = std::min(q.maxVisibleParts, q.mobile ? 900 : 2500);
-        q.studTextures = false;
+        q.studTextures = true;    // gli stud restano: sono il look di Blocky
+        q.studLowDetail = true;   // ...ma poco dettagliati
         q.shadows = false;
         q.shadowOccluders = 0;
         q.postFx = false;
         q.physicsHz = 30.f;
-        // Low resta a 30 solo come scudo termico / lag defense.
-        q.targetFps = q.mobile ? 30 : (q.targetFps > 0 ? std::min(q.targetFps, 30) : 30);
+        // Low NON blocca piu' a 30 fps (sul telefono di prova: 15 ms di lavoro
+        // e 18 ms di attesa). A 30 si scende solo con la difesa anti-lag.
+        // La fisica resta a 30 Hz: il disegno interpola, niente scatti.
         q.autoLod = true;
         q.partLod = true;
         q.frustumCull = true;

@@ -46,3 +46,46 @@ PART_PROP(float, hitboxScaleY, "HitboxScaleY", "hitboxScaleY", 1.f, 0.05f, 4.f,
           "Altezza della collisione rispetto al modello. Utile per personaggi e armi.")
 PART_PROP(float, hitboxScaleZ, "HitboxScaleZ", "hitboxScaleZ", 1.f, 0.05f, 4.f,
           "Profondita' della collisione rispetto al modello.")
+PART_PROP(bool,  negative,   "IsNegative", "negative",   false, 0.f, 0.f,
+          "Parte negata (Nega, Ctrl+Maiusc+N): rosa trasparente nello Studio; in un'Unione viene sottratta e fa un buco.")
+PART_PROP(bool,  decalEnabled, "DecalEnabled", "decalEnabled", false, 0.f, 0.f,
+          "Adesivo su una faccia. Face: 0 Destra, 1 Sopra, 2 Dietro, 3 Sinistra, 4 Sotto, 5 Fronte.")
+PART_PROP(float, decalFace, "DecalFace", "decalFace", 5.f, 0.f, 5.f,
+          "Faccia del Decal. 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front.")
+PART_PROP(float, decalR, "DecalR", "decalR", 1.f, 0.f, 1.f, "Rosso del Decal (0–1).")
+PART_PROP(float, decalG, "DecalG", "decalG", 1.f, 0.f, 1.f, "Verde del Decal (0–1).")
+PART_PROP(float, decalB, "DecalB", "decalB", 1.f, 0.f, 1.f, "Blu del Decal (0–1).")
+PART_PROP(float, decalTransparency, "DecalTransparency", "decalTransparency", 0.f, 0.f, 1.f,
+          "Trasparenza del Decal. 0 = pieno, 1 = invisibile.")
+PART_PROP(bool,  highlightEnabled, "HighlightEnabled", "highlightEnabled", false, 0.f, 0.f,
+          "Highlight di Roblox: riempie la part e le disegna un contorno.")
+PART_PROP(float, highlightR, "HighlightR", "highlightR", 1.f, 0.f, 1.f, "Rosso dell'Highlight.")
+PART_PROP(float, highlightG, "HighlightG", "highlightG", 0.85f, 0.f, 1.f, "Verde dell'Highlight.")
+PART_PROP(float, highlightB, "HighlightB", "highlightB", 0.2f, 0.f, 1.f, "Blu dell'Highlight.")
+PART_PROP(bool,  selectionBox, "SelectionBox", "selectionBox", false, 0.f, 0.f,
+          "Contorno attorno alla part, come SelectionBox.")
+PART_PROP(bool,  selectionSphere, "SelectionSphere", "selectionSphere", false, 0.f, 0.f,
+          "Cerchio attorno alla part, come SelectionSphere.")
+PART_PROP(bool,  dragDetector, "DragDetector", "dragDetector", false, 0.f, 0.f,
+          "In Play si trascina con il clic, come DragDetector.")
+PART_PROP(bool,  textureEnabled, "TextureEnabled", "textureEnabled", false, 0.f, 0.f,
+          "Texture a righe sulla faccia. Si ripete: TextureStuds e' quante volte.")
+PART_PROP(float, textureFace, "TextureFace", "textureFace", 5.f, 0.f, 5.f,
+          "Faccia della Texture. Stessi numeri del Decal.")
+PART_PROP(float, textureStuds, "TextureStuds", "textureStuds", 2.f, 1.f, 16.f,
+          "Quante righe sulla faccia.")
+PART_PROP(float, textureR, "TextureR", "textureR", 0.9f, 0.f, 1.f, "Rosso della Texture.")
+PART_PROP(float, textureG, "TextureG", "textureG", 0.9f, 0.f, 1.f, "Verde della Texture.")
+PART_PROP(float, textureB, "TextureB", "textureB", 0.9f, 0.f, 1.f, "Blu della Texture.")
+PART_PROP(bool,  seat, "Seat", "seat", false, 0.f, 0.f,
+          "In Play, camminarci sopra fa sedere. Il salto fa alzare.")
+PART_PROP(bool,  ladder, "Ladder", "ladder", false, 0.f, 0.f,
+          "Scala. In Play ci si attacca e W/S salgono e scendono. Il salto stacca.")
+PART_PROP(bool,  spawnPoint, "SpawnPoint", "spawnPoint", false, 0.f, 0.f,
+          "SpawnLocation. Alla rinascita il giocatore torna qui. SpawnTeam vuoto = tutti.")
+PART_PROP(float, lightKind, "LightKind", "lightKind", 0.f, 0.f, 2.f,
+          "0 PointLight (tutta la sfera), 1 SpotLight (cono), 2 SurfaceLight (dalla faccia).")
+PART_PROP(float, lightAngle, "LightAngle", "lightAngle", 90.f, 1.f, 180.f,
+          "Apertura del cono in gradi, da un bordo all'altro. Vale per SpotLight e SurfaceLight.")
+PART_PROP(float, lightFace, "LightFace", "lightFace", 5.f, 0.f, 5.f,
+          "Faccia della SurfaceLight. 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front.")

@@ -11,6 +11,7 @@
 //   Models.Scale("Auto", 2)                    -> grande il doppio, attorno al centro
 //   Models.SetAnchored("Auto", false)          -> tutto il Model cade (fisica)
 //   Models.SetColor("Auto", Color3.new(1,0,0))
+//   Models.SetDragDetector("Auto", true)       -> in Play il clic sposta tutto il Model
 //
 // Se piu' Model hanno lo stesso nome vale il primo, come FindFirstChild.
 
@@ -114,6 +115,16 @@ inline int setAnchored(lua_State* L) {
     return 0;
 }
 
+inline int setDragDetector(lua_State* L) {
+    const int id = checkGroup(L, 1);
+    luaL_checktype(L, 2, LUA_TBOOLEAN);
+    if (PartGroup* g = partgroups::find(*world(L), id)) {
+        if (g->folder) luaL_error(L, "Models.SetDragDetector: '%s' e' una Folder", g->name.c_str());
+        g->dragDetector = lua_toboolean(L, 2) != 0;
+    }
+    return 0;
+}
+
 inline int setColor(lua_State* L) {
     const int id = checkGroup(L, 1);
     const glm::vec3 c = glm::clamp(checkVec(L, 2, "R", "G", "B"), glm::vec3(0.f), glm::vec3(1.f));
@@ -140,6 +151,7 @@ inline void registerLua(lua_State* L, void* ctx) {
     addFn(L, ctx, scale, "Scale", "Models.Scale");
     addFn(L, ctx, setAnchored, "SetAnchored", "Models.SetAnchored");
     addFn(L, ctx, setColor, "SetColor", "Models.SetColor");
+    addFn(L, ctx, setDragDetector, "SetDragDetector", "Models.SetDragDetector");
     lua_setglobal(L, "Models");
 }
 

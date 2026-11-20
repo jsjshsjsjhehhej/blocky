@@ -76,6 +76,7 @@ inline RenderLodDistances lodDistancesFor(const QualityProfile& q) {
     const float md = std::max(32.f, q.maxDrawDistance);
     if (lodAutoEnabled(q)) {
         d.studOff = md * (q.mobile ? 0.34f : 0.44f);
+        if (q.studLowDetail) d.studOff *= 0.5f;   // Low: stud semplici e solo da vicino
         d.shapeLow = md * (q.mobile ? 0.50f : 0.65f);
     }
     if (q.autoLod || q.cullSmallParts) {
@@ -115,8 +116,7 @@ struct SoftOcclusionBuffer {
     float z[kW * kH]{};
 
     void clear() {
-        for (int i = 0; i < kW * kH; ++i)
-            z[i] = 1.f; // NDC far
+        std::fill(z, z + kW * kH, 1.f); // NDC far
     }
 
     static bool projectAabb(const glm::mat4& viewProj, const glm::vec3& center,
@@ -182,7 +182,7 @@ struct SoftOcclusionBuffer {
         const int span = (x1 - x0 + 1) * (y1 - y0 + 1);
         if (span <= 1) return false;
         // Sample a passo 1 o 2 se rettangolo grande.
-        const int step = (span > 120) ? 2 : 1;
+        const int step = (span > 48) ? 2 : 1;
         int tested = 0;
         for (int y = y0; y <= y1; y += step)
             for (int x = x0; x <= x1; x += step) {
@@ -232,7 +232,10 @@ inline int buildAndTestOcclusion(const PartVec& parts, const CandVec& cands,
     if ((int)occs.size() > maxOccluders)
         occs.resize(maxOccluders);
 
+    static std::vector<uint8_t> isOcc;
+    isOcc.assign(cands.size(), 0);
     for (const Occ& o : occs) {
+        isOcc[(size_t)o.candIdx] = 1;
         const auto& p = parts[cands[o.candIdx].i];
         buf.rasterizeOccluder(viewProj, p.position, p.size * 0.5f);
     }
@@ -240,12 +243,7 @@ inline int buildAndTestOcclusion(const PartVec& parts, const CandVec& cands,
     int culled = 0;
     for (int ci = 0; ci < (int)cands.size(); ++ci) {
         const auto& c = cands[ci];
-        if (c.transparent) continue;
-        // Non occludere i grandi occluder stessi (restano visibili).
-        bool isOcc = false;
-        for (const Occ& o : occs)
-            if (o.candIdx == ci) { isOcc = true; break; }
-        if (isOcc) continue;
+        if (c.transparent || isOcc[(size_t)ci]) continue;
 
         const auto& p = parts[c.i];
         if (buf.isFullyOccluded(viewProj, p.position, p.size * 0.5f)) {

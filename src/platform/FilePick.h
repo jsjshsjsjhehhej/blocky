@@ -34,6 +34,7 @@
  * un percorso vuoto. Un'attesa che non finisce mai sarebbe peggio di un no.
  */
 
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -94,17 +95,20 @@ inline void requestFile(const char* title, const char* mimeType, FilePickCallbac
     if (androidFilePickHook()) androidFilePickHook()(mimeType ? mimeType : "*/*");
     else deliverPickedFile("");
 #elif defined(_WIN32)
-    (void)mimeType;
     wchar_t file[MAX_PATH] = {};
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter =
-        L"Modelli 3D (*.glb;*.gltf;*.fbx;*.obj)\0*.glb;*.gltf;*.fbx;*.obj\0"
-        L"Tutti i file\0*.*\0";
+    // Il filtro di partenza dipende da cosa si sta chiedendo. Prima era sempre
+    // "modelli 3D", e default.project.json non compariva nella cartella.
+    const bool json = mimeType && std::strstr(mimeType, "json") != nullptr;
+    ofn.lpstrFilter = json
+        ? L"Progetto (*.json)\0*.json\0Tutti i file\0*.*\0"
+        : L"Modelli 3D (*.glb;*.gltf;*.fbx;*.obj)\0*.glb;*.gltf;*.fbx;*.obj\0"
+          L"Tutti i file\0*.*\0";
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
-    ofn.lpstrDefExt = L"glb";
+    ofn.lpstrDefExt = json ? L"json" : L"glb";
 
     std::wstring wtitle;
     if (title) {

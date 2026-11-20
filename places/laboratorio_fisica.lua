@@ -1146,11 +1146,12 @@ RunService.Heartbeat:Connect(function(dt)
 	if nearAcc > 0.5 then
 		nearAcc = 0
 		local p = playerPos()
+		local restarted = false   -- una prova per volta: tutte insieme erano troppo per un telefono
 		for _, st in ipairs(stations) do
 			if st.ready and not st.busy then
 				local c = st.cf.Position
 				local near = p == nil or math.sqrt((c.X - p.X) ^ 2 + (c.Z - p.Z) ^ 2) < NEAR
-				if near and not st.active then restart(st)
+				if near and not st.active and not restarted then restart(st) restarted = true
 				elseif not near and st.active then freeze(st) end
 			end
 		end

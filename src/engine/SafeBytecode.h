@@ -52,7 +52,9 @@ inline bool compileLuaToBytecode(const std::string& source,
     // errore di sintassi con un codice di ritorno: lo si scopre provando a
     // caricarlo con luau_load, che sa interpretare il marcatore di errore
     // che Luau::compile incorpora nel bytecode stesso.
-    const std::string bc = Luau::compile(source);
+    Luau::CompileOptions opts;
+    opts.optimizationLevel = 2;   // come Roblox per i giochi pubblicati (LuaRuntime::gameCompileOptions)
+    const std::string bc = Luau::compile(source, opts);
     lua_State* L = luaL_newstate();
     if (!L) {
         err = "luaL_newstate fallita";

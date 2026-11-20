@@ -82,11 +82,25 @@ static const StudioInsertItem kInsertItems[] = {
     {"Parts", "SpawnLocation", "Punto spawn player", 7},
     {"UI", "TextLabel", "Testo ScreenGui", 8},
     {"UI", "TextButton", "Bottone ScreenGui", 9},
+    {"UI", "ScreenGui", "Schermo (come StarterGui)", 32},
+    {"UI", "Frame", "Riquadro", 33},
+    {"UI", "ScrollingFrame", "Riquadro che scorre", 34},
+    {"UI", "TextBox", "Casella di testo", 37},
+    {"UI", "ImageLabel", "Immagine", 38},
+    {"UI", "ImageButton", "Immagine cliccabile", 39},
+    {"UI", "UIListLayout", "Lista verticale", 40},
+    {"UI", "UIGridLayout", "Griglia", 41},
+    {"UI", "UIPadding", "Margine interno", 42},
+    {"UI", "UICorner", "Angoli tondi", 43},
+    {"UI", "UIStroke", "Bordo", 44},
+    {"UI", "BillboardGui", "Scritta sopra una Part", 45},
+    {"UI", "SurfaceGui", "Scritta sulla faccia di una Part", 46},
     {"Audio", "Sound", "Emitter audio", 10},
     {"Models", "Import Model…", "FBX / GLB", 11},
     {"Scripting", "Script on selection", "Aggiunge Script alla Part", 12},
     {"Tools", "Pistol (StarterPack)", "Arma hotbar", 13},
     {"Tools", "Sword (StarterPack)", "Spada hotbar", 14},
+    {"Tools", "Tool + Handle", "Tool Roblox con Part Handle", 31},
     {"Gameplay", "Coin Pad", "Pad che da Currency", 15},
     {"Gameplay", "Kill Brick", "Part che fa danno al tocco", 16},
     {"Gameplay", "Speed Pad", "Aumenta WalkSpeed", 17},
@@ -280,6 +294,27 @@ static void studioDuplicateSelectionOffset() {
 
 enum class StudioAlignMode { Min, Center, Max };
 
+static void studioTagSelection(int kind) {
+    for (int i : studioActivePartIndices()) {
+        if (!partIndexValid(i) || g_world.parts[i].locked) continue;
+        auto& p = g_world.parts[i];
+        if (kind == 0) {
+            p.decalEnabled = true;
+            p.decalFace = 5.f;
+            p.decalR = 0.90f; p.decalG = 0.16f; p.decalB = 0.12f;
+            p.decalTransparency = 0.f;
+        } else if (kind == 1) {
+            p.highlightEnabled = true;
+            p.highlightR = 1.f; p.highlightG = 0.82f; p.highlightB = 0.15f;
+        } else if (kind == 2) {
+            p.selectionBox = true;
+        } else if (kind == 3) {
+            p.dragDetector = true;
+        }
+    }
+    markPlaceDirty();
+}
+
 static void studioAlignSelection(int axis, StudioAlignMode mode) {
     auto idxs = studioActivePartIndices();
     if (idxs.size() < 2) {
@@ -361,6 +396,8 @@ static void studioPaintAtSelection() {
 // ---------------------------------------------------------------------------
 // Insert Object actions
 // ---------------------------------------------------------------------------
+
+static void insertRobloxWidget(const char* className);   // Studio2020Ui.h
 
 static void studioRunInsertKind(int kind) {
     switch (kind) {
@@ -577,6 +614,37 @@ end)
         markPlaceDirty();
         break;
     }
+    case 31: {
+        // Tool di Studio: entra nella hotbar e il Handle (una Part) si
+        // disegna in mano quando lo equipaggi. Le altre Part parentate
+        // restano attaccate al Handle.
+        BackpackItem& tool = g_world.addBackpackItem("Tool", 1, BackpackTool::None);
+        tool.requiresHandle = true;
+        tool.toolTip = "Tool";
+        WorkspacePart& handle = g_world.addPart("Handle", {0, 0, 0}, {1.f, 4.f, 1.f},
+                                                {0.75f, 0.78f, 0.82f});
+        handle.material = PartMaterial::Metal;
+        g_world.attachPartToTool((int)g_world.parts.size() - 1, (int)g_world.backpack.size() - 1);
+        g_selectedBackpack = (int)g_world.backpack.size() - 1;
+        g_gripPreviewSlot = g_selectedBackpack;
+        markPlaceDirty();
+        break;
+    }
+    case 32: insertRobloxWidget("ScreenGui"); break;
+    case 33: insertRobloxWidget("Frame"); break;
+    case 34: insertRobloxWidget("ScrollingFrame"); break;
+    case 35: insertRobloxWidget("TextLabel"); break;
+    case 36: insertRobloxWidget("TextButton"); break;
+    case 37: insertRobloxWidget("TextBox"); break;
+    case 38: insertRobloxWidget("ImageLabel"); break;
+    case 39: insertRobloxWidget("ImageButton"); break;
+    case 40: insertRobloxWidget("UIListLayout"); break;
+    case 41: insertRobloxWidget("UIGridLayout"); break;
+    case 42: insertRobloxWidget("UIPadding"); break;
+    case 43: insertRobloxWidget("UICorner"); break;
+    case 44: insertRobloxWidget("UIStroke"); break;
+    case 45: insertRobloxWidget("BillboardGui"); break;
+    case 46: insertRobloxWidget("SurfaceGui"); break;
     default: break;
     }
 }
@@ -611,43 +679,8 @@ static void drawMaterialPaletteBody(PartMaterial* applyTo = nullptr) {
 // UI: Insert Object
 // ---------------------------------------------------------------------------
 
-static void drawInsertObjectPopup() {
-    if (!g_showInsertObject) return;
-    ImGui::SetNextWindowSize({460.f, 420.f}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Insert Object", &g_showInsertObject)) {
-        ImGui::End();
-        return;
-    }
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##insq", "Cerca (Part, Kill Brick, Sound…)",
-                             g_insertSearchBuf, sizeof(g_insertSearchBuf));
-    ImGui::Separator();
-    ImGui::BeginChild("##inslist", {0, -36}, false);
-    const char* lastCat = nullptr;
-    for (int i = 0; i < kInsertItemCount; ++i) {
-        const auto& it = kInsertItems[i];
-        if (g_insertSearchBuf[0]) {
-            std::string hay = std::string(it.category) + " " + it.name + " " + it.hint;
-            for (char& c : hay) c = (char)std::tolower((unsigned char)c);
-            std::string q = g_insertSearchBuf;
-            for (char& c : q) c = (char)std::tolower((unsigned char)c);
-            if (hay.find(q) == std::string::npos) continue;
-        }
-        if (!lastCat || std::strcmp(lastCat, it.category) != 0) {
-            if (lastCat) ImGui::Separator();
-            ImGui::TextColored({0.55f, 0.8f, 1.f, 1.f}, "%s", it.category);
-            lastCat = it.category;
-        }
-        if (ImGui::Selectable(it.name)) {
-            studioRunInsertKind(it.kind);
-            g_showInsertObject = false;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", it.hint);
-    }
-    ImGui::EndChild();
-    if (ImGui::Button("Chiudi", {-1, 0})) g_showInsertObject = false;
-    ImGui::End();
-}
+static void drawInsertObjectWindowPro();   // StudioToolsPro.h
+static void drawInsertObjectPopup() { drawInsertObjectWindowPro(); }
 
 // ---------------------------------------------------------------------------
 // UI: Command bar (eval Luau)
@@ -834,14 +867,14 @@ static void drawSnapSettingsWindow() {
     ImGui::SetNextWindowSize({320.f, 220.f}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Snap / Grid", &g_showSnapSettings)) {
         ImGui::Checkbox("Snap enabled", &g_studioSnapEnabled);
-        ImGui::SliderFloat("Move snap", &g_studioSnapMove, 0.05f, 4.f, "%.2f");
-        ImGui::SliderFloat("Rotate snap °", &g_studioSnapRotate, 1.f, 45.f, "%.0f");
-        ImGui::SliderFloat("Scale snap", &g_studioSnapScale, 0.05f, 2.f, "%.2f");
+        ImGui::SliderFloat("Move snap", &g_studioSnapMove, kMinPartSize, 4.f, "%.3f");
+        ImGui::SliderFloat("Rotate snap °", &g_studioSnapRotate, 0.1f, 45.f, "%.1f");
+        ImGui::SliderFloat("Scale snap", &g_studioSnapScale, kMinPartSize, 2.f, "%.3f");
         ImGui::Separator();
         ImGui::Checkbox("Show grid", &g_studioGridVisible);
-        ImGui::SliderFloat("Grid size", &g_studioGridSize, 1.f, 16.f, "%.0f");
+        ImGui::SliderFloat("Grid size", &g_studioGridSize, 0.05f, 16.f, "%.2f");
         ImGui::Checkbox("Spazio locale del gizmo (Ctrl+L)", &g_studioLocalSpace);
-        ImGui::TextDisabled("Ctrl = no snap · Shift = fine snap");
+        ImGui::TextDisabled("Ctrl = no snap · Shift = passo / 10");
     }
     ImGui::End();
 }
@@ -1004,6 +1037,12 @@ static void drawStudioStatusBar() {
             p.locked ? " · LOCKED" : "", multi);
     } else if (g_selectedModel >= 0 && g_selectedModel < (int)g_world.models.size()) {
         std::snprintf(buf, sizeof(buf), "Model \"%s\"", g_world.models[g_selectedModel].name.c_str());
+    } else if (g_selectedLabel >= 0 && g_selectedLabel < (int)g_world.labels.size()) {
+        const auto& l = g_world.labels[(size_t)g_selectedLabel];
+        std::snprintf(buf, sizeof(buf),
+            "%s \"%s\" · pos %.0f,%.0f · size %.0fx%.0f · Z %d%s",
+            l.className.c_str(), l.name.c_str(), l.offsetX, l.offsetY, l.sizeW, l.sizeH, l.zIndex,
+            l.uiAttached ? " · acceso" : "");
     } else {
         std::snprintf(buf, sizeof(buf), "%d parts · snap %s · grid %.0f · %s",
             (int)g_world.parts.size(),
@@ -1012,6 +1051,26 @@ static void drawStudioStatusBar() {
             g_paintToolActive ? "PAINT" : "edit");
     }
     ImGui::TextUnformatted(buf);
+    ImGui::SameLine();
+    const float destra = ImGui::GetWindowWidth() - 8.f;
+    char meta[96];
+    std::snprintf(meta, sizeof(meta), "%d parti", (int)g_world.parts.size());
+    const float metaW = ImGui::CalcTextSize(meta).x;
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), destra - metaW - 210.f));
+    if (ImGui::SmallButton(g_studioSnapEnabled ? "Snap" : "Snap off"))
+        g_studioSnapEnabled = !g_studioSnapEnabled;
+    ImGui::SameLine();
+    char griglia[32];
+    if (g_studioGridVisible)
+        std::snprintf(griglia, sizeof(griglia), "Griglia %.0f", g_studioGridSize);
+    else
+        std::snprintf(griglia, sizeof(griglia), "Griglia off");
+    if (ImGui::SmallButton(griglia)) {
+        g_studioGridVisible = !g_studioGridVisible;
+        if (g_studioGridVisible && g_studioGridSize < 0.5f) g_studioGridSize = 4.f;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%.0f fps", g_fps);
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
@@ -1038,11 +1097,12 @@ static void studioFeaturesPollHotkeys() {
         g_studioGridVisible = !g_studioGridVisible;
     if (ImGui::IsKeyPressed(ImGuiKey_Period) && io.KeyCtrl) {
         // Cycle snap presets
-        static const float kMoves[] = {0.1f, 0.25f, 0.5f, 1.f, 2.f};
+        static const float kMoves[] = {0.001f, 0.01f, 0.1f, 0.25f, 1.f, 2.f};
         int best = 0;
-        for (int i = 0; i < 5; ++i)
-            if (std::fabs(g_studioSnapMove - kMoves[i]) < 0.001f) best = i;
-        g_studioSnapMove = kMoves[(best + 1) % 5];
+        for (int i = 0; i < 6; ++i)
+            if (std::fabs(g_studioSnapMove - kMoves[i]) < 0.0001f) best = i;
+        g_studioSnapMove = kMoves[(best + 1) % 6];
+        g_studioSnapScale = g_studioSnapMove;
         g_studioSnapEnabled = true;
         g_exportMsg = "Snap move = " + std::to_string(g_studioSnapMove);
     }
@@ -1182,7 +1242,8 @@ static void studioMirrorSelection(int axis) {
 }
 
 static void studioNudgeSelection(int axis, float dir) {
-    float step = g_studioSnapEnabled ? g_studioSnapMove : 0.25f;
+    float step = g_studioSnapEnabled ? studioSnapMoveStep() : kMinPartSize;
+    if (step <= 0.f) step = kMinPartSize;
     for (int i : studioActivePartIndices()) {
         if (!partIndexValid(i) || g_world.parts[i].locked) continue;
         g_world.parts[i].position[axis] += step * dir;
@@ -1195,7 +1256,7 @@ static void studioUniformScaleSelection(float mul) {
     for (int i : studioActivePartIndices()) {
         if (!partIndexValid(i) || g_world.parts[i].locked) continue;
         g_world.parts[i].size *= mul;
-        g_world.parts[i].size = glm::max(g_world.parts[i].size, glm::vec3(0.05f));
+        g_world.parts[i].size = glm::max(g_world.parts[i].size, glm::vec3(kMinPartSize));
     }
     markPlaceDirty();
 }
@@ -1384,9 +1445,9 @@ static void studioApplyTypeInToSelection() {
         if (!partIndexValid(i) || g_world.parts[i].locked) continue;
         auto& p = g_world.parts[i];
         p.position = {g_typeInPos[0], g_typeInPos[1], g_typeInPos[2]};
-        p.size = {std::max(0.05f, g_typeInSize[0]),
-                  std::max(0.05f, g_typeInSize[1]),
-                  std::max(0.05f, g_typeInSize[2])};
+        p.size = {std::max(kMinPartSize, g_typeInSize[0]),
+                  std::max(kMinPartSize, g_typeInSize[1]),
+                  std::max(kMinPartSize, g_typeInSize[2])};
         p.rotation = {glm::radians(g_typeInRot[0]),
                       glm::radians(g_typeInRot[1]),
                       glm::radians(g_typeInRot[2])};
@@ -1550,12 +1611,12 @@ static void drawTransformTypeInWindow() {
     }
     if (ImGui::Button("Leggi da selezione"))
         studioSyncTypeInFromSelection();
-    ImGui::DragFloat3("Position", g_typeInPos, 0.1f);
-    ImGui::DragFloat3("Size", g_typeInSize, 0.05f, 0.05f, 512.f);
-    ImGui::DragFloat3("Rotation °", g_typeInRot, 1.f);
+    ImGui::DragFloat3("Position", g_typeInPos, 0.001f);
+    ImGui::DragFloat3("Size", g_typeInSize, 0.001f, kMinPartSize, 512.f, "%.4f");
+    ImGui::DragFloat3("Rotation °", g_typeInRot, 0.1f);
     if (ImGui::Button("Applica", {-1, 28}))
         studioApplyTypeInToSelection();
-    ImGui::TextDisabled("Snap move: %.2f", g_studioSnapMove);
+    ImGui::TextDisabled("Snap move: %.3f", g_studioSnapMove);
     ImGui::End();
 }
 

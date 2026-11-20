@@ -27,6 +27,10 @@
 #include "systems/Prossimita.h"
 #include "engine/StudioProApis.h"
 #include "engine/LuaPrelude.h"
+#include "platform/FrameProfiler.h"   // plat::prof::mark (BLOCKY_PROFILE)
+#include "engine/LuaCsgBind.h"
+#include "engine/RobloxEnumsData.h"
+#include "engine/RobloxApiData.h"
 #include "engine/anim/AnimIO.h"
 #include "engine/anim/CharacterAnimator.h"
 #include "platform/CrashHandler.h"
@@ -89,8 +93,15 @@ public:
     Classifica* classifica = nullptr;
     Prossimita* proximity = nullptr;
     float* cameraFov = nullptr;       // -> g_cam.fov
+    int viewW = 1280;
+    int viewH = 720;
+    // TextBox con la tastiera (indice label), -1 = nessuno.
+    int guiTextFocus = -1;
     bool* firstPersonFlag = nullptr;  // -> g_firstPerson
     int cameraType = 0; // 0 Custom · 1 Scriptable · 2 FirstPerson
+    bool scriptCamOn = false;
+    glm::vec3 scriptCamPos{0.f, 8.f, 16.f};
+    glm::vec3 scriptCamLook{0.f, 0.f, -1.f};
     bool runIsStudio = false;
     bool runIsClient = false;
     bool runIsServer = true;
@@ -101,10 +112,22 @@ public:
         float accum = 0.f;
         bool enabled = true;
         int preset = 0; // ParticlePreset
+        float speed = 6.f;
+        float speedMin = -1.f;   // <0: un po' sotto speed. NumberRange scrive Min e Max
+        float life = 0.6f;
+        float size0 = 0.25f;
+        float size1 = 0.04f;
+        float spread = 1.f;      // 0 = dritto, 1 = tutto intorno
+        float gravity = -8.f;
+        float drag = 1.4f;
+        bool customMotion = false;
         glm::vec3 color{-1, -1, -1};
+        std::string className; // Fire, Smoke, Sparkles, ParticleEmitter
+        std::string name;
     };
     std::vector<ScriptParticleEmitter> scriptEmitters_;
     std::vector<std::string> printLog;
+    uint64_t printCount = 0;   // righe mai scritte (l Output di Studio ci da' l'orario)
     std::string lastError;
     bool ok = false;
 
@@ -147,6 +170,7 @@ public:
     // Rig R6 sulle misure del player: le animazioni dell'Animation Studio (rig
     // "Inserisci Rig R6") ci girano osso per osso.
     blk::anim::CharacterAnimator charAnim;
+    std::map<int, blk::anim::CharacterAnimator> npcAnim_;
 
     void setupCharacterRig() {
         if (charAnim.ready()) return;
@@ -160,22 +184,31 @@ public:
      * Mette la posa delle animazioni nelle parti del corpo del player (le
      * disegna BlockPlayer). Le parti senza animazione restano al motore.
      */
-    void applyCharacterAnimation(Humanoid& h) {
-        if (!charAnim.ready()) return;
+    void applyAnimatorToHumanoid(blk::anim::CharacterAnimator& anim, Humanoid& h) {
+        if (!anim.ready()) return;
         std::vector<float> boneW;
-        const blk::anim::Pose p = charAnim.pose(&boneW);
-        const std::vector<blk::anim::Transform> parts = charAnim.partTransforms(p);
-        for (size_t i = 0; i < charAnim.binds.size() && i < parts.size(); ++i) {
-            const auto& b = charAnim.binds[i];
+        const blk::anim::Pose p = anim.pose(&boneW);
+        const std::vector<blk::anim::Transform> parts = anim.partTransforms(p);
+        for (size_t i = 0; i < anim.binds.size() && i < parts.size(); ++i) {
+            const auto& b = anim.binds[i];
             const float w = b.bone >= 0 && b.bone < (int)boneW.size() ? boneW[(size_t)b.bone] : 0.f;
             for (auto& part : h.parts) {
                 if (part.name != b.part) continue;
                 if (w <= 1e-4f) {
-                    if (part.animWeight > 0.f) { part.anim = RigPose{}; part.animWeight = 0.f; }
+                    // Senza tracce degli script: resta la posa delle animazioni di base (se c'e').
+                    if (part.animWeight > 0.f && !part.animFromDefault) { part.anim = RigPose{}; part.animWeight = 0.f; }
                     break;
                 }
                 glm::vec3 pos, eul;
                 blk::anim::toBlockPartPose(parts[i], part.offset, part.pivot, pos, eul);
+                if (part.animFromDefault) {
+                    // Sopra le animazioni di base, come una traccia di priorita' piu' alta.
+                    const float k = std::min(1.f, w);
+                    part.anim.pos = glm::mix(part.anim.pos, pos, k);
+                    part.anim.rot = glm::mix(part.anim.rot, eul, k);
+                    part.animWeight = 1.f;
+                    break;
+                }
                 part.anim.pos = pos;
                 part.anim.rot = eul;
                 part.anim.scale = glm::vec3(1.f);
@@ -185,11 +218,25 @@ public:
         }
     }
 
+    void applyCharacterAnimation(Humanoid& h) { applyAnimatorToHumanoid(charAnim, h); }
+
     /** Ogni frame (da fireHeartbeat): tempo delle tracce ed eventi agli script. */
     void tickCharacterAnimation(float dt) {
-        if (!L || !charAnim.ready()) return;
+        if (!L) return;
         std::vector<blk::anim::TrackEvent> events;
-        charAnim.update(dt, events);
+        if (charAnim.ready()) charAnim.update(dt, events);
+        if (workspace) {
+            for (auto it = npcAnim_.begin(); it != npcAnim_.end();) {
+                if (it->first < 0 || it->first >= (int)workspace->npcs.size()) {
+                    it = npcAnim_.erase(it);
+                    continue;
+                }
+                std::vector<blk::anim::TrackEvent> ignore;
+                it->second.update(dt, ignore);
+                applyAnimatorToHumanoid(it->second, workspace->npcs[(size_t)it->first].humanoid);
+                ++it;
+            }
+        }
         for (const auto& e : events) {
             const auto it = trackRefs_.find(e.track);
             if (it == trackRefs_.end()) continue;
@@ -349,6 +396,40 @@ public:
     // budget scattava SUBITO e chiamava luaL_error senza nessun pcall che
     // lo intercettasse — la causa reale dello STACK_OVERFLOW in Test.
     bool initializing_ = false;
+    unsigned interruptTick_ = 0;   // interruptCallback: l'orologio si legge una volta ogni 256
+    // CoreScripts (src/engine/lua/core): la barra della vita la disegna il Luau,
+    // il C++ (PlayingHudPanel.h, drawHealthBarHud) no.
+    bool coreHealthBar = false;
+
+    /** __blkCoreGui("Health", true): una CoreScript Luau prende il posto di un pezzo di interfaccia del C++. */
+    static int luaCoreGui(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* what = luaL_checkstring(ls, 1);
+        // __blkCoreGui("Heartbeat", f): l'Heartbeat delle CoreScripts. Il reset
+        // degli script del gioco (clearHeartbeats, a ogni avvio del Test) non lo
+        // tocca; se ne va solo con lo stato Lua (shutdown).
+        if (rt && std::strcmp(what, "Heartbeat") == 0 && lua_isfunction(ls, 2)) {
+            lua_pushvalue(ls, 2);
+            rt->coreHeartbeatRefs_.push_back(blockyLuaRef(ls));
+            return 0;
+        }
+        const bool on = lua_toboolean(ls, 2) != 0;
+        if (rt && std::strcmp(what, "Health") == 0) rt->coreHealthBar = on;
+        return 0;
+    }
+
+    /**
+     * Opzioni del compilatore Luau per il codice dei giochi: livello 2 (funzioni
+     * piccole messe in linea, cicli srotolati, costanti piegate), come Roblox per
+     * i giochi pubblicati. Col debugger acceso livello 1 e tutti i nomi delle
+     * variabili, cosi' i punti di interruzione vedono tutto.
+     */
+    static Luau::CompileOptions gameCompileOptions(bool debugging) {
+        Luau::CompileOptions o;
+        o.optimizationLevel = debugging ? 1 : 2;
+        if (debugging) o.debugLevel = 2;
+        return o;
+    }
 
     struct TaskWait {
         int coRef = LUA_NOREF;
@@ -395,10 +476,190 @@ public:
     // la causa reale degli STACK_OVERFLOW visti in Test. Ignorare i gc>=0
     // rende il controllo budget sicuro ovunque, anche in codice futuro,
     // senza dover ricordarsi di resettare callStart_ in ogni nuovo punto.
+    // ---- Debugger (Studio > Test: punti di interruzione, Continua, Passo) ----
+    // Le righe arrivano dallo Studio (debugBreakpoints, per nome dello script:
+    // "Porta.Script"). Quando uno script ci passa, Luau chiama debugBreakCallback:
+    // si salvano riga, variabili locali e chiamate; se lo script puo' fermarsi
+    // (corpo dello script, task, WaitForChild) si ferma davvero e riparte con
+    // debugContinue. Dentro un evento chiamato dal motore (Touched, Heartbeat)
+    // non ci si puo' fermare: si mostrano lo stesso riga e variabili.
+public:
+    struct DebugVar { std::string name, value, type; };
+    struct DebugPause {
+        bool active = false;      // c'e' qualcosa da mostrare
+        bool paused = false;      // lo script e' davvero fermo (si puo' continuare)
+        std::string chunk;
+        int line = 0;
+        std::vector<DebugVar> locals;
+        std::vector<std::string> stack;
+        int hits = 0;
+    };
+    std::map<std::string, std::set<int>> debugBreakpoints;   // "Porta.Script" -> righe (da 1)
+    DebugPause debugPause;
+
+    bool debugIsPaused() const { return debugPausedRef_ != LUA_NOREF; }
+
+    /** Continua (step = fermati alla prossima riga che esegue). */
+    void debugContinue(bool step) {
+        if (!L || debugPausedRef_ == LUA_NOREF || !debugPausedThread_) return;
+        lua_State* co = debugPausedThread_;
+        const int ref = debugPausedRef_;
+        debugPausedRef_ = LUA_NOREF;
+        debugPausedThread_ = nullptr;
+        debugPause.paused = false;
+        debugStepRequest_ = step;
+        debugStepFromLine_ = debugPause.line;
+        debugSkipThread_ = co;
+        debugSkipLine_ = debugPause.line;
+        lua_singlestep(co, step ? 1 : 0);
+        callStart_ = std::chrono::steady_clock::now();
+        const int st = lua_resume(co, L, 0);
+        if (st == LUA_BREAK) {
+            onDebugBreak(co);
+        } else {
+            lua_singlestep(co, 0);
+            if (st != LUA_OK && st != LUA_YIELD) {
+                lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "errore";
+                printLog.push_back("Error: " + lastError);
+                ++printCount;
+            }
+        }
+        lua_unref(L, ref);
+    }
+
+    /** Ferma: lo script in pausa viene abbandonato (come Stop nel debugger di Roblox). */
+    void debugAbandon() {
+        if (L && debugPausedRef_ != LUA_NOREF) lua_unref(L, debugPausedRef_);
+        debugPausedRef_ = LUA_NOREF;
+        debugPausedThread_ = nullptr;
+        debugPause = DebugPause{};
+        debugStepRequest_ = false;
+    }
+
+private:
+    int debugPausedRef_ = LUA_NOREF;
+    lua_State* debugPausedThread_ = nullptr;
+    bool debugStepRequest_ = false;
+    int debugStepFromLine_ = 0;   // il Passo si ferma solo quando la riga cambia
+    // Riprendendo, Luau riesegue l'istruzione del punto di interruzione: quella
+    // prima ripetizione (stesso script, stessa riga) non deve fermarlo di nuovo.
+    lua_State* debugSkipThread_ = nullptr;
+    int debugSkipLine_ = 0;
+
+    void applyBreakpoints(const std::string& chunkname) {
+        const std::string name = chunkname.size() > 1 && chunkname[0] == '=' ? chunkname.substr(1) : chunkname;
+        auto it = debugBreakpoints.find(name);
+        if (it == debugBreakpoints.end()) return;
+        for (int line : it->second) lua_breakpoint(L, -1, line, 1);
+    }
+
+    /** Uno script si e' fermato: lo si tiene vivo (riferimento) finche' non si continua. */
+    void onDebugBreak(lua_State* co) {
+        if (!L || !co) return;
+        if (debugPausedRef_ != LUA_NOREF) lua_unref(L, debugPausedRef_);
+        lua_checkstack(co, 2);   // nello stack dello script fermo puo' non esserci posto
+        lua_checkstack(L, 2);
+        lua_pushthread(co);
+        lua_xmove(co, L, 1);
+        debugPausedRef_ = lua_ref(L, -1);
+        lua_pop(L, 1);
+        debugPausedThread_ = co;
+        debugPause.paused = true;
+    }
+
+    static std::string debugValueText(lua_State* ls, int idx, std::string& type) {
+        type = luaL_typename(ls, idx);
+        char buf[96];
+        switch (lua_type(ls, idx)) {
+        case LUA_TNIL: return "nil";
+        case LUA_TBOOLEAN: return lua_toboolean(ls, idx) ? "true" : "false";
+        case LUA_TNUMBER: std::snprintf(buf, sizeof(buf), "%.10g", (double)lua_tonumber(ls, idx)); return buf;
+        case LUA_TSTRING: {
+            std::string v = lua_tostring(ls, idx);
+            if (v.size() > 80) v = v.substr(0, 80) + "...";
+            return "\"" + v + "\"";
+        }
+        case LUA_TTABLE: {
+            // Instance di Blocky: si mostra il nome (rawget, niente metametodi)
+            const int t = lua_absindex(ls, idx);
+            lua_pushstring(ls, "Name");
+            lua_rawget(ls, t);
+            std::string out = lua_isstring(ls, -1) ? std::string(lua_tostring(ls, -1)) : std::string("table");
+            lua_pop(ls, 1);
+            return out;
+        }
+        default:
+            std::snprintf(buf, sizeof(buf), "%s", luaL_typename(ls, idx));
+            return buf;
+        }
+    }
+
+    void captureDebugState(lua_State* ls) {
+        debugPause.active = true;
+        ++debugPause.hits;
+        debugPause.locals.clear();
+        debugPause.stack.clear();
+        lua_Debug ar;
+        if (lua_getinfo(ls, 0, "sl", &ar)) {
+            debugPause.chunk = ar.source ? (ar.source[0] == '=' ? ar.source + 1 : ar.source) : "?";
+            debugPause.line = ar.currentline;
+        }
+        lua_checkstack(ls, 4);
+        for (int i = 1; i <= 64; ++i) {
+            const char* n = lua_getlocal(ls, 0, i);
+            if (!n) break;
+            if (n[0] != '(') {   // "(temporary)" & co.: interni del compilatore
+                DebugVar v;
+                v.name = n;
+                v.value = debugValueText(ls, -1, v.type);
+                debugPause.locals.push_back(v);
+            }
+            lua_pop(ls, 1);
+        }
+        for (int level = 0; level < 12; ++level) {
+            lua_Debug fr;
+            if (!lua_getinfo(ls, level, "sln", &fr)) break;
+            char line[160];
+            std::snprintf(line, sizeof(line), "%s:%d %s", fr.source ? (fr.source[0] == '=' ? fr.source + 1 : fr.source) : "?",
+                          fr.currentline, fr.name ? fr.name : "");
+            debugPause.stack.push_back(line);
+        }
+    }
+
+    static void debugBreakCallback(lua_State* ls, lua_Debug*) {
+        LuaRuntime* rt = static_cast<LuaRuntime*>(lua_callbacks(ls)->userdata);
+        if (!rt) return;
+        if (ls == rt->debugSkipThread_) {
+            lua_Debug here;
+            const bool same = lua_getinfo(ls, 0, "l", &here) && here.currentline == rt->debugSkipLine_;
+            rt->debugSkipThread_ = nullptr;
+            if (same) return;   // e' la ripresa dallo stesso punto: si va avanti
+        }
+        rt->captureDebugState(ls);
+        if (lua_isyieldable(ls)) lua_break(ls);   // si ferma davvero (riparte con debugContinue)
+    }
+
+    static void debugStepCallback(lua_State* ls, lua_Debug*) {
+        LuaRuntime* rt = static_cast<LuaRuntime*>(lua_callbacks(ls)->userdata);
+        if (!rt || !rt->debugStepRequest_ || !lua_isyieldable(ls)) return;
+        lua_Debug here;
+        if (lua_getinfo(ls, 0, "l", &here) && here.currentline == rt->debugStepFromLine_) return;   // ancora la stessa riga
+        rt->debugStepRequest_ = false;
+        lua_singlestep(ls, 0);
+        rt->captureDebugState(ls);
+        lua_break(ls);
+    }
+
+public:
     static void interruptCallback(lua_State* ls, int gc) {
         if (gc >= 0) return;
         LuaRuntime* rt = static_cast<LuaRuntime*>(lua_callbacks(ls)->userdata);
         if (!rt || rt->initializing_) return;
+        // Luau chiama qui a ogni salto di ciclo e a ogni chiamata: leggere
+        // l'orologio ogni volta costava piu' dello script (un ciclo di calcoli
+        // 5-6 volte piu' lento). Si guarda una volta ogni 256: il limite resta
+        // quello, scatta al massimo qualche microsecondo dopo.
+        if ((++rt->interruptTick_ & 255u) != 0) return;
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - rt->callStart_).count();
         if (elapsed > LuaScriptSecurity::kScriptHardTimeoutMs) {
@@ -472,6 +733,11 @@ public:
         // Come Roblox: bit32 e os (in Luau os ha solo clock/date/time/difftime).
         openLib(luaopen_bit32, LUA_BITLIBNAME);
         openLib(luaopen_os, LUA_OSLIBNAME);
+        // Librerie Luau che servono a un gioco: byte (buffer) e vector.
+        // debug di Luau e' solo info + traceback, niente getupvalue.
+        openLib(luaopen_buffer, LUA_BUFFERLIBNAME);
+        openLib(luaopen_vector, LUA_VECLIBNAME);
+        openLib(luaopen_debug, LUA_DBLIBNAME);
         lua_pushnil(L); lua_setglobal(L, "dofile");
         lua_pushnil(L); lua_setglobal(L, "loadfile");
         lua_pushnil(L); lua_setglobal(L, "load");
@@ -513,6 +779,8 @@ public:
         CrashHandler::note("LuaRuntime::init: post openSandboxLibs");
         lua_callbacks(L)->userdata = this;
         lua_callbacks(L)->interrupt = interruptCallback;
+        lua_callbacks(L)->debugbreak = debugBreakCallback;   // punti di interruzione (debugger dello Studio)
+        lua_callbacks(L)->debugstep = debugStepCallback;     // "Passo" del debugger
         // Prelude Luau (Signal, CFrame, Random...) PRIMA di registerApi: le
         // tabelle degli eventi create li dentro usano gia la sua Connect.
         loadPrelude();
@@ -550,17 +818,95 @@ public:
         ok = true;
         lastError.clear();
         budgetExceeded = false;
+        // shutdown ha svuotato fuoco e ClickDetector. Il posto li ha ancora.
+        restoreSavedPlaceFx();
         return true;
+    }
+
+    void restoreSavedPlaceFx() {
+        if (!workspace) return;
+        scriptEmitters_.clear();
+        for (const auto& s : workspace->savedEmitters) {
+            ScriptParticleEmitter e;
+            e.className = s.className;
+            e.name = s.name;
+            e.partIndex = s.partIndex;
+            e.preset = s.preset;
+            e.rate = s.rate;
+            e.speed = s.speed;
+            e.life = s.life;
+            e.color = {s.r, s.g, s.b};
+            e.enabled = s.enabled;
+            e.customMotion = s.customMotion || s.className == "Fire";
+            scriptEmitters_.push_back(std::move(e));
+        }
+        scriptControls().clickReach.clear();
+        for (const auto& c : workspace->savedClicks)
+            if (c.partIndex >= 0) scriptControls().clickReach[c.partIndex] = c.reach;
+        scriptControls().attachments.clear();
+        for (const auto& a : workspace->savedAttachments) {
+            ScriptControls::ScriptAttachment s;
+            s.name = a.name;
+            s.partIndex = a.partIndex;
+            s.ox = a.ox; s.oy = a.oy; s.oz = a.oz;
+            scriptControls().attachments.push_back(std::move(s));
+        }
+        scriptControls().beams.clear();
+        for (const auto& b : workspace->savedBeams) {
+            ScriptControls::ScriptBeam s;
+            s.name = b.name;
+            s.a0 = b.a0; s.a1 = b.a1;
+            s.width0 = b.width0; s.width1 = b.width1;
+            s.r = b.r; s.g = b.g; s.b = b.b;
+            s.enabled = b.enabled;
+            scriptControls().beams.push_back(std::move(s));
+        }
+        scriptControls().trails.clear();
+        for (const auto& t : workspace->savedTrails) {
+            ScriptControls::ScriptTrail s;
+            s.name = t.name;
+            s.partIndex = t.partIndex;
+            s.width = t.width;
+            s.life = t.life;
+            s.r = t.r; s.g = t.g; s.b = t.b;
+            s.enabled = t.enabled;
+            scriptControls().trails.push_back(std::move(s));
+        }
     }
 
     void shutdown() {
         if (L) {
+            // BindToClose: gli script salvano prima che lo stato sparisca.
+            // Un task.wait dentro non viene aspettato: la sessione sta chiudendo.
+            lua_getglobal(L, "__blockyBindToClose");
+            if (lua_istable(L, -1)) {
+                const int n = (int)lua_objlen(L, -1);
+                for (int i = 1; i <= n; ++i) {
+                    lua_rawgeti(L, -1, i);
+                    if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+                    lua_State* co = lua_newthread(L);
+                    lua_pushvalue(L, -2);
+                    lua_xmove(L, co, 1);
+                    lua_remove(L, -2);
+                    const int st = lua_resume(co, L, 0);
+                    if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
+                        const char* err = lua_tostring(co, -1);
+                        std::fprintf(stderr, "BindToClose: %s\n", err ? err : "errore");
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_pop(L, 1);
+            lua_pushnil(L);
+            lua_setglobal(L, "__blockyBindToClose");
+
             // Prima di chiudere: via TUTTI gli eventi collegati (Touched,
             // MouseClick, PlayerAdded...) finche' i loro numeri di registro
             // sono ancora di questo runtime. Prima restavano negli elenchi e,
             // col runtime nuovo, gli stessi numeri indicavano funzioni nuove:
             // un vecchio Touched poteva chiamare il MouseClick di un altro script.
             clearHeartbeats();
+            unrefRunServiceListeners(coreHeartbeatRefs_);
             unrefRunServiceListeners(heartbeatRefs_);
             unrefRunServiceListeners(steppedRefs_);
             unrefRunServiceListeners(renderSteppedRefs_);
@@ -589,13 +935,16 @@ public:
     // lua_pcall lo esegue — stesso risultato finale, un passo in piu'.
     bool runCompiled(const std::string& source, const std::string& chunkname) {
         if (!L) return false;
-        const std::string bc = Luau::compile(source);
+        // Col debugger acceso servono anche i nomi delle variabili locali (livello 2).
+        const Luau::CompileOptions copts = gameCompileOptions(!debugBreakpoints.empty());
+        const std::string bc = Luau::compile(source, copts);
         if (luau_load(L, chunkname.c_str(), bc.data(), bc.size(), 0) != 0) {
             lastError = safeToString(-1);
             std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
             lua_pop(L, 1);
             return false;
         }
+        applyBreakpoints(chunkname);   // debugger: righe dove fermarsi in questo script
         // Il corpo dello script gira in una coroutine, come in Roblox: cosi'
         // task.wait(), WaitForChild e simili funzionano anche fuori da
         // task.spawn (prima: "task.wait() va usato dentro task.spawn").
@@ -606,6 +955,7 @@ public:
         callStart_ = std::chrono::steady_clock::now();
         const auto t0 = callStart_;
         const int st = lua_resume(co, L, 0);
+        if (st == LUA_BREAK) onDebugBreak(co);   // fermo su un punto di interruzione: lo script resta vivo
         {
             ScriptCost& c = scriptCosts[chunkname.size() > 1 && chunkname[0] == '=' ? chunkname.substr(1) : chunkname];
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -614,7 +964,7 @@ public:
             c.peakMs = std::max(c.peakMs, ms);
             ++c.calls;
         }
-        if (st != LUA_OK && st != LUA_YIELD) {
+        if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
             const char* err = lua_tostring(co, -1);
             lastError = err ? err : "errore";
             std::fprintf(stderr, "Lua error: %s\n", lastError.c_str());
@@ -684,16 +1034,15 @@ public:
             lastError = "SharedInstance index non valido";
             return false;
         }
-        const auto& s = workspace->instances[sharedIndex];
-        lua_newtable(L);
-        lua_pushstring(L, s.name.c_str());
-        lua_setfield(L, -2, "Name");
-        lua_pushstring(L, s.className.c_str());
-        lua_setfield(L, -2, "ClassName");
-        lua_pushinteger(L, sharedIndex);
-        lua_setfield(L, -2, "__sharedIndex");
+        // script = la Instance vera (con Parent, figli, FindFirstChild...): i
+        // progetti Rojo fanno require(script.Parent.Modulo) di continuo.
+        pushSharedInstance(L, sharedIndex);
         lua_setglobal(L, "script");
-        return runString(code);
+        // "local script = script" sulla stessa prima riga: ogni script tiene il
+        // SUO script anche nelle funzioni chiamate dopo (Heartbeat, eventi), e i
+        // numeri di riga degli errori restano quelli del file.
+        noteScript(code.data(), code.size(), "shared");
+        return runCompiled("local script = script; " + code, "=" + workspace->instances[(size_t)sharedIndex].name);
     }
 
     void bindLabelScriptParent(int labelIndex) {
@@ -767,9 +1116,19 @@ public:
         unrefMapS(scriptControls().remoteServer);
         unrefMapS(scriptControls().remoteClient);
         unrefMapS(scriptControls().guiButtonActivated);
+        if (workspace) {
+            for (auto& lab : workspace->labels) {
+                for (int ref : lab.clickRefs)
+                    if (ref != LUA_NOREF) lua_unref(L, ref);
+                for (int ref : lab.focusLostRefs)
+                    if (ref != LUA_NOREF) lua_unref(L, ref);
+            }
+            guiTextFocus = -1;
+        }
         unrefMapS(scriptControls().toolEquipped);
         unrefMapS(scriptControls().toolUnequipped);
         unrefMapS(scriptControls().toolActivated);
+        unrefMapS(scriptControls().toolDeactivated);
         unrefMapS(scriptControls().tagAdded);
         unrefMapS(scriptControls().tagRemoved);
         unrefMapS(scriptControls().attributeChanged);
@@ -976,8 +1335,9 @@ public:
             lua_xmove(L, co, 1);
             callStart_ = std::chrono::steady_clock::now();
             int st = lua_resume(co, L, 1);
-            int nres = lua_gettop(co);
-            if (st != LUA_OK && st != LUA_YIELD) {
+            if (st == LUA_BREAK) onDebugBreak(co);   // pausa del debugger, non un errore
+            int nres = st == LUA_BREAK ? 0 : lua_gettop(co);
+            if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "WaitForChild resume error";
                 std::fprintf(stderr, "WaitForChild error: %s\n", lastError.c_str());
                 lua_pop(co, 1);
@@ -997,12 +1357,7 @@ public:
                 lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
                 lua_pushnumber(L, h.health);
-                callStart_ = std::chrono::steady_clock::now();
-                if (timedPcall(1, 0) != LUA_OK) {
-                    lastError = safeToString(-1);
-                    std::fprintf(stderr, "HealthChanged: %s\n", lastError.c_str());
-                    lua_pop(L, 1);
-                }
+                spawnCall(1, "HealthChanged");
             }
         }
         if (h.dead && !h.lastEmittedDead) {
@@ -1011,12 +1366,7 @@ public:
                 if (ref == LUA_NOREF) continue;
                 lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-                callStart_ = std::chrono::steady_clock::now();
-                if (timedPcall(0, 0) != LUA_OK) {
-                    lastError = safeToString(-1);
-                    std::fprintf(stderr, "Died: %s\n", lastError.c_str());
-                    lua_pop(L, 1);
-                }
+                spawnCall(0, "Died");
             }
         }
         if (!h.dead) h.lastEmittedDead = false;
@@ -1030,17 +1380,12 @@ public:
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
                 lua_pushstring(L, st);
                 lua_pushstring(L, prev.c_str());
-                callStart_ = std::chrono::steady_clock::now();
-                if (timedPcall(2, 0) != LUA_OK) {
-                    lastError = safeToString(-1);
-                    std::fprintf(stderr, "StateChanged: %s\n", lastError.c_str());
-                    lua_pop(L, 1);
-                }
+                spawnCall(2, "StateChanged");
             }
         }
     }
 
-    void tickProximity(bool activatePressed) {
+    void tickProximity(float dt, bool keysLive, bool padDown, bool padPressed) {
         if (!proximity || !playerPos) return;
         if (workspace) {
             proximity->syncParts([&](int idx, float& x, float& y, float& z) {
@@ -1051,22 +1396,31 @@ public:
             });
         }
         proximity->scan(playerPos->x, playerPos->y + 2.f, playerPos->z);
-        if (!activatePressed || proximity->nearest().empty() || !L) return;
-        proximity->requestActivate();
-        std::string n = proximity->takeActivated();
-        if (n.empty()) return;
-        auto it = scriptControls().proximityTriggered.find(n);
-        if (it == scriptControls().proximityTriggered.end()) return;
-        for (int ref : it->second) {
-            if (ref == LUA_NOREF) continue;
-            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
-            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-            lua_pushstring(L, n.c_str());
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "ProximityPrompt: %s\n", lastError.c_str());
-                lua_pop(L, 1);
+        if (!L) return;
+        static bool prev[26] = {};
+        proximity->beginInput();
+        GLFWwindow* win = glfwGetCurrentContext();
+        for (int i = 0; i < 26; ++i) {
+            bool down = keysLive && win && glfwGetKey(win, GLFW_KEY_A + i) == GLFW_PRESS;
+            bool pressed = down && !prev[i];
+            prev[i] = keysLive && down;
+            if (keysLive) proximity->feedKey(char('A' + i), down, pressed, dt);
+        }
+        proximity->feedInteract(padDown, padPressed, dt);
+        if (!keysLive && !padDown) proximity->releaseHolds();
+        for (;;) {
+            std::string n = proximity->takeQueued();
+            if (n.empty()) break;
+            auto it = scriptControls().proximityTriggered.find(n);
+            if (it == scriptControls().proximityTriggered.end()) continue;
+            for (int ref : it->second) {
+                if (ref == LUA_NOREF) continue;
+                lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+                // Triggered(playerWhoTriggered) come su Roblox; senza Player, il nome.
+                pushLocalPlayer(L);
+                if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_pushstring(L, n.c_str()); }
+                spawnCall(1, "ProximityPrompt");
             }
         }
     }
@@ -1075,18 +1429,38 @@ public:
         if (!L) return;
         tickPlayerLifecycle();
         runTime_ += dt;
+        // (plat::prof::mark: con BLOCKY_PROFILE=1 i frame lenti dicono quale pezzo pesa)
         fireRunServiceEvent(steppedRefs_, dt, "Stepped");
+        plat::prof::mark("lua Stepped");
         fireRunServiceEvent(heartbeatRefs_, dt, "Heartbeat");
+        plat::prof::mark("lua Heartbeat");
+        fireRunServiceEvent(coreHeartbeatRefs_, dt, "CoreScript");
         fireRunServiceEvent(renderSteppedRefs_, dt, "RenderStepped");
+        plat::prof::mark("lua RenderStepped");
         tickCharacterAnimation(dt);
         tickRenderSteps(dt);
         tickDebris(dt);
+        plat::prof::mark("lua animazioni e debris");
         tickTaskWaits(dt);
+        plat::prof::mark("lua task.wait ripresi");
         tickChildWaits(dt);
         tickPendingInvokes(dt);
         tickHumanoidEvents();
         tickScriptEmitters(dt);
         flushPendingDestroy();
+    }
+
+    void burstEmitter(const ScriptParticleEmitter& e, const glm::vec3& origin, int n) {
+        if (!particles || n <= 0) return;
+        if (!e.customMotion) {
+            particles->emitPreset((ParticlePreset)e.preset, origin, n, e.color, glm::vec3(0, 1, 0));
+            return;
+        }
+        const float smin = e.speedMin >= 0.f ? e.speedMin : e.speed * 0.45f;
+        const float smax = std::max(smin, e.speed);
+        const glm::vec3 col = e.color.x >= 0.f ? e.color : glm::vec3(1.f, 0.85f, 0.4f);
+        particles->emit(origin, n, col, smin, smax, e.life * 0.6f, e.life,
+                        e.size0, e.size1, e.gravity, e.drag, {0, 1, 0}, e.spread);
     }
 
     void tickScriptEmitters(float dt) {
@@ -1100,8 +1474,8 @@ public:
             e.accum -= (float)n;
             if (n > 12) n = 12;
             const auto& p = workspace->parts[e.partIndex];
-            particles->emitPreset((ParticlePreset)e.preset, p.position + glm::vec3(0, p.size.y * 0.5f, 0),
-                                  n, e.color, glm::vec3(0, 1, 0));
+            const glm::vec3 origin = p.position + glm::vec3(0, p.size.y * 0.5f, 0);
+            burstEmitter(e, origin, n);
         }
     }
 
@@ -1123,8 +1497,9 @@ public:
             lua_xmove(L, co, 1);   // il valore va sulla coroutine (come in tickChildWaits)
             callStart_ = std::chrono::steady_clock::now();
             int st = lua_resume(co, L, 1);
-            int nres = lua_gettop(co);
-            if (st != LUA_OK && st != LUA_YIELD) {
+            if (st == LUA_BREAK) onDebugBreak(co);   // pausa del debugger, non un errore
+            int nres = st == LUA_BREAK ? 0 : lua_gettop(co);
+            if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "Invoke timeout";
                 lua_pop(co, 1);
             } else if (nres > 0) lua_pop(co, nres);
@@ -1138,17 +1513,18 @@ public:
             int ref = pend[i].coRef;
             pend.erase(pend.begin() + (int)i);
             if (!L || ref == LUA_NOREF) return;
-            lua_pushstring(L, result.c_str());
+            const int nret = unpackRemote(L, result);
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             lua_State* co = lua_tothread(L, -1);
             lua_pop(L, 1);
             lua_unref(L, ref);
-            if (!co) { lua_pop(L, 1); return; }
-            lua_xmove(L, co, 1);   // la risposta del server va sulla coroutine
+            if (!co) { lua_pop(L, nret); return; }
+            lua_xmove(L, co, nret);
             callStart_ = std::chrono::steady_clock::now();
-            int st = lua_resume(co, L, 1);
-            int nres = lua_gettop(co);
-            if (st != LUA_OK && st != LUA_YIELD) {
+            int st = lua_resume(co, L, nret);
+            if (st == LUA_BREAK) onDebugBreak(co);   // pausa del debugger, non un errore
+            int nres = st == LUA_BREAK ? 0 : lua_gettop(co);
+            if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "Invoke resume";
                 lua_pop(co, 1);
             } else if (nres > 0) lua_pop(co, nres);
@@ -1170,12 +1546,7 @@ public:
             lua_setfield(L, -2, "Name");
             lua_pushstring(L, "Humanoid");
             lua_setfield(L, -2, "ClassName");
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "Touched error: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "Touched");
         }
     }
 
@@ -1196,12 +1567,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLivePart(L, otherIndex);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "Touched(other) error: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "Touched");
         }
     }
 
@@ -1235,12 +1601,7 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             lua_pushstring(L, itemId.c_str());
             lua_pushstring(L, itemName.c_str());
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(2, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "%s error: %s\n", eventName, lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(2, eventName);
         }
     }
     void fireToolNamed(const std::map<std::string, std::vector<int>>& m,
@@ -1252,18 +1613,45 @@ public:
             if (ref == LUA_NOREF) continue;
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(0, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "Tool event error: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(0, "Tool");
         }
     }
 
     void fireItemActivated(const std::string& itemId, const std::string& itemName) {
         fireItemEvent("ItemActivated", itemId, itemName);
         fireToolNamed(scriptControls().toolActivated, itemName);
+    }
+    void fireItemDeactivated(const std::string& itemId, const std::string& itemName) {
+        fireItemEvent("ItemDeactivated", itemId, itemName);
+        fireToolNamed(scriptControls().toolDeactivated, itemName);
+    }
+
+    void fireNpcRefs(const std::map<int, std::vector<int>>& m, int index) {
+        if (!L) return;
+        auto it = m.find(index);
+        if (it == m.end()) return;
+        for (int ref : it->second) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            spawnCall(0, "Npc");
+        }
+    }
+
+    void flushNpcSignals() {
+        if (!workspace) return;
+        for (int i = 0; i < (int)workspace->npcs.size(); ++i) {
+            NpcActor& n = workspace->npcs[(size_t)i];
+            if (n.removed) continue;
+            if (n.arrived) {
+                n.arrived = false;
+                fireNpcRefs(scriptControls().npcArrived, i);
+            }
+            if (n.humanoid.dead && !n.diedFired) {
+                n.diedFired = true;
+                fireNpcRefs(scriptControls().npcDied, i);
+            }
+        }
     }
     void fireItemEquipped(const std::string& itemId, const std::string& itemName) {
         fireItemEvent("ItemEquipped", itemId, itemName);
@@ -1291,6 +1679,101 @@ public:
         lua_remove(ls, -2);
     }
 
+    void fireMoveToFinished(bool reached) {
+        if (!L) return;
+        for (int ref : scriptControls().humanoidMoveToFinished) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            lua_pushboolean(L, reached ? 1 : 0);
+            spawnCall(1, "MoveToFinished");
+        }
+    }
+
+    // Humanoid:Move replaces the keyboard until the script stops calling it.
+    // Humanoid:MoveTo walks toward a point, then fires MoveToFinished.
+    void applyScriptMove(float dt, glm::vec3& wish, const glm::vec3& camFwd,
+                         const glm::vec3& camRight, const glm::vec3& pos) {
+        auto& sc = scriptControls();
+        sc.scriptMoveAge += dt;
+        if (sc.moveToActive) {
+            sc.moveToAge += dt;
+            glm::vec3 d = sc.moveToTarget - pos;
+            d.y = 0.f;
+            const float dist = glm::length(d);
+            const bool reached = dist <= 1.5f;
+            if (reached || sc.moveToAge > 8.f) {
+                sc.moveToActive = false;
+                wish = glm::vec3(0.f);
+                fireMoveToFinished(reached);
+                return;
+            }
+            wish = d / dist;
+            return;
+        }
+        if (sc.scriptMoveAge > 0.2f) return;
+        glm::vec3 m = sc.scriptMove;
+        if (sc.scriptMoveCamera) {
+            glm::vec3 f(camFwd.x, 0.f, camFwd.z);
+            glm::vec3 r(camRight.x, 0.f, camRight.z);
+            if (glm::dot(f, f) > 1e-6f) f = glm::normalize(f);
+            if (glm::dot(r, r) > 1e-6f) r = glm::normalize(r);
+            wish = r * m.x - f * m.z;
+        } else {
+            wish = glm::vec3(m.x, 0.f, m.z);
+        }
+    }
+
+    // Stack: funzione e poi nargs argomenti. Parte su un thread nuovo, come
+    // Roblox: task.wait dentro PlayerAdded, Heartbeat e gli altri eventi è legale.
+    int spawnCall(int nargs, const char* what) {
+        lua_State* co = lua_newthread(L);
+        lua_insert(L, -(nargs + 2));
+        lua_xmove(L, co, nargs + 1);
+        // Stesso conto di timedPcall: lo Script Performance deve vedere
+        // anche Heartbeat e PlayerAdded, non solo il corpo dello script.
+        lua_Debug ar{};
+        std::string who = "(C)";
+        if (lua_getinfo(co, -(nargs + 1), "s", &ar) && ar.short_src[0]) who = ar.short_src;
+        if (who == "BlockyPrelude") {
+            const int fidx = lua_gettop(co) - nargs;
+            for (int u = 1; u <= 8; ++u) {
+                const char* name = lua_getupvalue(co, fidx, u);
+                if (!name) break;
+                const bool fn = lua_isfunction(co, -1);
+                lua_Debug inner{};
+                if (fn && lua_getinfo(co, -1, "s", &inner) && inner.short_src[0]
+                    && std::strcmp(inner.short_src, "BlockyPrelude") != 0) {
+                    who = inner.short_src;
+                    lua_pop(co, 1);
+                    break;
+                }
+                lua_pop(co, 1);
+            }
+        }
+        callStart_ = std::chrono::steady_clock::now();
+        const auto t0 = callStart_;
+        const int st = lua_resume(co, L, nargs);
+        {
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            ScriptCost& c = scriptCosts[who];
+            c.totalMs += ms;
+            c.windowMs += ms;
+            c.peakMs = std::max(c.peakMs, ms);
+            ++c.calls;
+            ++c.windowCalls;
+        }
+        if (st == LUA_BREAK) onDebugBreak(co);
+        if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
+            const char* err = lua_tostring(co, -1);
+            lastError = err ? err : "errore";
+            std::fprintf(stderr, "%s: %s\n", what, lastError.c_str());
+        }
+        lua_pop(L, 1);
+        return st;
+    }
+
     void firePlayerAdded() {
         if (!L) return;
         auto& list = scriptControls().playerAdded;
@@ -1300,12 +1783,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLocalPlayer(L);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "PlayerAdded: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "PlayerAdded");
         }
     }
 
@@ -1318,12 +1796,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLocalCharacter(L);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "CharacterAdded: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "CharacterAdded");
         }
     }
 
@@ -1352,6 +1825,25 @@ public:
         return g;
     }
 
+    /**
+     * workspace.FallenPartsDestroyHeight come su Roblox: sotto questa altezza il
+     * giocatore muore. Di partenza -12 (il valore di sempre di Blocky, cosi' i
+     * place gia' fatti non cambiano); gli script possono cambiarlo.
+     */
+    float readFallenPartsDestroyHeight() const {
+        float y = -12.f;
+        if (!L) return y;
+        lua_getglobal(L, "workspace");
+        if (lua_istable(L, -1)) {
+            lua_pushstring(L, "FallenPartsDestroyHeight");
+            lua_rawget(L, -2);
+            if (lua_isnumber(L, -1)) y = std::clamp((float)lua_tonumber(L, -1), -1.0e6f, 1.0e4f);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+        return y;
+    }
+
     /** Part con un ClickDetector.MouseClick collegato? */
     bool partHasClick(int idx) const {
         auto it = scriptControls().partClicked.find(idx);
@@ -1369,12 +1861,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLocalPlayer(L);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "MouseClick: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "MouseClick");
         }
     }
 
@@ -1432,14 +1919,25 @@ public:
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             lua_rawgeti(L, LUA_REGISTRYINDEX, obj);
             lua_pushboolean(L, gameProcessed ? 1 : 0);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(2, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "%s: %s\n", began ? "InputBegan" : "InputEnded", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(2, began ? "InputBegan" : "InputEnded");
         }
         lua_unref(L, obj);
+        if (!gameProcessed && inputType) {
+            std::vector<int>* slot = nullptr;
+            if (!std::strcmp(inputType, "MouseButton1"))
+                slot = began ? &scriptControls().mouse1Down : &scriptControls().mouse1Up;
+            else if (!std::strcmp(inputType, "MouseButton2"))
+                slot = began ? &scriptControls().mouse2Down : &scriptControls().mouse2Up;
+            if (slot) {
+                const std::vector<int> list = *slot;
+                for (int ref : list) {
+                    if (ref == LUA_NOREF) continue;
+                    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+                    if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+                    spawnCall(0, "Mouse");
+                }
+            }
+        }
     }
 
     /**
@@ -1468,12 +1966,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             lua_rawgeti(L, LUA_REGISTRYINDEX, objRef);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "%s: %s\n", what, lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, what);
         }
     }
 
@@ -1511,6 +2004,23 @@ public:
             it = (it->first == id) ? serverTouching_.erase(it) : std::next(it);
     }
 
+    /** Lo stato da mandare al client di quel giocatore (vedi Internal.serverPlayerState). */
+    std::string serverPlayerState(int id) {
+        if (!L || !serverPlayers_) return {};
+        if (!pushPreludeField(L, "serverPlayerState")) return {};
+        lua_pushinteger(L, id);
+        std::string out;
+        callStart_ = std::chrono::steady_clock::now();   // il timeout dello script parte da adesso
+        if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+            if (lua_isstring(L, -1)) out = lua_tostring(L, -1);
+            lua_pop(L, 1);
+        } else {
+            std::fprintf(stderr, "serverPlayerState: %s\n", safeToString(-1).c_str());
+            lua_pop(L, 1);
+        }
+        return out;
+    }
+
     void serverPlayerMoved(int id, const glm::vec3& feet) {
         if (!L || !serverPlayers_) return;
         if (!pushPreludeField(L, "serverPlayerMoved")) return;
@@ -1518,6 +2028,7 @@ public:
         lua_pushnumber(L, feet.x);
         lua_pushnumber(L, feet.y);
         lua_pushnumber(L, feet.z);
+        callStart_ = std::chrono::steady_clock::now();   // senza, il budget poteva fermarla subito
         if (lua_pcall(L, 4, 0, 0) != LUA_OK) lua_pop(L, 1);
         serverPlayerTouches(id, feet);
     }
@@ -1577,12 +2088,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushLivePart(L, childIdx);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "ChildAdded: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "ChildAdded");
         }
     }
 
@@ -1595,12 +2101,7 @@ public:
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
             pushSharedInstance(L, childIdx);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "Shared ChildAdded: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            spawnCall(1, "ChildAdded");
         }
     }
 
@@ -1614,27 +2115,72 @@ public:
         fireCharacterAdded();
     }
 
+    void fireGuiRefs(const std::vector<int>& refs) {
+        const std::vector<int> copy = refs;
+        for (int ref : copy) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
+            spawnCall(0, "Activated");
+        }
+    }
+
     void fireGuiButtonActivated(const std::string& buttonName) {
         if (!L || buttonName.empty()) return;
         scriptControls().lastGuiButton = buttonName;
         auto it = scriptControls().guiButtonActivated.find(buttonName);
-        if (it == scriptControls().guiButtonActivated.end() || it->second.empty()) return;
-        for (int ref : it->second) {
+        if (it != scriptControls().guiButtonActivated.end())
+            fireGuiRefs(it->second);
+        if (!workspace) return;
+        for (int i = 0; i < (int)workspace->labels.size(); ++i)
+            if (workspace->labels[(size_t)i].name == buttonName)
+                fireGuiRefs(workspace->labels[(size_t)i].clickRefs);
+    }
+
+    /** Clic sul bottone i, non su tutti quelli con lo stesso nome. */
+    void fireGuiButtonIndex(int idx) {
+        if (!L || !workspace || idx < 0 || idx >= (int)workspace->labels.size()) return;
+        const WorkspaceLabel& lab = workspace->labels[(size_t)idx];
+        scriptControls().lastGuiButton = lab.name;
+        fireGuiRefs(lab.clickRefs);
+        auto it = scriptControls().guiButtonActivated.find(lab.name);
+        if (it != scriptControls().guiButtonActivated.end())
+            fireGuiRefs(it->second);
+    }
+
+    void fireGuiFocusLost(int idx, bool enterPressed) {
+        if (!L || !workspace || idx < 0 || idx >= (int)workspace->labels.size()) return;
+        const std::vector<int> copy = workspace->labels[(size_t)idx].focusLostRefs;
+        for (int ref : copy) {
             if (ref == LUA_NOREF) continue;
             lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
             if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(0, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "TextButton Activated error: %s\n", lastError.c_str());
-                lua_pop(L, 1);
-            }
+            lua_pushboolean(L, enterPressed ? 1 : 0);
+            spawnCall(1, "FocusLost");
         }
     }
 
     void drainRemoteEvents() {
         if (!L || !net) return;
+        std::string msgRelay;
+        bool relayMsg = false;
         for (const auto& in : net->incomingRemotes) {
+            if (std::strcmp(in.name, "__blkMsg") == 0) {
+                if (in.fromId != net->localId) {
+                    const std::string payload = in.payload;
+                    const size_t nl = payload.find('\n');
+                    const std::string topic = nl == std::string::npos ? payload : payload.substr(0, nl);
+                    const std::string body = nl == std::string::npos ? std::string() : payload.substr(nl + 1);
+                    lua_pushlstring(L, body.data(), body.size());
+                    fireTopic(L, topic, lua_gettop(L));
+                    lua_pop(L, 1);
+                }
+                if (net->role == NetRole::Host && in.toServer) {
+                    relayMsg = true;
+                    msgRelay = in.payload;
+                }
+                continue;
+            }
             // RemoteFunction protocol: payload "RFREQ|<corr>|<data>" / "RFRES|<corr>|<data>"
             // name = remote function name
             if (in.payload.size() >= 5 && in.payload.compare(0, 5, "RFREQ") == 0) {
@@ -1647,30 +2193,31 @@ public:
                     data = in.payload.substr(p2 + 1);
                 }
                 std::string result;
-                auto it = scriptControls().remoteInvoke.find(in.name);
-                if (it != scriptControls().remoteInvoke.end() && it->second != LUA_NOREF) {
+                const bool toClientFn = !corr.empty() && corr[0] == 'c';
+                auto& hooks = toClientFn ? scriptControls().remoteInvokeClient
+                                         : scriptControls().remoteInvoke;
+                auto it = hooks.find(in.name);
+                if (it != hooks.end() && it->second != LUA_NOREF) {
                     lua_rawgeti(L, LUA_REGISTRYINDEX, it->second);
                     if (lua_isfunction(L, -1)) {
-                        pushRemoteSender(in);   // InvokeServer: il Player sul server dedicato
-                        lua_pushstring(L, data.c_str());
+                        const int saved = lua_gettop(L) - 1;
+                        int nargs = 0;
+                        if (!toClientFn) { pushRemoteSender(in); nargs = 1; }
+                        nargs += unpackRemote(L, data);
                         callStart_ = std::chrono::steady_clock::now();
-                        if (timedPcall(2, 1) == LUA_OK) {
-                            if (lua_isstring(L, -1)) result = lua_tostring(L, -1);
-                            else if (lua_isnumber(L, -1)) {
-                                char buf[64];
-                                std::snprintf(buf, sizeof(buf), "%.10g", (double)lua_tonumber(L, -1));
-                                result = buf;
-                            } else if (lua_isboolean(L, -1))
-                                result = lua_toboolean(L, -1) ? "true" : "false";
-                            lua_pop(L, 1);
-                        } else {
+                        if (timedPcall(nargs, LUA_MULTRET) == LUA_OK)
+                            result = packRemote(L, saved + 1, lua_gettop(L));
+                        else {
                             lastError = safeToString(-1);
                             lua_pop(L, 1);
                         }
+                        lua_settop(L, saved);
                     } else lua_pop(L, 1);
                 }
                 std::string resPayload = "RFRES|" + corr + "|" + result;
-                if (in.fromId)
+                if (toClientFn && net->role == NetRole::Client)
+                    net->sendRemoteEventToServer(in.name, resPayload.c_str());
+                else if (in.fromId)
                     net->fireRemoteEventToClient(in.fromId, in.name, resPayload.c_str());
                 continue;
             }
@@ -1692,18 +2239,27 @@ public:
                 if (ref == LUA_NOREF) continue;
                 lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
                 if (!lua_isfunction(L, -1)) { lua_pop(L, 1); continue; }
-                if (in.toServer) pushRemoteSender(in); else lua_pushstring(L, in.fromName);
-                lua_pushlstring(L, in.payload.data(), in.payload.size());
-                callStart_ = std::chrono::steady_clock::now();
-                if (timedPcall(2, 0) != LUA_OK) {
-                    lastError = safeToString(-1);
-                    std::fprintf(stderr, "RemoteEvent error: %s\n", lastError.c_str());
-                    lua_pop(L, 1);
+                int nargs = 0;
+                if (remotePacked(in.payload)) {
+                    if (in.toServer) { pushRemoteSender(in); nargs = 1; }
+                    nargs += unpackRemote(L, in.payload);
+                } else {
+                    // testo semplice (formato vecchio): (mittente, testo). Sul server
+                    // dedicato il mittente e' il Player vero, altrimenti il nome.
+                    if (in.toServer) pushRemoteSender(in);
+                    else lua_pushstring(L, in.fromName);
+                    lua_pushlstring(L, in.payload.data(), in.payload.size());
+                    nargs = 2;
                 }
+                spawnCall(nargs, "RemoteEvent");
             }
         }
         net->incomingRemotes.clear();
+        if (relayMsg)
+            net->fireRemoteEventAllClients("__blkMsg", msgRelay.c_str());
     }
+
+    lua_State* luaState() const { return L; }
 
 private:
     lua_State* L = nullptr;
@@ -1759,6 +2315,24 @@ private:
         return 1;
     }
 
+    /**
+     * setmetatable senza protezione, per il solo prelude: serve a riattaccare
+     * gli oggetti del motore creati senza Parent (ClickDetector...), che hanno
+     * una metatabella del motore e il setmetatable degli script giustamente rifiuta.
+     */
+    static int luaPreludeRawSetmetatable(lua_State* ls) {
+        luaL_checktype(ls, 1, LUA_TTABLE);
+        lua_settop(ls, 2);
+        lua_setmetatable(ls, 1);
+        return 1;
+    }
+
+    /** getmetatable vero (anche delle metatabelle del motore), per il solo prelude. */
+    static int luaPreludeRawGetmetatable(lua_State* ls) {
+        if (!lua_getmetatable(ls, 1)) lua_pushnil(ls);
+        return 1;
+    }
+
     /** rawset per il solo prelude (passato come argomento del chunk). */
     static int luaPreludeRawset(lua_State* ls) {
         luaL_checktype(ls, 1, LUA_TTABLE);
@@ -1773,15 +2347,24 @@ private:
     /** Compila ed esegue il prelude; installa CFrame, Random e i metodi nuovi di Vector3. */
     bool loadPrelude() {
         preludeRef_ = LUA_NOREF;
+        coreHealthBar = false;   // la rimette la CoreScript core/BarraVita.luau
         // Stato Lua nuovo: le tracce degli script di prima non esistono piu'.
         charAnim.clear();
         trackRefs_.clear();
         setupCharacterRig();
-        const std::string bc = Luau::compile(blk::luaprelude::source());
+        const std::string bc = Luau::compile(blk::luaprelude::source(), gameCompileOptions(false));
         bool loaded = luau_load(L, "=BlockyPrelude", bc.data(), bc.size(), 0) == 0;
         if (loaded) {
             blockyPushCFunction(L, luaPreludeRawset); // solo per il prelude: gli script non hanno rawset
-            loaded = lua_pcall(L, 1, 1, 0) == LUA_OK;
+            blockyPushCFunction(L, luaPreludeRawSetmetatable);
+            blockyPushCFunction(L, luaPreludeRawGetmetatable);
+            // Tutti gli Enum di Roblox (RobloxEnumsData.h): il prelude li costruisce al primo uso.
+            const std::string& enums = blk::robloxEnumsData();
+            lua_pushlstring(L, enums.data(), enums.size());
+            // Strato "API presente" (RobloxApiData.h): proprieta', metodi, eventi delle classi.
+            const std::string& api = blk::robloxApiData();
+            lua_pushlstring(L, api.data(), api.size());
+            loaded = lua_pcall(L, 5, 1, 0) == LUA_OK;
         }
         if (!loaded) {
             std::fprintf(stderr, "[Lua] prelude non caricato: %s\n", lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
@@ -1791,6 +2374,26 @@ private:
         if (!lua_istable(L, -1)) { lua_pop(L, 1); return false; }
         preludeRef_ = lua_ref(L, -1);
         lua_pop(L, 1);
+        // I moduli API (src/engine/lua/api/*.luau): ognuno riceve Internal e
+        // registra con Internal.modulo cosa fare in install(). Un modulo rotto si
+        // scrive in Output e non ferma gli altri ne' l'avvio.
+        for (const auto& m : blk::luaprelude::files()) {
+            if (m.name.rfind("api/", 0) != 0 && m.name.rfind("core/", 0) != 0) continue;
+            const std::string mbc = Luau::compile(m.code, gameCompileOptions(false));
+            const std::string chunk = "=" + m.name;
+            if (luau_load(L, chunk.c_str(), mbc.data(), mbc.size(), 0) != 0) {
+                std::fprintf(stderr, "[Lua] modulo API %s non compilato: %s\n", m.name.c_str(),
+                             lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+                lua_pop(L, 1);
+                continue;
+            }
+            lua_getref(L, preludeRef_);
+            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                std::fprintf(stderr, "[Lua] modulo API %s: %s\n", m.name.c_str(),
+                             lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+                lua_pop(L, 1);
+            }
+        }
         return true;
     }
 
@@ -1944,24 +2547,43 @@ private:
 
     static int charTrackId(lua_State* ls, int idx) { return intField(ls, idx, "__trackId"); }
 
-    static int luaCharTrackPlay(lua_State* ls) {
+    static blk::anim::CharacterAnimator* animatorForTrack(lua_State* ls, int idx) {
         auto* rt = fromState(ls);
-        if (!rt) return 0;
-        rt->charAnim.play(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1), (float)luaL_optnumber(ls, 3, 1.0),
-                          (float)luaL_optnumber(ls, 4, 1.0));
+        if (!rt || !lua_istable(ls, idx)) return nullptr;
+        // raw: le tracce del giocatore non hanno __npc, e lua_getfield passerebbe
+        // da __index (luaCharTrackIndex), che richiama questa funzione: ricorsione infinita.
+        lua_pushstring(ls, "__npc");
+        lua_rawget(ls, idx < 0 ? idx - 1 : idx);
+        if (lua_isnumber(ls, -1)) {
+            const int n = (int)lua_tointeger(ls, -1);
+            lua_pop(ls, 1);
+            auto it = rt->npcAnim_.find(n);
+            return it == rt->npcAnim_.end() ? nullptr : &it->second;
+        }
+        lua_pop(ls, 1);
+        return &rt->charAnim;
+    }
+
+    static int luaCharTrackPlay(lua_State* ls) {
+        auto* anim = animatorForTrack(ls, 1);
+        if (!anim) return 0;
+        anim->play(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1), (float)luaL_optnumber(ls, 3, 1.0),
+                   (float)luaL_optnumber(ls, 4, 1.0));
         return 0;
     }
     static int luaCharTrackStop(lua_State* ls) {
-        if (auto* rt = fromState(ls)) rt->charAnim.stop(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1));
+        if (auto* anim = animatorForTrack(ls, 1))
+            anim->stop(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 0.1));
         return 0;
     }
     static int luaCharTrackAdjustSpeed(lua_State* ls) {
-        if (auto* rt = fromState(ls)) rt->charAnim.adjustSpeed(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0));
+        if (auto* anim = animatorForTrack(ls, 1))
+            anim->adjustSpeed(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0));
         return 0;
     }
     static int luaCharTrackAdjustWeight(lua_State* ls) {
-        if (auto* rt = fromState(ls))
-            rt->charAnim.adjustWeight(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0), (float)luaL_optnumber(ls, 3, 0.1));
+        if (auto* anim = animatorForTrack(ls, 1))
+            anim->adjustWeight(charTrackId(ls, 1), (float)luaL_optnumber(ls, 2, 1.0), (float)luaL_optnumber(ls, 3, 0.1));
         return 0;
     }
     /** track:GetMarkerReachedSignal("Passo") — un Signal per nome, creato al primo uso. */
@@ -1994,14 +2616,19 @@ private:
         static const char* names[] = {"Core", "Idle", "Movement", "Action", "Action2", "Action3", "Action4"};
         if (lua_isnumber(ls, idx)) return std::clamp((int)lua_tointeger(ls, idx), 0, 6);
         if (lua_istable(ls, idx)) {
+            // Prima il nome: i numeri dell'Enum di Roblox (Idle 0, Movement 1,
+            // Action 2... Core 1000) non sono quelli interni (Core 0 ... Action4 6).
+            lua_getfield(ls, idx, "Name");
+            const char* n = lua_tostring(ls, -1);
+            int byName = -1;
+            for (int i = 0; n && i < 7; ++i) if (std::strcmp(n, names[i]) == 0) byName = i;
+            lua_pop(ls, 1);
+            if (byName >= 0) return byName;
             lua_getfield(ls, idx, "Value");
             const int v = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
             lua_pop(ls, 1);
-            if (v >= 0) return std::clamp(v, 0, 6);
-            lua_getfield(ls, idx, "Name");
-            const char* n = lua_tostring(ls, -1);
-            lua_pop(ls, 1);
-            for (int i = 0; n && i < 7; ++i) if (std::strcmp(n, names[i]) == 0) return i;
+            if (v == 1000) return 0;                       // Core
+            if (v >= 0 && v <= 5) return v + 1;            // Idle..Action4
         }
         if (const char* n = lua_tostring(ls, idx))
             for (int i = 0; i < 7; ++i) if (std::strcmp(n, names[i]) == 0) return i;
@@ -2009,9 +2636,9 @@ private:
     }
 
     static int luaCharTrackIndex(lua_State* ls) {
-        auto* rt = fromState(ls);
         const char* k = lua_tostring(ls, 2);
-        const blk::anim::CharTrack* t = rt ? rt->charAnim.track(charTrackId(ls, 1)) : nullptr;
+        auto* anim = animatorForTrack(ls, 1);
+        const blk::anim::CharTrack* t = anim ? anim->track(charTrackId(ls, 1)) : nullptr;
         if (!t || !k) return 0;
         if (!std::strcmp(k, "IsPlaying")) { lua_pushboolean(ls, t->playing); return 1; }
         if (!std::strcmp(k, "Length")) { lua_pushnumber(ls, t->action->durationSeconds()); return 1; }
@@ -2037,12 +2664,12 @@ private:
     }
 
     static int luaCharTrackNewIndex(lua_State* ls) {
-        auto* rt = fromState(ls);
         const char* k = lua_tostring(ls, 2);
-        blk::anim::CharTrack* t = rt ? rt->charAnim.track(charTrackId(ls, 1)) : nullptr;
-        if (!t || !k) return 0;
+        auto* anim = animatorForTrack(ls, 1);
+        blk::anim::CharTrack* t = anim ? anim->track(charTrackId(ls, 1)) : nullptr;
+        if (!t || !k || !anim) return 0;
         if (!std::strcmp(k, "Looped")) { t->looped = lua_toboolean(ls, 3) != 0; return 0; }
-        if (!std::strcmp(k, "TimePosition")) { rt->charAnim.setTimePosition(t->id, (float)luaL_checknumber(ls, 3)); return 0; }
+        if (!std::strcmp(k, "TimePosition")) { anim->setTimePosition(t->id, (float)luaL_checknumber(ls, 3)); return 0; }
         if (!std::strcmp(k, "Priority")) {
             const int p = parsePriority(ls, 3);
             if (p < 0) return blockyLuaError(ls, "Priority: Enum.AnimationPriority.Core/Idle/Movement/Action...");
@@ -2052,8 +2679,23 @@ private:
         return blockyLuaError(ls, "AnimationTrack.%s non si puo' cambiare", k);
     }
 
-    static void pushCharTrack(lua_State* ls, int id, const std::string& name) {
+    static void pushCharTrack(lua_State* ls, int id, const std::string& name, int npc = -1) {
         auto* rt = fromState(ls);
+        if (npc >= 0) {
+            lua_newtable(ls);
+            lua_pushinteger(ls, id); lua_setfield(ls, -2, "__trackId");
+            lua_pushinteger(ls, npc); lua_setfield(ls, -2, "__npc");
+            lua_pushstring(ls, name.c_str()); lua_setfield(ls, -2, "Name");
+            lua_pushstring(ls, "AnimationTrack"); lua_setfield(ls, -2, "ClassName");
+            blockyPushCFunction(ls, luaCharTrackPlay); lua_setfield(ls, -2, "Play");
+            blockyPushCFunction(ls, luaCharTrackStop); lua_setfield(ls, -2, "Stop");
+            blockyPushCFunction(ls, luaCharTrackAdjustSpeed); lua_setfield(ls, -2, "AdjustSpeed");
+            blockyPushCFunction(ls, luaCharTrackAdjustWeight); lua_setfield(ls, -2, "AdjustWeight");
+            lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyCharTrackMT");
+            if (lua_istable(ls, -1)) lua_setmetatable(ls, -2);
+            else lua_pop(ls, 1);
+            return;
+        }
         if (rt) {
             const auto it = rt->trackRefs_.find(id);
             if (it != rt->trackRefs_.end()) { lua_getref(ls, it->second); return; }
@@ -2178,6 +2820,7 @@ private:
     }
 
     std::vector<int> heartbeatRefs_;
+    std::vector<int> coreHeartbeatRefs_;   // CoreScripts (core/*.luau): non li cancella clearHeartbeats
     std::vector<int> steppedRefs_;
     std::vector<int> renderSteppedRefs_;
 
@@ -2190,9 +2833,16 @@ private:
         refs.clear();
     }
 
+    // Un frame lento NON scollega piu' gli script (come Roblox): prima, se tutti
+    // gli Heartbeat insieme passavano budgetUs (1,8 ms sui telefoni!) venivano
+    // scollegati tutti, per sempre, e il gioco si fermava (Laboratorio di Fisica
+    // su Android). Ora un frame lento e' solo un avviso (Script Performance);
+    // si scollega soltanto un listener davvero bloccato: 3 volte di fila oltre
+    // il timeout duro (kScriptHardTimeoutMs) in una sola chiamata.
+    int slowFrames = 0;                      // frame sopra budgetUs (statistica)
+    std::map<int, int> hardStrikes_;          // ref del listener -> stop di fila
     void fireRunServiceEvent(std::vector<int>& refs, float dt, const char* label) {
         if (!L || refs.empty()) return;
-        budgetExceeded = false;
         auto t0 = std::chrono::steady_clock::now();
         for (size_t i = 0; i < refs.size(); ++i) {
             int ref = refs[i];
@@ -2206,23 +2856,25 @@ private:
             const bool stepped = std::strcmp(label, "Stepped") == 0;
             if (stepped) lua_pushnumber(L, runTime_);
             lua_pushnumber(L, dt);
-            callStart_ = std::chrono::steady_clock::now();
-            if (timedPcall(stepped ? 2 : 1, 0) != LUA_OK) {
-                lastError = safeToString(-1);
-                std::fprintf(stderr, "%s error: %s\n", label, lastError.c_str());
-                lua_pop(L, 1);
-                if (lastError.find("budget") != std::string::npos)
+            const int st = spawnCall(stepped ? 2 : 1, label);
+            if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
+                if (lastError.find("budget") != std::string::npos) {
                     budgetExceeded = true;
+                    if (++hardStrikes_[ref] >= 3) {   // bloccato davvero: si stacca solo lui
+                        std::fprintf(stderr, "[Lua] %s: un listener bloccato 3 volte di fila — scollegato\n", label);
+                        lua_unref(L, ref);
+                        refs[i] = LUA_NOREF;
+                        hardStrikes_.erase(ref);
+                    }
+                }
+            } else {
+                hardStrikes_.erase(ref);
             }
         }
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t0).count();
-        if (us > budgetUs) {
-            budgetExceeded = true;
-            lastError = "Lua budget tempo superato (" + std::to_string(us) + "us)";
-            unrefRunServiceListeners(refs);
-            std::fprintf(stderr, "[Lua] %s — %s disconnesso\n", lastError.c_str(), label);
-        }
+        if (us > budgetUs && (++slowFrames % 300) == 1)
+            std::fprintf(stderr, "[Lua] %s lento: %lld us (budget %d us) — nessuno scollegato\n", label, (long long)us, budgetUs);
     }
     std::vector<int> pendingDestroy_;
     std::vector<uint64_t> partPartTouchFired_;
@@ -2258,8 +2910,9 @@ private:
             // lo ricaviamo con lua_gettop dopo la resume (i valori
             // restituiti/yieldati restano comunque sullo stack di co).
             int st = lua_resume(co, L, nargs);
-            int nres = lua_gettop(co);
-            if (st != LUA_OK && st != LUA_YIELD) {
+            if (st == LUA_BREAK) onDebugBreak(co);   // pausa del debugger, non un errore
+            int nres = st == LUA_BREAK ? 0 : lua_gettop(co);
+            if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
                 lastError = lua_tostring(co, -1) ? lua_tostring(co, -1) : "task resume error";
                 std::fprintf(stderr, "task error: %s\n", lastError.c_str());
                 lua_pop(co, 1);
@@ -2386,7 +3039,9 @@ private:
         }
         for (auto& a : sc.attachments) shift(a.partIndex);
         for (auto& e : scriptEmitters_) shift(e.partIndex);
-        if (proximity) proximity->onPartErased(idx);
+        if (proximity)
+            for (const std::string& gone : proximity->onPartErased(idx)) unrefPromptHandlers(gone);
+        if (playerHumanoid) shift(playerHumanoid->seatPart);
         // Attributi e loro listener: chiave "indicePart:nome".
         auto remapKeys = [idx](auto& m) {
             std::remove_reference_t<decltype(m)> moved;
@@ -2711,11 +3366,21 @@ private:
             return 0;
         }
         if (key && std::strcmp(key, "Parent") == 0 && !lua_isnil(ls, 3)) {
+            // Prompt messi sulla part PRIMA che lei entri nel mondo (carbone,
+            // casse, attrezzi): la lista resta qui, e si collega appena c'e' l'indice.
+            int promptListRef = LUA_NOREF;
+            lua_getfield(ls, 1, "__blkPrompts");
+            if (lua_istable(ls, -1)) promptListRef = blockyLuaRef(ls);
+            else lua_pop(ls, 1);
             // Nel mondo con i valori messi finora...
             lua_pushcfunction(ls, luaWorkspaceAdd, "luaWorkspaceAdd");
             lua_pushvalue(ls, 1);
             lua_call(ls, 1, 1);
-            if (!lua_istable(ls, -1)) { lua_pop(ls, 1); return 0; }
+            if (!lua_istable(ls, -1)) {
+                lua_pop(ls, 1);
+                if (promptListRef != LUA_NOREF) lua_unref(ls, promptListRef);
+                return 0;
+            }
             const int live = lua_gettop(ls);
             // ...poi la tabella dello script prende il posto della part viva:
             // 1) via i valori vecchi (altrimenti, letti per primi, nasconderebbero quelli veri)
@@ -2738,6 +3403,47 @@ private:
             lua_setmetatable(ls, 1);
             trackPartTable(ls, 1);
             notifyPartParented(ls, 1, 3);
+            // Parent = Tool: la part (Handle) esce dal mondo e va in mano.
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "ClassName");
+                const bool tool = lua_isstring(ls, -1)
+                    && std::strcmp(lua_tostring(ls, -1), "Tool") == 0;
+                lua_pop(ls, 1);
+                if (tool) {
+                    lua_pushcfunction(ls, luaLivePartNewIndexImpl, "luaLivePartNewIndexImpl");
+                    lua_pushvalue(ls, 1);
+                    lua_pushstring(ls, "Parent");
+                    lua_pushvalue(ls, 3);
+                    lua_call(ls, 3, 0);
+                }
+            }
+            if (promptListRef != LUA_NOREF) {
+                lua_rawgeti(ls, LUA_REGISTRYINDEX, promptListRef);
+                if (lua_istable(ls, -1)) {
+                    const int list = lua_gettop(ls);
+                    const int n = (int)lua_objlen(ls, list);
+                    for (int i = 1; i <= n; ++i) {
+                        lua_rawgeti(ls, list, i);
+                        if (!lua_istable(ls, -1)) { lua_pop(ls, 1); continue; }
+                        lua_getfield(ls, -1, "_v");
+                        bool mine = false;
+                        if (lua_istable(ls, -1)) {
+                            lua_getfield(ls, -1, "Parent");
+                            mine = lua_rawequal(ls, -1, 1) != 0;
+                            lua_pop(ls, 1);
+                        }
+                        lua_pop(ls, 1);
+                        if (!mine) { lua_pop(ls, 1); continue; }
+                        lua_pushcfunction(ls, luaPromptNewIndex, "rebindPrompt");
+                        lua_insert(ls, -2);
+                        lua_pushstring(ls, "Parent");
+                        lua_pushvalue(ls, 1);
+                        lua_call(ls, 3, 0);
+                    }
+                }
+                lua_pop(ls, 1);
+                lua_unref(ls, promptListRef);
+            }
             lua_settop(ls, 3);
             return 0;
         }
@@ -2808,9 +3514,184 @@ private:
             return blockyLuaError(ls, "script.Parent:Connect(function)");
         lua_pushvalue(ls, 2);
         int ref = blockyLuaRef(ls);
-        scriptControls().guiButtonActivated[l->name].push_back(ref);
+        l->clickRefs.push_back(ref);
         lua_pushinteger(ls, ref);
         return 1;
+    }
+
+    /**
+     * Ripiego dello strato "API presente" per gli oggetti del motore (Part,
+     * GUI, Humanoid, Camera): il motore non conosce questa chiave (stack:
+     * 1 = oggetto, 2 = chiave). Il prelude (Internal.apiEngineIndex) da' il
+     * valore iniziale dell'API di Roblox, il metodo che spiega che manca o
+     * l'evento collegabile. Se non c'e' nemmeno li': nil, come prima.
+     */
+    static int apiLayerIndex(lua_State* ls, const char* className) {
+        auto* rt = fromState(ls);
+        if (!rt || rt->preludeRef_ == LUA_NOREF || lua_type(ls, 2) != LUA_TSTRING) return 0;
+        lua_getref(ls, rt->preludeRef_);
+        lua_getfield(ls, -1, "apiEngineIndex");
+        lua_remove(ls, -2);
+        if (!lua_isfunction(ls, -1)) { lua_pop(ls, 1); return 0; }
+        lua_pushvalue(ls, 1);
+        lua_pushvalue(ls, 2);
+        if (className) lua_pushstring(ls, className);
+        else lua_pushnil(ls);
+        if (lua_pcall(ls, 3, 1, 0) != LUA_OK) { lua_pop(ls, 1); return 0; }
+        return 1;
+    }
+
+    // ---- GUI in stile Roblox: le proprieta' delle label uiLayout ----
+    // (Instance.new("Frame" / "TextLabel" / ...): misura e posizione come Roblox,
+    // disegnate da WorldLabelsUi.h con uiLabelRect.)
+
+    /** Chiama Tipo.new(args...) di Luau (UDim2, Color3, Vector2): nil se non c'e'. */
+    static void pushGlobalNew(lua_State* ls, const char* type, std::initializer_list<double> args) {
+        lua_getglobal(ls, type);
+        if (!lua_istable(ls, -1)) { lua_pop(ls, 1); lua_pushnil(ls); return; }
+        lua_getfield(ls, -1, "new");
+        lua_remove(ls, -2);
+        if (!lua_isfunction(ls, -1)) { lua_pop(ls, 1); lua_pushnil(ls); return; }
+        for (double a : args) lua_pushnumber(ls, a);
+        if (lua_pcall(ls, (int)args.size(), 1, 0) != LUA_OK) { lua_pop(ls, 1); lua_pushnil(ls); }
+    }
+
+    static float guiNumField(lua_State* ls, int idx, const char* k, float def) {
+        lua_getfield(ls, idx, k);
+        const float v = lua_isnumber(ls, -1) ? (float)lua_tonumber(ls, -1) : def;
+        lua_pop(ls, 1);
+        return v;
+    }
+
+    static bool guiReadUDim2(lua_State* ls, int idx, float& xs, float& xo, float& ys, float& yo) {
+        if (!lua_istable(ls, idx)) return false;
+        idx = lua_absindex(ls, idx);
+        lua_getfield(ls, idx, "X");
+        if (lua_istable(ls, -1)) { xs = guiNumField(ls, -1, "Scale", xs); xo = guiNumField(ls, -1, "Offset", xo); }
+        lua_pop(ls, 1);
+        lua_getfield(ls, idx, "Y");
+        if (lua_istable(ls, -1)) { ys = guiNumField(ls, -1, "Scale", ys); yo = guiNumField(ls, -1, "Offset", yo); }
+        lua_pop(ls, 1);
+        return true;
+    }
+
+    static bool guiReadColor3(lua_State* ls, int idx, glm::vec3& c) {
+        if (!lua_istable(ls, idx)) return false;
+        idx = lua_absindex(ls, idx);
+        c = {guiNumField(ls, idx, "R", c.x), guiNumField(ls, idx, "G", c.y), guiNumField(ls, idx, "B", c.z)};
+        return true;
+    }
+
+    static bool pushRobloxGuiProp(lua_State* ls, const WorkspaceLabel& l, const char* k) {
+        if (!std::strcmp(k, "Size")) { pushGlobalNew(ls, "UDim2", {l.sizeScaleX, l.sizeW, l.sizeScaleY, l.sizeH}); return true; }
+        if (!std::strcmp(k, "Position")) { pushGlobalNew(ls, "UDim2", {l.anchorX, l.offsetX, l.anchorY, l.offsetY}); return true; }
+        if (!std::strcmp(k, "AnchorPoint")) { pushGlobalNew(ls, "Vector2", {l.anchorPointX, l.anchorPointY}); return true; }
+        if (!std::strcmp(k, "BackgroundColor3")) { pushGlobalNew(ls, "Color3", {l.bgColor.x, l.bgColor.y, l.bgColor.z}); return true; }
+        if (!std::strcmp(k, "TextColor3")) { pushGlobalNew(ls, "Color3", {l.color.x, l.color.y, l.color.z}); return true; }
+        if (!std::strcmp(k, "BackgroundTransparency")) { lua_pushnumber(ls, l.bgTransparency); return true; }
+        if (!std::strcmp(k, "TextSize")) { lua_pushnumber(ls, l.fontScale * 14.0); return true; }
+        if (!std::strcmp(k, "Enabled")) { lua_pushboolean(ls, l.visible); return true; }
+        if (!std::strcmp(k, "LayoutOrder")) { lua_pushinteger(ls, l.layoutOrder); return true; }
+        if (!std::strcmp(k, "ClassName")) { lua_pushstring(ls, l.className.c_str()); return true; }
+        if (!std::strcmp(k, "IgnoreGuiInset")) { lua_pushboolean(ls, l.ignoreGuiInset); return true; }
+        if (!std::strcmp(k, "TextScaled")) { lua_pushboolean(ls, l.textScaled); return true; }
+        if (!std::strcmp(k, "TextWrapped")) { lua_pushboolean(ls, l.textWrapped); return true; }
+        if (!std::strcmp(k, "ZIndex") || !std::strcmp(k, "DisplayOrder")) { lua_pushinteger(ls, l.zIndex); return true; }
+        if (!std::strcmp(k, "AbsoluteSize")) { pushGlobalNew(ls, "Vector2", {l.absW, l.absH}); return true; }
+        if (!std::strcmp(k, "AbsolutePosition")) { pushGlobalNew(ls, "Vector2", {l.absX, l.absY}); return true; }
+        if (!std::strcmp(k, "Image")) { lua_pushstring(ls, l.image.c_str()); return true; }
+        if (!std::strcmp(k, "ImageColor3")) { pushGlobalNew(ls, "Color3", {l.imageColor.x, l.imageColor.y, l.imageColor.z}); return true; }
+        if (!std::strcmp(k, "ImageTransparency")) { lua_pushnumber(ls, l.imageTransparency); return true; }
+        if (!std::strcmp(k, "TextXAlignment") || !std::strcmp(k, "TextYAlignment")) {
+            const bool x = k[4] == 'X';
+            static const char* xs[] = {"Left", "Center", "Right"};
+            static const char* ys[] = {"Top", "Center", "Bottom"};
+            const int a = std::clamp(x ? l.textAlignX : l.textAlignY, 0, 2);
+            lua_getglobal(ls, "Enum");
+            if (!lua_istable(ls, -1)) { lua_pop(ls, 1); lua_pushstring(ls, x ? xs[a] : ys[a]); return true; }
+            lua_getfield(ls, -1, k);
+            lua_remove(ls, -2);
+            if (!lua_istable(ls, -1)) { lua_pop(ls, 1); lua_pushstring(ls, x ? xs[a] : ys[a]); return true; }
+            lua_getfield(ls, -1, x ? xs[a] : ys[a]);
+            lua_remove(ls, -2);
+            return true;
+        }
+        return false;
+    }
+
+    static bool setRobloxGuiProp(lua_State* ls, WorkspaceLabel& l, const char* k, int v) {
+        if (!std::strcmp(k, "Size")) return guiReadUDim2(ls, v, l.sizeScaleX, l.sizeW, l.sizeScaleY, l.sizeH);
+        if (!std::strcmp(k, "Position")) return guiReadUDim2(ls, v, l.anchorX, l.offsetX, l.anchorY, l.offsetY);
+        if (!std::strcmp(k, "AnchorPoint") && lua_istable(ls, v)) {
+            l.anchorPointX = guiNumField(ls, v, "X", 0.f);
+            l.anchorPointY = guiNumField(ls, v, "Y", 0.f);
+            return true;
+        }
+        if (!std::strcmp(k, "BackgroundColor3")) return guiReadColor3(ls, v, l.bgColor);
+        if (!std::strcmp(k, "TextColor3")) return guiReadColor3(ls, v, l.color);
+        if (!std::strcmp(k, "BackgroundTransparency") && lua_isnumber(ls, v)) {
+            l.bgTransparency = std::clamp((float)lua_tonumber(ls, v), 0.f, 1.f);
+            return true;
+        }
+        if (!std::strcmp(k, "TextSize") && lua_isnumber(ls, v)) {
+            l.fontScale = std::clamp((float)lua_tonumber(ls, v) / 14.f, 0.3f, 6.f);
+            return true;
+        }
+        if (!std::strcmp(k, "Enabled")) { l.visible = lua_toboolean(ls, v) != 0; return true; }
+        if (!std::strcmp(k, "LayoutOrder") && lua_isnumber(ls, v)) { l.layoutOrder = (int)lua_tointeger(ls, v); return true; }
+        if (!std::strcmp(k, "IgnoreGuiInset")) { l.ignoreGuiInset = lua_toboolean(ls, v) != 0; return true; }
+        if (!std::strcmp(k, "TextScaled")) { l.textScaled = lua_toboolean(ls, v) != 0; return true; }
+        if (!std::strcmp(k, "TextWrapped")) { l.textWrapped = lua_toboolean(ls, v) != 0; return true; }
+        if ((!std::strcmp(k, "ZIndex") || !std::strcmp(k, "DisplayOrder")) && lua_isnumber(ls, v)) {
+            l.zIndex = (int)lua_tointeger(ls, v);
+            return true;
+        }
+        if (!std::strcmp(k, "Image") && lua_isstring(ls, v)) {
+            l.image = lua_tostring(ls, v);
+            return true;
+        }
+        if (!std::strcmp(k, "ImageColor3")) return guiReadColor3(ls, v, l.imageColor);
+        if (!std::strcmp(k, "ImageTransparency") && lua_isnumber(ls, v)) {
+            l.imageTransparency = std::clamp((float)lua_tonumber(ls, v), 0.f, 1.f);
+            return true;
+        }
+        if (!std::strcmp(k, "TextXAlignment") || !std::strcmp(k, "TextYAlignment")) {
+            std::string name;
+            if (lua_istable(ls, v)) { lua_getfield(ls, v, "Name"); name = lua_tostring(ls, -1) ? lua_tostring(ls, -1) : ""; lua_pop(ls, 1); }
+            else if (lua_isstring(ls, v)) name = lua_tostring(ls, v);
+            const int a = (name == "Left" || name == "Top") ? 0 : (name == "Right" || name == "Bottom") ? 2 : 1;
+            if (k[4] == 'X') l.textAlignX = a; else l.textAlignY = a;
+            return true;
+        }
+        return false;
+    }
+
+    static int luaTextFocusConnect(lua_State* ls) {
+        const int idx = (int)lua_tointeger(ls, lua_upvalueindex(1));
+        const int fn = lua_isfunction(ls, 2) ? 2 : (lua_isfunction(ls, 1) ? 1 : 0);
+        if (!fn) return blockyLuaError(ls, "FocusLost:Connect vuole una funzione");
+        lua_pushvalue(ls, fn);
+        const int ref = blockyLuaRef(ls);
+        auto* rt = fromState(ls);
+        if (rt && rt->workspace && idx >= 0 && idx < (int)rt->workspace->labels.size())
+            rt->workspace->labels[(size_t)idx].focusLostRefs.push_back(ref);
+        lua_pushboolean(ls, 1);
+        return 1;
+    }
+    static int luaTextCapture(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int idx = (int)rawIntField(ls, 1, "__labelIndex", -1);
+        if (rt && idx >= 0) rt->guiTextFocus = idx;
+        return 0;
+    }
+    static int luaTextRelease(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int idx = (int)rawIntField(ls, 1, "__labelIndex", -1);
+        if (rt && rt->guiTextFocus == idx) {
+            rt->fireGuiFocusLost(idx, false);
+            rt->guiTextFocus = -1;
+        }
+        return 0;
     }
 
     static int luaLiveLabelIndex(lua_State* ls) {
@@ -2835,7 +3716,34 @@ private:
             lua_pushstring(ls, l->name.c_str());
             return 1;
         }
-        return 0;
+        if (l->uiLayout && std::strcmp(key, "Parent") == 0) {
+            lua_pushstring(ls, "__parentObj");
+            lua_rawget(ls, 1);
+            return 1;
+        }
+        if (l->uiLayout && pushRobloxGuiProp(ls, *l, key)) return 1;
+        if (std::strcmp(key, "IsFocused") == 0) {
+            auto* rt = fromState(ls);
+            const int idx = (int)rawIntField(ls, 1, "__labelIndex", -1);
+            lua_pushboolean(ls, rt && idx >= 0 && rt->guiTextFocus == idx);
+            return 1;
+        }
+        if (std::strcmp(key, "FocusLost") == 0) {
+            lua_newtable(ls);
+            lua_pushinteger(ls, rawIntField(ls, 1, "__labelIndex", -1));
+            lua_pushcclosure(ls, luaTextFocusConnect, "TextBox.FocusLost", 1);
+            lua_setfield(ls, -2, "Connect");
+            return 1;
+        }
+        if (std::strcmp(key, "CaptureFocus") == 0) {
+            blockyPushCFunction(ls, luaTextCapture);
+            return 1;
+        }
+        if (std::strcmp(key, "ReleaseFocus") == 0) {
+            blockyPushCFunction(ls, luaTextRelease);
+            return 1;
+        }
+        return apiLayerIndex(ls, l->className.c_str());
     }
 
     static int luaLiveLabelNewIndex(lua_State* ls) {
@@ -2867,6 +3775,274 @@ private:
             readVec3Arg(ls, 3, o);
             l->studsOffsetY = o.y;
             return 0;
+        }
+        if ((l->uiLayout || l->isWorldGui()) && std::strcmp(key, "Parent") == 0) {
+            // Dentro un Frame (label): misura e posizione relative a lui. Una
+            // ScreenGui messa in PlayerGui / StarterGui diventa "attaccata": solo
+            // allora si vede (come Roblox). Un BillboardGui / SurfaceGui messo
+            // dentro una Part si attacca a quella part (Adornee).
+            const int self = (int)rawIntField(ls, 1, "__labelIndex", -1);
+            int parentIndex = -1;
+            int partIdx = -1;
+            bool attached = false;
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "__labelIndex");
+                if (lua_isnumber(ls, -1)) parentIndex = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+                lua_getfield(ls, 3, "__partIndex");
+                if (lua_isnumber(ls, -1)) partIdx = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+                if (partIdx < 0) {
+                    lua_getfield(ls, 3, "PrimaryPart");
+                    if (lua_istable(ls, -1)) {
+                        lua_pushstring(ls, "__partIndex");
+                        lua_rawget(ls, -2);
+                        if (lua_isnumber(ls, -1)) partIdx = (int)lua_tointeger(ls, -1);
+                        lua_pop(ls, 1);
+                    }
+                    lua_pop(ls, 1);
+                }
+                if (parentIndex < 0 && partIdx < 0) {
+                    lua_getfield(ls, 3, "ClassName");   // PlayerGui (Luau) / StarterGui (motore)
+                    const char* pc = lua_tostring(ls, -1);
+                    attached = pc && (std::strcmp(pc, "PlayerGui") == 0 || std::strcmp(pc, "StarterGui") == 0);
+                    lua_pop(ls, 1);
+                }
+            }
+            if (parentIndex == self) parentIndex = -1;
+            if (WorkspaceLabel* lab = liveLabel(ls, 1)) {   // di nuovo: la lettura sopra puo' aver eseguito Luau
+                lab->parentIndex = parentIndex;
+                lab->uiAttached = attached;
+                if (lab->isWorldGui()) lab->adorneePart = partIdx;
+            }
+            // obj.Parent restituisce l'oggetto messo. In una chiave nascosta, non in
+            // "Parent": con la chiave vera Luau non chiamerebbe piu' __newindex e
+            // un Parent = nil dopo non arriverebbe al motore.
+            lua_pushstring(ls, "__parentObj");
+            lua_rawget(ls, 1);
+            const int oldParent = lua_gettop(ls);
+            lua_pushstring(ls, "__parentObj");
+            lua_pushvalue(ls, 3);
+            lua_rawset(ls, 1);
+            // ...e tra i figli del nuovo Parent: PlayerGui:FindFirstChild("HUD"),
+            // WaitForChild, ChildAdded (prima la GUI non si trovava per nome).
+            if (pushPreludeField(ls, "engineReparent")) {
+                lua_pushvalue(ls, 1);
+                lua_pushvalue(ls, oldParent);
+                lua_pushvalue(ls, 3);
+                if (lua_pcall(ls, 3, 0, 0) != LUA_OK) lua_pop(ls, 1);
+            }
+            lua_settop(ls, 3);
+            return 0;
+        }
+        if ((l->uiLayout || l->isWorldGui()) && setRobloxGuiProp(ls, *l, key, 3)) return 0;
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    static double rawIntField(lua_State* ls, int idx, const char* k, double def) {
+        lua_pushstring(ls, k);
+        lua_rawget(ls, idx);
+        const double v = lua_isnumber(ls, -1) ? lua_tonumber(ls, -1) : def;
+        lua_pop(ls, 1);
+        return v;
+    }
+
+    /** GeometryService: unisce, sottrae o interseca Part vere e lascia la mesh nel mondo. */
+    static int luaBlkCsg(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return blockyLuaError(ls, "CSG: mondo assente");
+        const int mode = (int)luaL_checkinteger(ls, 1);
+        if (!lua_istable(ls, 2)) return blockyLuaError(ls, "CSG: serve la lista delle Part");
+        std::vector<int> idx;
+        const int n = (int)lua_objlen(ls, 2);
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(ls, 2, i);
+            int pi = -1;
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "__partIndex");
+                if (lua_isnumber(ls, -1)) pi = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+            }
+            lua_pop(ls, 1);
+            if (pi < 0 || pi >= (int)rt->workspace->parts.size()
+                || rt->workspace->parts[(size_t)pi].destroyPending)
+                return blockyLuaError(ls, "CSG: una Part non e' nel mondo");
+            idx.push_back(pi);
+        }
+        blocky_csg::Result r;
+        std::string err;
+        if (!blocky_csg::combine(*rt->workspace, idx, mode, r, err))
+            return blockyLuaError(ls, "%s", err.c_str());
+        lua_newtable(ls);
+        lua_pushnumber(ls, r.center.x); lua_setfield(ls, -2, "X");
+        lua_pushnumber(ls, r.center.y); lua_setfield(ls, -2, "Y");
+        lua_pushnumber(ls, r.center.z); lua_setfield(ls, -2, "Z");
+        lua_pushnumber(ls, r.size.x); lua_setfield(ls, -2, "SX");
+        lua_pushnumber(ls, r.size.y); lua_setfield(ls, -2, "SY");
+        lua_pushnumber(ls, r.size.z); lua_setfield(ls, -2, "SZ");
+        lua_pushstring(ls, r.path.c_str()); lua_setfield(ls, -2, "Path");
+        lua_pushstring(ls, r.name.c_str()); lua_setfield(ls, -2, "Name");
+        lua_pushnumber(ls, r.color.r); lua_setfield(ls, -2, "R");
+        lua_pushnumber(ls, r.color.g); lua_setfield(ls, -2, "G");
+        lua_pushnumber(ls, r.color.b); lua_setfield(ls, -2, "B");
+        return 1;
+    }
+
+    static int luaBlkCsgSeparate(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return blockyLuaError(ls, "SeparateAsync: mondo assente");
+        const char* path = luaL_checkstring(ls, 1);
+        std::vector<int> idx;
+        std::string err;
+        if (!blocky_csg::separate(*rt->workspace, path ? path : "", idx, err))
+            return blockyLuaError(ls, "%s", err.c_str());
+        lua_newtable(ls);
+        for (int i = 0; i < (int)idx.size(); ++i) {
+            pushLivePart(ls, idx[(size_t)i]);
+            lua_rawseti(ls, -2, i + 1);
+        }
+        return 1;
+    }
+
+    /**
+     * UICorner / UIStroke (Instance Luau del prelude) dentro un elemento GUI: il
+     * prelude passa qui le loro impostazioni, che diventano una label "di
+     * supporto" figlia di quell'elemento (come UIListLayout), letta dal disegno.
+     *   __blkGuiDecor(chiave, indiceLabelPadre | -1, classe, valori)
+     * valori: cs co (CornerRadius scala/pixel), th (Thickness), r g b (Color),
+     * tr (Transparency), border (ApplyStrokeMode Border).
+     */
+    static int luaGuiDecor(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return 0;
+        const char* key = luaL_checkstring(ls, 1);
+        const int parent = (int)luaL_optinteger(ls, 2, -1);
+        const char* cls = luaL_checkstring(ls, 3);
+        auto& labels = rt->workspace->labels;
+        int idx = -1;
+        for (int i = 0; i < (int)labels.size(); ++i)
+            if (labels[(size_t)i].isLayout() && labels[(size_t)i].name == key) { idx = i; break; }
+        if (idx < 0) {
+            WorkspaceLabel d;
+            d.name = key;
+            d.className = cls;
+            d.visible = false;   // di supporto: non si disegna da sola
+            d.skipNet = true;
+            labels.push_back(std::move(d));
+            idx = (int)labels.size() - 1;
+        }
+        WorkspaceLabel& d = labels[(size_t)idx];
+        d.className = cls;
+        d.parentIndex = (parent >= 0 && parent < (int)labels.size() && parent != idx) ? parent : -1;
+        if (lua_istable(ls, 4)) {
+            if (d.className == "UICorner") {
+                d.sizeScaleX = guiNumField(ls, 4, "cs", 0.f);
+                d.sizeW = guiNumField(ls, 4, "co", 8.f);
+            } else {
+                d.sizeW = guiNumField(ls, 4, "th", 1.f);
+                d.color = {guiNumField(ls, 4, "r", 0.f), guiNumField(ls, 4, "g", 0.f), guiNumField(ls, 4, "b", 0.f)};
+                d.bgTransparency = std::clamp(guiNumField(ls, 4, "tr", 0.f), 0.f, 1.f);
+                d.anchorPointX = guiNumField(ls, 4, "border", 0.f);
+            }
+        }
+        return 0;
+    }
+
+    static WorkspaceLabel* layoutLabel(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int self = (int)rawIntField(ls, 1, "__labelIndex", -1);
+        if (!rt || !rt->workspace || self < 0 || self >= (int)rt->workspace->labels.size()) return nullptr;
+        return &rt->workspace->labels[(size_t)self];
+    }
+
+    /** UICorner.CornerRadius, UIStroke.Thickness / Color / Transparency, UIListLayout.Padding. */
+    static int luaLayoutIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        WorkspaceLabel* l = layoutLabel(ls);
+        if (!key || !l) return 0;
+        if (l->className == "UICorner" && !std::strcmp(key, "CornerRadius")) { pushGlobalNew(ls, "UDim", {l->sizeScaleX, l->sizeW}); return 1; }
+        if (l->className == "UIListLayout" && !std::strcmp(key, "Padding")) { pushGlobalNew(ls, "UDim", {0.0, l->sizeW}); return 1; }
+        if (l->className == "UIListLayout" && !std::strcmp(key, "FillDirection")) {
+            lua_getglobal(ls, "Enum");
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "FillDirection");
+                lua_remove(ls, -2);
+                if (lua_istable(ls, -1)) {
+                    lua_getfield(ls, -1, l->listFill == 0 ? "Horizontal" : "Vertical");
+                    lua_remove(ls, -2);
+                    if (!lua_isnil(ls, -1)) return 1;
+                    lua_pop(ls, 1);
+                } else lua_pop(ls, 1);
+            } else lua_pop(ls, 1);
+            lua_pushstring(ls, l->listFill == 0 ? "Horizontal" : "Vertical");
+            return 1;
+        }
+        if (l->className == "UIStroke") {
+            if (!std::strcmp(key, "Thickness")) { lua_pushnumber(ls, l->sizeW); return 1; }
+            if (!std::strcmp(key, "Color")) { pushGlobalNew(ls, "Color3", {l->color.x, l->color.y, l->color.z}); return 1; }
+            if (!std::strcmp(key, "Transparency")) { lua_pushnumber(ls, l->bgTransparency); return 1; }
+        }
+        return apiLayerIndex(ls, l->className.c_str());
+    }
+
+    /** UIListLayout / UIPadding / UICorner / UIStroke: Parent anche dopo la creazione, e le loro proprieta'. */
+    static int luaLayoutNewIndex(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* key = lua_tostring(ls, 2);
+        if (WorkspaceLabel* l = key ? layoutLabel(ls) : nullptr) {
+            if (l->className == "UICorner" && !std::strcmp(key, "CornerRadius") && lua_istable(ls, 3)) {
+                l->sizeScaleX = guiNumField(ls, 3, "Scale", 0.f);
+                l->sizeW = guiNumField(ls, 3, "Offset", 0.f);
+                return 0;
+            }
+            if (l->className == "UIListLayout" && !std::strcmp(key, "Padding") && lua_istable(ls, 3)) {
+                l->sizeW = guiNumField(ls, 3, "Offset", 0.f);
+                return 0;
+            }
+            if (l->className == "UIListLayout" && !std::strcmp(key, "FillDirection")) {
+                std::string name;
+                if (lua_istable(ls, 3)) {
+                    lua_getfield(ls, 3, "Name");
+                    name = lua_tostring(ls, -1) ? lua_tostring(ls, -1) : "";
+                    lua_pop(ls, 1);
+                    if (name.empty()) {
+                        lua_getfield(ls, 3, "Value");
+                        if (lua_isnumber(ls, -1) && (int)lua_tointeger(ls, -1) == 0) name = "Horizontal";
+                        lua_pop(ls, 1);
+                    }
+                } else if (lua_isstring(ls, 3)) name = lua_tostring(ls, 3);
+                else if (lua_isnumber(ls, 3) && (int)lua_tointeger(ls, 3) == 0) name = "Horizontal";
+                l->listFill = name == "Horizontal" ? 0 : 1;
+                return 0;
+            }
+            if (l->className == "UIStroke") {
+                if (!std::strcmp(key, "Thickness") && lua_isnumber(ls, 3)) { l->sizeW = std::max(0.f, (float)lua_tonumber(ls, 3)); return 0; }
+                if (!std::strcmp(key, "Color") && guiReadColor3(ls, 3, l->color)) return 0;
+                if (!std::strcmp(key, "Transparency") && lua_isnumber(ls, 3)) {
+                    l->bgTransparency = std::clamp((float)lua_tonumber(ls, 3), 0.f, 1.f);
+                    return 0;
+                }
+                if (!std::strcmp(key, "ApplyStrokeMode")) {
+                    std::string mode;
+                    if (lua_istable(ls, 3)) { lua_getfield(ls, 3, "Name"); mode = lua_tostring(ls, -1) ? lua_tostring(ls, -1) : ""; lua_pop(ls, 1); }
+                    else if (lua_isstring(ls, 3)) mode = lua_tostring(ls, 3);
+                    l->anchorPointX = mode == "Border" ? 1.f : 0.f;
+                    lua_rawset(ls, 1);
+                    return 0;
+                }
+            }
+        }
+        if (rt && rt->workspace && key && std::strcmp(key, "Parent") == 0) {
+            const int self = (int)rawIntField(ls, 1, "__labelIndex", -1);
+            int parentIndex = -1;
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "__labelIndex");
+                if (lua_isnumber(ls, -1)) parentIndex = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+            }
+            if (self >= 0 && self < (int)rt->workspace->labels.size() && parentIndex != self)
+                rt->workspace->labels[(size_t)self].parentIndex = parentIndex;
         }
         lua_rawset(ls, 1);
         return 0;
@@ -2976,6 +4152,8 @@ private:
         lua_setfield(ls, -2, "GetPivot");
         blockyPushCFunction(ls, luaPartPivotTo);
         lua_setfield(ls, -2, "PivotTo");
+        blockyPushCFunction(ls, luaPartGetTouchingParts);
+        lua_setfield(ls, -2, "GetTouchingParts");
         blockyPushCFunction(ls, luaPartGetAttributeChangedSignal);
         lua_setfield(ls, -2, "GetAttributeChangedSignal");
         blockyPushCFunction(ls, luaLivePartPropSignal);
@@ -2986,7 +4164,8 @@ private:
             && partIndex < (int)rt->workspace->parts.size()) {
             // Name NON va messo raw: passa da __index/__newindex, cosi' p.Name = x
             // rinomina davvero la part e accende Changed.
-            lua_pushstring(ls, "Part");
+            const char* cn = rt->workspace->parts[(size_t)partIndex].className.c_str();
+            lua_pushstring(ls, (cn && cn[0]) ? cn : "Part");
             lua_setfield(ls, -2, "ClassName");
         }
 
@@ -3015,6 +4194,43 @@ private:
             return blockyLuaError(ls, "SetPosition(Vector3) oppure SetPosition(x,y,z)");
         p->position = pos;
         return 0;
+    }
+
+    static int luaPartAddDecal(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int idx = partIndexFromSelf(ls, 1);
+        if (!rt || !rt->workspace || idx < 0 || idx >= (int)rt->workspace->parts.size())
+            return 0;
+        auto& p = rt->workspace->parts[(size_t)idx];
+        if ((int)p.extraDecals.size() >= 4) return 0;
+        WorkspacePart::FaceDecal fd;
+        fd.face = std::clamp((int)luaL_optinteger(ls, 2, 5), 0, 5);
+        if (lua_isstring(ls, 3)) fd.image = lua_tostring(ls, 3);
+        p.extraDecals.push_back(fd);
+        return 0;
+    }
+
+    /**
+     * Mette sullo stack Enum.<enumName>.<item> come su Roblox (part.Material ==
+     * Enum.Material.Wood funziona); se quell'Enum o quel nome non ci sono, il testo.
+     */
+    static void pushEnumOrName(lua_State* ls, const char* enumName, const char* item) {
+        lua_getglobal(ls, "Enum");
+        if (lua_istable(ls, -1)) {
+            lua_getfield(ls, -1, enumName);
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, item);
+                if (!lua_isnil(ls, -1)) {   // EnumItem, oppure il valore vecchio di Blocky (testo o numero)
+                    lua_remove(ls, -2);
+                    lua_remove(ls, -2);
+                    return;
+                }
+                lua_pop(ls, 1);
+            }
+            lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        lua_pushstring(ls, item);
     }
 
     static int luaLivePartIndex(lua_State* ls) {
@@ -3057,16 +4273,34 @@ private:
             lua_pushstring(ls, p->name.c_str());
             return 1;
         }
+        if (std::strcmp(key, "ClassName") == 0) {
+            lua_pushstring(ls, p->className.empty() ? "Part" : p->className.c_str());
+            return 1;
+        }
+        if (std::strcmp(key, "MeshId") == 0) {
+            lua_pushstring(ls, p->meshFile.c_str());
+            return 1;
+        }
         if (std::strcmp(key, "Color") == 0 || std::strcmp(key, "BrickColor") == 0) {
             pushColor3(ls, p->color.r, p->color.g, p->color.b);
             return 1;
         }
         if (std::strcmp(key, "Material") == 0) {
-            lua_pushstring(ls, partMaterialName(p->material));
+            pushEnumOrName(ls, "Material", partMaterialName(p->material));
             return 1;
         }
         if (std::strcmp(key, "Shape") == 0) {
-            lua_pushstring(ls, partShapeName(p->shape));
+            pushEnumOrName(ls, "PartType", p->shape == PartShape::Block ? "Block" : partShapeName(p->shape));
+            return 1;
+        }
+        if (std::strcmp(key, "Occupant") == 0) {
+            // Seat.Occupant: il Humanoid seduto qui (nil se libero)
+            auto* rtO = fromState(ls);
+            const int self = partIndexFromSelf(ls, 1);
+            if (rtO && rtO->playerHumanoid && rtO->playerHumanoid->seated && self >= 0 && rtO->playerHumanoid->seatPart == self)
+                lua_getglobal(ls, "Humanoid");
+            else
+                lua_pushnil(ls);
             return 1;
         }
         if (std::strcmp(key, "Emissive") == 0) {
@@ -3093,8 +4327,30 @@ private:
             lua_pushnumber(ls, p->health);
             return 1;
         }
+        // Il numero 0..31 resta nel motore. In Lua si legge il nome ("Default", "Train"...).
+        if (std::strcmp(key, "CollisionGroup") == 0 && pushPreludeField(ls, "collisionGroupName")) {
+            lua_pushinteger(ls, (int)std::lround(p->collisionGroup));
+            if (lua_pcall(ls, 1, 1, 0) == LUA_OK) {
+                if (lua_isstring(ls, -1)) return 1;
+                lua_pop(ls, 1);
+            } else {
+                lua_pop(ls, 1);
+            }
+        }
         if (partprops::luaGet(ls, key, *p))
             return 1;
+        if (std::strcmp(key, "DecalImage") == 0) {
+            lua_pushstring(ls, p->decalImage.c_str());
+            return 1;
+        }
+        if (std::strcmp(key, "TextureImage") == 0) {
+            lua_pushstring(ls, p->textureImage.c_str());
+            return 1;
+        }
+        if (std::strcmp(key, "SpawnTeam") == 0) {
+            lua_pushstring(ls, p->spawnTeam.c_str());
+            return 1;
+        }
         if (std::strcmp(key, "Touched") == 0) {
             lua_newtable(ls);
             lua_pushinteger(ls, partIndexFromSelf(ls, 1));
@@ -3134,6 +4390,11 @@ private:
             float m = 0.f;
             if (rt && rt->phys.getMass && rt->phys.world)
                 m = rt->phys.getMass(rt->phys.world, idx);
+            // Senza fisica attiva (Studio fermo, server di prova): densita' x volume, come Roblox.
+            if (m <= 0.f && rt && rt->workspace && idx >= 0 && idx < (int)rt->workspace->parts.size()) {
+                const auto& wp = rt->workspace->parts[(size_t)idx];
+                m = wp.density * wp.size.x * wp.size.y * wp.size.z;
+            }
             lua_pushnumber(ls, m);
             return 1;
         }
@@ -3158,7 +4419,11 @@ private:
                 if (child >= 0) { pushLivePart(ls, child); return 1; }
             }
         }
-        return 0;
+        if (std::strcmp(key, "AddDecal") == 0) {
+            blockyPushCFunction(ls, luaPartAddDecal);
+            return 1;
+        }
+        return apiLayerIndex(ls, nullptr);
     }
 
     static int luaLivePartNewIndex(lua_State* ls) {
@@ -3211,8 +4476,34 @@ private:
             }
             return 0;
         }
+        // part.CollisionGroup = "Train": il nome diventa l'id 0..31 del PhysicsService.
+        if (std::strcmp(key, "CollisionGroup") == 0 && lua_isstring(ls, 3)) {
+            if (pushPreludeField(ls, "collisionGroupId")) {
+                lua_pushvalue(ls, 3);
+                if (lua_pcall(ls, 1, 1, 0) != LUA_OK) { lua_error(ls); return 0; }
+                if (lua_isnumber(ls, -1))
+                    p->collisionGroup = std::clamp((float)lua_tonumber(ls, -1), 0.f, 31.f);
+                lua_pop(ls, 1);
+            }
+            return 0;
+        }
         if (partprops::luaSet(ls, key, 3, *p))
             return 0;
+        if (std::strcmp(key, "DecalImage") == 0 && lua_isstring(ls, 3)) {
+            p->decalImage = lua_tostring(ls, 3);
+            if (!p->decalImage.empty()) p->decalEnabled = true;
+            return 0;
+        }
+        if (std::strcmp(key, "TextureImage") == 0 && lua_isstring(ls, 3)) {
+            p->textureImage = lua_tostring(ls, 3);
+            if (!p->textureImage.empty()) p->textureEnabled = true;
+            return 0;
+        }
+        if (std::strcmp(key, "SpawnTeam") == 0 && lua_isstring(ls, 3)) {
+            p->spawnTeam = lua_tostring(ls, 3);
+            p->spawnPoint = true;
+            return 0;
+        }
         if (std::strcmp(key, "Velocity") == 0 || std::strcmp(key, "AssemblyLinearVelocity") == 0) {
             auto* rt = fromState(ls);
             int idx = partIndexFromSelf(ls, 1);
@@ -3226,6 +4517,11 @@ private:
             p->name = lua_tostring(ls, 3);
             return 0;
         }
+        if (std::strcmp(key, "MeshId") == 0) {
+            const char* raw = lua_tostring(ls, 3);
+            p->meshFile = (raw && raw[0]) ? resolveScriptPath(raw) : std::string();
+            return 0;
+        }
         if (std::strcmp(key, "Parent") == 0) {
             auto* rt = fromState(ls);
             int selfIdx = partIndexFromSelf(ls, 1);
@@ -3237,7 +4533,48 @@ private:
                 newParent = -1;
                 changed = (oldParent != -1);
                 p->parentIndex = -1;
+                rt->workspace->detachPartFromTool(selfIdx);
             } else if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "ClassName");
+                const bool parentIsTool = lua_isstring(ls, -1)
+                    && std::strcmp(lua_tostring(ls, -1), "Tool") == 0;
+                lua_pop(ls, 1);
+                if (parentIsTool) {
+                    lua_getfield(ls, 3, "_toolId");
+                    std::string tid = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+                    lua_pop(ls, 1);
+                    int slot = rt->workspace->findBackpackById(tid);
+                    if (slot < 0) {
+                        lua_getfield(ls, 3, "Name");
+                        if (lua_isstring(ls, -1))
+                            slot = rt->workspace->findBackpackByName(lua_tostring(ls, -1));
+                        lua_pop(ls, 1);
+                    }
+                    if (slot >= 0) {
+                        auto& item = rt->workspace->backpack[slot];
+                        lua_getfield(ls, 3, "RequiresHandle");
+                        if (lua_isboolean(ls, -1)) item.requiresHandle = lua_toboolean(ls, -1) != 0;
+                        lua_pop(ls, 1);
+                        lua_getfield(ls, 3, "CanBeDropped");
+                        if (lua_isboolean(ls, -1)) item.canBeDropped = lua_toboolean(ls, -1) != 0;
+                        lua_pop(ls, 1);
+                        lua_getfield(ls, 3, "ManualActivationOnly");
+                        if (lua_isboolean(ls, -1)) item.manualActivationOnly = lua_toboolean(ls, -1) != 0;
+                        lua_pop(ls, 1);
+                        lua_getfield(ls, 3, "ToolTip");
+                        if (lua_isstring(ls, -1)) item.toolTip = lua_tostring(ls, -1);
+                        lua_pop(ls, 1);
+                        rt->workspace->attachPartToTool(selfIdx, slot);
+                        // tool.Handle = part, cosi' FindFirstChild("Handle") lo trova.
+                        if (!p->name.empty() && p->name != "Equipped" && p->name != "Unequipped"
+                            && p->name != "Activated" && p->name != "Deactivated"
+                            && p->name != "Parent" && p->name != "Name") {
+                            lua_pushvalue(ls, 1);
+                            lua_setfield(ls, 3, p->name.c_str());
+                        }
+                        return 0;
+                    }
+                }
                 lua_getfield(ls, 3, "__partIndex");
                 if (lua_isnumber(ls, -1)) {
                     int parent = (int)lua_tointeger(ls, -1);
@@ -3258,6 +4595,7 @@ private:
                     changed = (oldParent != -1);
                     p->parentIndex = -1;
                     newParent = -1;
+                    rt->workspace->detachPartFromTool(selfIdx);
                 }
                 lua_pop(ls, 1);
             }
@@ -3279,13 +4617,13 @@ private:
         }
         if (std::strcmp(key, "Material") == 0) {
             if (lua_isstring(ls, 3)) {
-                p->setMaterial(partMaterialFromName(lua_tostring(ls, 3)));
+                applyNamedMaterial(*p, lua_tostring(ls, 3));
                 return 0;
             }
             if (lua_istable(ls, 3)) {
                 lua_getfield(ls, 3, "Name");
                 if (lua_isstring(ls, -1))
-                    p->setMaterial(partMaterialFromName(lua_tostring(ls, -1)));
+                    applyNamedMaterial(*p, lua_tostring(ls, -1));
                 lua_pop(ls, 1);
                 return 0;
             }
@@ -3299,7 +4637,11 @@ private:
             return 0;
         }
         if (std::strcmp(key, "Shape") == 0) {
-            if (lua_isstring(ls, 3))
+            if (lua_istable(ls, 3)) {   // Enum.PartType.Cylinder
+                lua_getfield(ls, 3, "Name");
+                if (lua_isstring(ls, -1)) p->shape = partShapeFromName(lua_tostring(ls, -1));
+                lua_pop(ls, 1);
+            } else if (lua_type(ls, 3) == LUA_TSTRING)
                 p->shape = partShapeFromName(lua_tostring(ls, 3));
             else if (lua_isnumber(ls, 3)) {
                 int id = (int)lua_tointeger(ls, 3);
@@ -3491,6 +4833,8 @@ private:
         lua_pop(L, 1);
         blockyPushCFunction(L, luaTime);
         lua_setglobal(L, "time");
+        blockyPushCFunction(L, luaTick);
+        lua_setglobal(L, "tick");
 
         lua_newtable(L);
         blockyPushCFunction(L, luaColor3New);
@@ -3535,11 +4879,45 @@ private:
         }
         lua_setfield(L, -2, "Material");
         lua_newtable(L);
-        lua_pushinteger(L, 0); lua_setfield(L, -2, "MouseButton1");
-        lua_pushinteger(L, 1); lua_setfield(L, -2, "MouseButton2");
-        lua_pushinteger(L, 2); lua_setfield(L, -2, "MouseButton3");
+        {
+            // Come Roblox: ogni voce è un EnumItem con Name e Value (i numeri
+            // sono quelli di Roblox). IsMouseButtonPressed legge Value.
+            const char* names[] = {
+                "MouseButton1", "MouseButton2", "MouseButton3", "MouseWheel", "MouseMovement",
+                "Touch", "Keyboard", "Gamepad1", "None"
+            };
+            const int values[] = { 0, 1, 2, 3, 4, 7, 8, 12, 22 };
+            for (int i = 0; i < 9; ++i) {
+                lua_newtable(L);
+                lua_pushstring(L, names[i]); lua_setfield(L, -2, "Name");
+                lua_pushinteger(L, values[i]); lua_setfield(L, -2, "Value");
+                lua_pushstring(L, "UserInputType"); lua_setfield(L, -2, "EnumType");
+                lua_setfield(L, -2, names[i]);
+            }
+        }
         lua_setfield(L, -2, "UserInputType");
         lua_setglobal(L, "Enum");
+        // Piattaforma per il prelude (UserInputService.TouchEnabled, KeyboardEnabled...).
+#if defined(__ANDROID__)
+        lua_pushstring(L, "android");
+#elif defined(_WIN32)
+        lua_pushstring(L, "windows");
+#elif defined(__APPLE__)
+        lua_pushstring(L, "mac");
+#else
+        lua_pushstring(L, "linux");
+#endif
+        lua_setglobal(L, "__blkPlatform");
+        // UICorner / UIStroke dentro un elemento GUI: il prelude passa al disegno le loro impostazioni.
+        blockyPushCFunction(L, luaGuiDecor);
+        lua_setglobal(L, "__blkGuiDecor");
+        // CoreScripts: un pezzo di interfaccia passa dal C++ al Luau (core/*.luau)
+        blockyPushCFunction(L, luaCoreGui);
+        lua_setglobal(L, "__blkCoreGui");
+        blockyPushCFunction(L, luaBlkCsg);
+        lua_setglobal(L, "__blkCsg");
+        blockyPushCFunction(L, luaBlkCsgSeparate);
+        lua_setglobal(L, "__blkCsgSeparate");
 
         lua_newtable(L);
         blockyPushCFunction(L, luaWorkspaceAdd);
@@ -3564,6 +4942,8 @@ private:
         lua_setfield(L, -2, "GetPartsInPart");
         blockyPushCFunction(L, luaWorkspaceFindPartsInRegion3);
         lua_setfield(L, -2, "FindPartsInRegion3");
+        blockyPushCFunction(L, luaWorkspaceGetServerTimeNow);
+        lua_setfield(L, -2, "GetServerTimeNow");
         blockyPushCFunction(L, luaWorkspaceGetDescendants);
         lua_setfield(L, -2, "GetDescendants");
         blockyPushCFunction(L, luaWorkspaceFindFirstChildOfClass);
@@ -3611,8 +4991,18 @@ private:
         lua_setfield(L, -2, "GetLook");
         blockyPushCFunction(L, luaHumSetPosition);
         lua_setfield(L, -2, "SetPosition");
+        blockyPushCFunction(L, luaHumSetLook);
+        lua_setfield(L, -2, "SetLook");
         blockyPushCFunction(L, luaHumGetState);
         lua_setfield(L, -2, "GetState");
+        blockyPushCFunction(L, luaHumChangeState);
+        lua_setfield(L, -2, "ChangeState");
+        blockyPushCFunction(L, luaHumSetStateEnabled);
+        lua_setfield(L, -2, "SetStateEnabled");
+        blockyPushCFunction(L, luaHumMove);
+        lua_setfield(L, -2, "Move");
+        blockyPushCFunction(L, luaHumMoveTo);
+        lua_setfield(L, -2, "MoveTo");
         lua_newtable(L);
         pushSignalMethod(L, luaHumDiedConnect, "luaHumDiedConnect", 0);
         lua_setfield(L, -2, "Connect");
@@ -3637,6 +5027,14 @@ private:
         pushSignalMethod(L, luaHumStateChangedConnect, "luaHumStateChangedConnect", 2);
         lua_setfield(L, -2, "Wait");
         lua_setfield(L, -2, "StateChanged");
+        lua_newtable(L);
+        pushSignalMethod(L, luaHumMoveToFinishedConnect, "luaHumMoveToFinishedConnect", 0);
+        lua_setfield(L, -2, "Connect");
+        pushSignalMethod(L, luaHumMoveToFinishedConnect, "luaHumMoveToFinishedConnect", 1);
+        lua_setfield(L, -2, "Once");
+        pushSignalMethod(L, luaHumMoveToFinishedConnect, "luaHumMoveToFinishedConnect", 2);
+        lua_setfield(L, -2, "Wait");
+        lua_setfield(L, -2, "MoveToFinished");
         // Proprieta' vere (Health/MaxHealth/WalkSpeed/JumpPower) accanto ai
         // vecchi Get*/Set* — stessa convenzione di Part (Part.Position),
         // cosi' Humanoid non e' piu' l'unico oggetto che espone solo
@@ -3674,6 +5072,12 @@ private:
         lua_setfield(L, -2, "Give");
         blockyPushCFunction(L, luaBackpackEquipped);
         lua_setfield(L, -2, "Equipped");
+        blockyPushCFunction(L, luaBackpackEquip);
+        lua_setfield(L, -2, "Equip");
+        blockyPushCFunction(L, luaBackpackUnequip);
+        lua_setfield(L, -2, "Unequip");
+        blockyPushCFunction(L, luaBackpackDrop);
+        lua_setfield(L, -2, "Drop");
         lua_setglobal(L, "Backpack");
 
         lua_newtable(L);
@@ -3683,14 +5087,18 @@ private:
         lua_setfield(L, -2, "ScreenRay");
         blockyPushCFunction(L, luaCameraScreenPointToRay);
         lua_setfield(L, -2, "ScreenPointToRay");
+        blockyPushCFunction(L, luaCameraViewportPointToRay);
+        lua_setfield(L, -2, "ViewportPointToRay");
+        blockyPushCFunction(L, luaCameraWorldToScreen);
+        lua_setfield(L, -2, "WorldToScreenPoint");
+        blockyPushCFunction(L, luaCameraWorldToScreen);
+        lua_setfield(L, -2, "WorldToViewportPoint");
         blockyPushCFunction(L, luaCameraGetLook);
         lua_setfield(L, -2, "GetLook");
         blockyPushCFunction(L, luaCameraGetCFrame);
         lua_setfield(L, -2, "GetCFrame");
         lua_pushnumber(L, cameraFov ? *cameraFov : 70.0);
         lua_setfield(L, -2, "FieldOfView");
-        lua_pushstring(L, cameraType == 2 ? "Attach" : (cameraType == 1 ? "Scriptable" : "Custom"));
-        lua_setfield(L, -2, "CameraType");
         lua_newtable(L);
         blockyPushCFunction(L, luaCameraIndex);
         lua_setfield(L, -2, "__index");
@@ -3732,6 +5140,10 @@ private:
         lua_setfield(L, -2, "defer");
         blockyPushCFunction(L, luaTaskCancel);
         lua_setfield(L, -2, "cancel");
+        blockyPushCFunction(L, luaTaskNoop);
+        lua_setfield(L, -2, "synchronize");
+        blockyPushCFunction(L, luaTaskNoop);
+        lua_setfield(L, -2, "desynchronize");
         lua_setglobal(L, "task");
         blockyPushCFunction(L, luaTaskWait);
         lua_setglobal(L, "wait");
@@ -3767,6 +5179,11 @@ private:
         blockyPushCFunction(L, luaSoundStop);
         lua_setfield(L, -2, "Stop");
         lua_setfield(L, -2, "SoundService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaNpcSpawn);
+        lua_setfield(L, -2, "Spawn");
+        lua_setfield(L, -2, "Actors");
 
         lua_newtable(L);
         blockyPushCFunction(L, luaGetDataStore);
@@ -3850,6 +5267,44 @@ private:
         blockyPushCFunction(L, luaDebrisAddItem);
         lua_setfield(L, -2, "AddItem");
         lua_setfield(L, -2, "Debris");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaTextGetTextSize);
+        lua_setfield(L, -2, "GetTextSize");
+        blockyPushCFunction(L, luaTextFilter);
+        lua_setfield(L, -2, "FilterStringAsync");
+        lua_setfield(L, -2, "TextService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaBadgeAward);
+        lua_setfield(L, -2, "AwardBadge");
+        blockyPushCFunction(L, luaBadgeHas);
+        lua_setfield(L, -2, "UserHasBadgeAsync");
+        lua_setfield(L, -2, "BadgeService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaContentPreload);
+        lua_setfield(L, -2, "PreloadAsync");
+        lua_setfield(L, -2, "ContentProvider");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaGuiGetInset);
+        lua_setfield(L, -2, "GetGuiInset");
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "MenuIsOpen");
+        lua_setfield(L, -2, "GuiService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaMsgSubscribe);
+        lua_setfield(L, -2, "SubscribeAsync");
+        blockyPushCFunction(L, luaMsgPublish);
+        lua_setfield(L, -2, "PublishAsync");
+        lua_setfield(L, -2, "MessagingService");
+
+        lua_newtable(L);
+        blockyPushCFunction(L, luaPolicyInfo);
+        lua_setfield(L, -2, "GetPolicyInfoForPlayerAsync");
+        lua_setfield(L, -2, "PolicyService");
 
         lua_newtable(L);
         lua_setfield(L, -2, "Chat");
@@ -3983,6 +5438,7 @@ private:
         auto* rt = fromState(ls);
         if (rt) {
             rt->printLog.push_back(out);
+            ++rt->printCount;
             if (rt->printLog.size() > 400)
                 rt->printLog.erase(rt->printLog.begin(),
                                    rt->printLog.begin() + (rt->printLog.size() - 400));
@@ -4066,6 +5522,17 @@ private:
         lua_pushnumber(ls, glfwGetTime());
         return 1;
     }
+    static int luaTick(lua_State* ls) {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        lua_pushnumber(ls, std::chrono::duration<double>(now).count());
+        return 1;
+    }
+    static int luaTaskNoop(lua_State*) { return 0; }
+    static int luaWorkspaceGetServerTimeNow(lua_State* ls) {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        lua_pushnumber(ls, std::chrono::duration<double>(now).count());
+        return 1;
+    }
 
     static int luaColor3New(lua_State* ls) {
         pushColor3(ls,
@@ -4134,6 +5601,83 @@ private:
         return 1;
     }
 
+    static int specialMeshData(lua_State* ls, int meshTable) {
+        lua_getfield(ls, meshTable, "__data");
+        if (lua_istable(ls, -1)) return lua_gettop(ls);
+        lua_pop(ls, 1);
+        lua_pushvalue(ls, meshTable);
+        return lua_gettop(ls);
+    }
+    static void applySpecialMesh(lua_State* ls, int meshTable) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) return;
+        if (meshTable < 0) meshTable = lua_gettop(ls) + 1 + meshTable;
+        const int data = specialMeshData(ls, meshTable);
+        lua_getfield(ls, data, "Parent");
+        int pi = -1;
+        if (lua_istable(ls, -1)) {
+            lua_getfield(ls, -1, "__partIndex");
+            if (lua_isnumber(ls, -1)) pi = (int)lua_tointeger(ls, -1);
+            lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        if (pi < 0 || pi >= (int)rt->workspace->parts.size()) { lua_pop(ls, 1); return; }
+        WorkspacePart& p = rt->workspace->parts[(size_t)pi];
+        lua_getfield(ls, data, "MeshId");
+        if (lua_isstring(ls, -1)) {
+            const char* raw = lua_tostring(ls, -1);
+            p.meshFile = (raw && raw[0]) ? resolveScriptPath(raw) : std::string();
+        }
+        lua_pop(ls, 1);
+        lua_getfield(ls, data, "Scale");
+        if (lua_istable(ls, -1)) {
+            glm::vec3 s{1.f};
+            if (readVec3Arg(ls, lua_gettop(ls), s))
+                p.meshScale = glm::max(s, glm::vec3(0.01f));
+        }
+        lua_pop(ls, 1);
+        std::string tipo;
+        lua_getfield(ls, data, "MeshType");
+        if (lua_isstring(ls, -1)) tipo = lua_tostring(ls, -1);
+        else if (lua_istable(ls, -1)) {
+            lua_getfield(ls, -1, "Name");
+            if (lua_isstring(ls, -1)) tipo = lua_tostring(ls, -1);
+            lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        lua_pop(ls, 1); // data
+        if (tipo == "Brick" || tipo == "Block") { p.shape = PartShape::Block; p.meshFile.clear(); }
+        else if (tipo == "Sphere" || tipo == "Ball" || tipo == "Head") { p.shape = PartShape::Ball; p.meshFile.clear(); p.useStud = false; }
+        else if (tipo == "Cylinder") { p.shape = PartShape::Cylinder; p.meshFile.clear(); p.useStud = false; }
+        else if (tipo == "Wedge") { p.shape = PartShape::Wedge; p.meshFile.clear(); p.useStud = false; }
+    }
+    static int luaSpecialMeshIndex(lua_State* ls) {
+        const int data = specialMeshData(ls, 1);
+        lua_pushvalue(ls, 2);
+        lua_gettable(ls, data);
+        lua_remove(ls, data);
+        return 1;
+    }
+    static int luaSpecialMeshNewIndex(lua_State* ls) {
+        lua_getfield(ls, 1, "__data");
+        if (!lua_istable(ls, -1)) {
+            lua_pop(ls, 1);
+            lua_newtable(ls);
+            lua_pushvalue(ls, -1);
+            lua_setfield(ls, 1, "__data");
+        }
+        lua_pushvalue(ls, 2);
+        lua_pushvalue(ls, 3);
+        lua_rawset(ls, -3);
+        lua_pop(ls, 1);
+        applySpecialMesh(ls, 1);
+        return 0;
+    }
+    static int luaSpecialMeshTouch(lua_State* ls) {
+        applySpecialMesh(ls, 1);
+        return 0;
+    }
+
     static int luaInstanceNew(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace)
@@ -4144,13 +5688,17 @@ private:
         // era la tabella appena creata (Instance.new("Configuration") falliva).
         lua_settop(ls, std::max(lua_gettop(ls), 3));
         const char* className = luaL_optstring(ls, 1, "Part");
+        if (className && std::strcmp(className, "UnreliableRemoteEvent") == 0)
+            className = "RemoteEvent";
         if (std::strcmp(className, "Part") == 0
+            || std::strcmp(className, "MeshPart") == 0
             || std::strcmp(className, "Ball") == 0
             || std::strcmp(className, "Cylinder") == 0
             || std::strcmp(className, "WedgePart") == 0
             || std::strcmp(className, "Wedge") == 0) {
             WorkspacePart p;
             p.name = className;
+            p.anchored = false;   // come Roblox: una Part creata dallo script cade
             p.size = {4.f, 1.f, 2.f};
             p.color = {0.64f, 0.64f, 0.64f};
             if (std::strcmp(className, "Ball") == 0) {
@@ -4159,7 +5707,7 @@ private:
                 p.useStud = false;
             } else if (std::strcmp(className, "Cylinder") == 0) {
                 p.shape = PartShape::Cylinder;
-                p.size = {2.f, 4.f, 2.f};
+                p.size = {4.f, 2.f, 2.f};   // lungo su X, come Roblox
                 p.useStud = false;
             } else if (std::strcmp(className, "WedgePart") == 0
                        || std::strcmp(className, "Wedge") == 0) {
@@ -4192,10 +5740,20 @@ private:
             lua_setfield(ls, -2, "Looped");
             lua_pushnumber(ls, 1.0);
             lua_setfield(ls, -2, "Volume");
+            lua_pushnumber(ls, 1.0);
+            lua_setfield(ls, -2, "PlaybackSpeed");
+            lua_pushboolean(ls, 0);
+            lua_setfield(ls, -2, "Playing");
+            lua_pushboolean(ls, 0);
+            lua_setfield(ls, -2, "IsPlaying");
             blockyPushCFunction(ls, luaSoundPlay);
             lua_setfield(ls, -2, "Play");
             blockyPushCFunction(ls, luaSoundStop);
             lua_setfield(ls, -2, "Stop");
+            blockyPushCFunction(ls, luaSoundPause);
+            lua_setfield(ls, -2, "Pause");
+            blockyPushCFunction(ls, luaSoundPlay);
+            lua_setfield(ls, -2, "Resume");
             return 1;
         }
         if (std::strcmp(className, "ParticleEmitter") == 0) {
@@ -4241,6 +5799,7 @@ private:
                 if (lua_isnumber(ls, -1)) partIdx = (int)lua_tointeger(ls, -1);
                 lua_pop(ls, 1);
             }
+            if (partIdx >= 0) scriptControls().clickReach[partIdx] = 32.f;
             lua_newtable(ls);
             lua_pushstring(ls, "ClickDetector");
             lua_setfield(ls, -2, "ClassName");
@@ -4249,11 +5808,6 @@ private:
             lua_pushinteger(ls, partIdx);
             lua_setfield(ls, -2, "__partIndex");
             trackPartTable(ls, -1);
-            lua_pushnumber(ls, 32.0);
-            lua_setfield(ls, -2, "MaxActivationDistance");
-            // MouseClick: un clic del mouse sulla part (main.cpp fa il raggio
-            // dal cursore). Prima era lo stesso elenco di Touched: scattava
-            // passandoci sopra, non cliccando.
             lua_newtable(ls);
             lua_pushinteger(ls, partIdx);
             lua_setfield(ls, -2, "__partIndex");
@@ -4265,23 +5819,39 @@ private:
             pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 2);
             lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "MouseClick");
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaClickNewIndex);
+            lua_setfield(ls, -2, "__newindex");
+            lua_setmetatable(ls, -2);
             return 1;
         }
         if (std::strcmp(className, "Tool") == 0) {
             const char* nm = luaL_optstring(ls, 2, "Tool");
             auto& it = rt->workspace->addBackpackItem(nm ? nm : "Tool");
+            it.localOnly = netRoleIsClient(rt);
             scriptControls().toolEquipped[it.name];
             scriptControls().toolUnequipped[it.name];
             scriptControls().toolActivated[it.name];
+            scriptControls().toolDeactivated[it.name];
             lua_newtable(ls);
-            lua_pushstring(ls, it.name.c_str());
-            lua_setfield(ls, -2, "Name");
+            // (Name non e' un campo: lo legge e lo scrive la metatabella, luaToolIndex /
+            // luaToolNewIndex, cosi' rinominare il Tool arriva allo zaino e agli eventi)
             lua_pushstring(ls, "Tool");
             lua_setfield(ls, -2, "ClassName");
             lua_pushstring(ls, it.id.c_str());
             lua_setfield(ls, -2, "_toolId");
             lua_pushstring(ls, it.name.c_str());
             lua_setfield(ls, -2, "_toolName");
+            lua_pushboolean(ls, it.requiresHandle ? 1 : 0);
+            lua_setfield(ls, -2, "RequiresHandle");
+            lua_pushboolean(ls, it.canBeDropped ? 1 : 0);
+            lua_setfield(ls, -2, "CanBeDropped");
+            lua_pushboolean(ls, it.manualActivationOnly ? 1 : 0);
+            lua_setfield(ls, -2, "ManualActivationOnly");
+            lua_pushboolean(ls, 1);
+            lua_setfield(ls, -2, "Enabled");
+            lua_pushstring(ls, "");
+            lua_setfield(ls, -2, "ToolTip");
             lua_newtable(ls);
             lua_pushstring(ls, it.name.c_str());
             lua_setfield(ls, -2, "_toolName");
@@ -4318,8 +5888,53 @@ private:
             pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 2);
             lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Activated");
+            lua_newtable(ls);
+            lua_pushstring(ls, it.name.c_str());
+            lua_setfield(ls, -2, "_toolName");
+            lua_pushstring(ls, "Deactivated");
+            lua_setfield(ls, -2, "_toolEvent");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 0);
+            lua_setfield(ls, -2, "Connect");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 1);
+            lua_setfield(ls, -2, "Once");
+            pushSignalMethod(ls, luaToolEventConnect, "luaToolEventConnect", 2);
+            lua_setfield(ls, -2, "Wait");
+            lua_setfield(ls, -2, "Deactivated");
             blockyPushCFunction(ls, luaToolActivate);
             lua_setfield(ls, -2, "Activate");
+            // La metatabella fa anche si' che il prelude non lo ricrei al Parent
+            // (prima: Instance.new("Tool") + Parent = due Tool nella barra).
+            lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyToolMT");
+            if (!lua_istable(ls, -1)) {
+                lua_pop(ls, 1);
+                lua_newtable(ls);
+                blockyPushCFunction(ls, luaToolIndex);
+                lua_setfield(ls, -2, "__index");
+                blockyPushCFunction(ls, luaToolNewIndex);
+                lua_setfield(ls, -2, "__newindex");
+                lua_pushvalue(ls, -1);
+                lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyToolMT");
+            }
+            lua_setmetatable(ls, -2);
+            return 1;
+        }
+        if (std::strcmp(className, "SpecialMesh") == 0
+            || std::strcmp(className, "FileMesh") == 0) {
+            lua_newtable(ls);
+            lua_pushstring(ls, className);
+            lua_setfield(ls, -2, "ClassName");
+            lua_pushstring(ls, luaL_optstring(ls, 2, "Mesh"));
+            lua_setfield(ls, -2, "Name");
+            lua_newtable(ls);
+            lua_setfield(ls, -2, "__data");
+            blockyPushCFunction(ls, luaSpecialMeshTouch);
+            lua_setfield(ls, -2, "Apply");
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaSpecialMeshIndex);
+            lua_setfield(ls, -2, "__index");
+            blockyPushCFunction(ls, luaSpecialMeshNewIndex);
+            lua_setfield(ls, -2, "__newindex");
+            lua_setmetatable(ls, -2);
             return 1;
         }
         if (std::strcmp(className, "WeldConstraint") == 0
@@ -4362,7 +5977,7 @@ private:
             WorkspaceLabel lab;
             lab.name = luaL_optstring(ls, 2, className);
             lab.className = className;
-            lab.text = lab.name;
+            lab.text.clear();
             lab.visible = true;
             lab.fontScale = 1.1f;
             if (lua_istable(ls, 3)) {
@@ -4375,6 +5990,7 @@ private:
                     lab.parentIndex = (int)lua_tointeger(ls, -1);
                 lua_pop(ls, 1);
             }
+            lab.skipNet = netRoleIsClient(rt);
             rt->workspace->labels.push_back(std::move(lab));
             int idx = (int)rt->workspace->labels.size() - 1;
             pushLiveLabel(ls, idx);
@@ -4421,35 +6037,41 @@ private:
             return 1;
         }
         if (std::strcmp(className, "ProximityPrompt") == 0) {
-            const char* nm = luaL_optstring(ls, 2, "Prompt");
+            const char* nm = luaL_optstring(ls, 2, "ProximityPrompt");
             auto* rt = fromState(ls);
-            int partIdx = -1;
-            float x = 0, y = 0, z = 0, radius = 8.f;
-            if (lua_istable(ls, 3)) {
-                lua_getfield(ls, 3, "__partIndex");
-                if (lua_isnumber(ls, -1)) {
-                    partIdx = (int)lua_tointeger(ls, -1);
-                    if (rt && rt->workspace && partIdx >= 0
-                        && partIdx < (int)rt->workspace->parts.size()) {
-                        const auto& p = rt->workspace->parts[partIdx];
-                        x = p.position.x; y = p.position.y; z = p.position.z;
-                    }
-                }
-                lua_pop(ls, 1);
+            // Chiave interna unica: piu' prompt possono avere lo stesso Name (tante
+            // casse uguali); prima si fondevano in uno e Triggered scattava per tutti.
+            static unsigned promptSeq = 0;
+            const std::string pkey = "pp#" + std::to_string(++promptSeq);
+            if (rt && rt->proximity) {
+                rt->proximity->add(pkey, "Interact", 0.f, 0.f, 0.f, 10.f, -1);
+                rt->proximity->setEnabled(pkey, false);   // si accende quando ha una part come Parent
             }
-            if (rt && rt->proximity)
-                rt->proximity->add(nm, "Interact", x, y, z, radius, partIdx);
             lua_newtable(ls);
             lua_pushstring(ls, nm);
             lua_setfield(ls, -2, "Name");
             lua_pushstring(ls, "ProximityPrompt");
             lua_setfield(ls, -2, "ClassName");
-            lua_pushstring(ls, nm);
+            lua_pushstring(ls, pkey.c_str());
             lua_setfield(ls, -2, "_promptName");
-            lua_pushnumber(ls, radius);
-            lua_setfield(ls, -2, "MaxActivationDistance");
+            lua_newtable(ls);   // _v: i valori scritti (fuori dai campi raw, cosi' ogni scrittura passa da __newindex)
+            lua_setfield(ls, -2, "_v");
+            blockyPushCFunction(ls, luaPromptDestroy);
+            lua_setfield(ls, -2, "Destroy");
+            lua_getfield(ls, LUA_REGISTRYINDEX, "BlockyPromptMT");
+            if (!lua_istable(ls, -1)) {
+                lua_pop(ls, 1);
+                lua_newtable(ls);
+                blockyPushCFunction(ls, luaPromptNewIndex);
+                lua_setfield(ls, -2, "__newindex");
+                blockyPushCFunction(ls, luaPromptIndex);
+                lua_setfield(ls, -2, "__index");
+                lua_pushvalue(ls, -1);
+                lua_setfield(ls, LUA_REGISTRYINDEX, "BlockyPromptMT");
+            }
+            lua_setmetatable(ls, -2);
             lua_newtable(ls);
-            lua_pushstring(ls, nm);
+            lua_pushstring(ls, pkey.c_str());
             lua_setfield(ls, -2, "_promptName");
             pushSignalMethod(ls, luaProximityTriggeredConnect, "luaProximityTriggeredConnect", 0);
             lua_setfield(ls, -2, "Connect");
@@ -4458,6 +6080,13 @@ private:
             pushSignalMethod(ls, luaProximityTriggeredConnect, "luaProximityTriggeredConnect", 2);
             lua_setfield(ls, -2, "Wait");
             lua_setfield(ls, -2, "Triggered");
+            if (lua_istable(ls, 3)) {   // Instance.new("ProximityPrompt", part)
+                lua_pushcfunction(ls, luaPromptNewIndex, "luaPromptNewIndex");
+                lua_pushvalue(ls, -2);
+                lua_pushstring(ls, "Parent");
+                lua_pushvalue(ls, 3);
+                lua_call(ls, 3, 0);
+            }
             return 1;
         }
         if (std::strcmp(className, "UIListLayout") == 0
@@ -4477,6 +6106,7 @@ private:
                     lay.parentIndex = (int)lua_tointeger(ls, -1);
                 lua_pop(ls, 1);
             }
+            lay.skipNet = netRoleIsClient(rt);
             rt->workspace->labels.push_back(std::move(lay));
             int idx = (int)rt->workspace->labels.size() - 1;
             lua_newtable(ls);
@@ -4486,6 +6116,14 @@ private:
             lua_setfield(ls, -2, "ClassName");
             lua_pushstring(ls, rt->workspace->labels[idx].name.c_str());
             lua_setfield(ls, -2, "Name");
+            lua_newtable(ls);
+            lua_setfield(ls, -2, "_v");
+            lua_newtable(ls);
+            blockyPushCFunction(ls, luaLayoutNewIndex);
+            lua_setfield(ls, -2, "__newindex");
+            blockyPushCFunction(ls, luaLayoutIndex);
+            lua_setfield(ls, -2, "__index");
+            lua_setmetatable(ls, -2);
             return 1;
         }
         if (std::strcmp(className, "Script") == 0
@@ -4660,6 +6298,26 @@ private:
         return 0;
     }
 
+    static int soundPartIndex(lua_State* ls, int arg) {
+        int part = -1;
+        lua_getfield(ls, arg, "_partIdx");
+        if (lua_isnumber(ls, -1)) part = (int)lua_tointeger(ls, -1);
+        lua_pop(ls, 1);
+        if (part >= 0) return part;
+        lua_getfield(ls, arg, "Parent");
+        if (lua_istable(ls, -1)) {
+            lua_getfield(ls, -1, "__partIndex");
+            if (!lua_isnumber(ls, -1)) {
+                lua_pop(ls, 1);
+                lua_getfield(ls, -1, "_partIdx");
+            }
+            if (lua_isnumber(ls, -1)) part = (int)lua_tointeger(ls, -1);
+            lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        return part;
+    }
+
     static int luaSoundPlay(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->soundService)
@@ -4672,35 +6330,78 @@ private:
             lua_getfield(ls, arg, "Looped");
             if (lua_isboolean(ls, -1)) looped = lua_toboolean(ls, -1) != 0;
             lua_pop(ls, 1);
+            float volume = 1.f;
+            lua_getfield(ls, arg, "Volume");
+            if (lua_isnumber(ls, -1)) volume = (float)lua_tonumber(ls, -1);
+            lua_pop(ls, 1);
             if (id.empty()) {
-                std::fprintf(stderr, "[Lua] SoundService:Play SoundId vuoto\n");
+                std::fprintf(stderr, "[Lua] Sound:Play SoundId vuoto\n");
                 lua_pushboolean(ls, 0);
                 return 1;
             }
-            if (!rt->soundService->playPath(id, looped)) {
-                std::fprintf(stderr, "[Lua] SoundService:Play fallito: %s\n",
+            lua_getfield(ls, arg, "_voice");
+            if (lua_isnumber(ls, -1))
+                rt->soundService->forgetVoice((int)lua_tointeger(ls, -1));
+            lua_pop(ls, 1);
+            int part = soundPartIndex(ls, arg);
+            const glm::vec3* at = nullptr;
+            glm::vec3 pos{0.f};
+            if (part >= 0 && rt->workspace && part < (int)rt->workspace->parts.size()) {
+                const auto& wp = rt->workspace->parts[(size_t)part];
+                pos = rt->workspace->partHeldInHand(wp)
+                    ? (rt->playerPos ? *rt->playerPos : wp.position)
+                    : wp.position;
+                at = &pos;
+            }
+            const int voice = rt->soundService->playHeard(id, volume, looped, at, part);
+            lua_pushinteger(ls, voice);
+            lua_setfield(ls, arg, "_voice");
+            lua_getfield(ls, arg, "PlaybackSpeed");
+            if (lua_isnumber(ls, -1) && voice > 0 && rt->soundService->mixSetPitch) {
+                float spd = std::clamp((float)lua_tonumber(ls, -1), 0.05f, 8.f);
+                rt->soundService->mixSetPitch(voice, spd);
+            }
+            lua_pop(ls, 1);
+            lua_pushboolean(ls, voice > 0 ? 1 : 0);
+            lua_setfield(ls, arg, "Playing");
+            lua_pushboolean(ls, voice > 0 ? 1 : 0);
+            lua_setfield(ls, arg, "IsPlaying");
+            lua_pushboolean(ls, voice > 0 ? 1 : 0);
+            if (voice <= 0)
+                std::fprintf(stderr, "[Lua] Sound:Play fallito: %s\n",
                              rt->soundService->lastError.c_str());
-                lua_pushboolean(ls, 0);
-                return 1;
-            }
-            lua_pushboolean(ls, 1);
             return 1;
         }
         const char* path = luaL_checkstring(ls, arg);
         bool looped = lua_toboolean(ls, arg + 1) != 0;
-        if (!rt->soundService->playPath(path, looped)) {
-            std::fprintf(stderr, "[Lua] SoundService:Play fallito: %s\n",
-                         rt->soundService->lastError.c_str());
-            lua_pushboolean(ls, 0);
-            return 1;
-        }
-        lua_pushboolean(ls, 1);
+        const int voice = rt->soundService->playHeard(path, 1.f, looped, nullptr, -1);
+        lua_pushboolean(ls, voice > 0 ? 1 : 0);
         return 1;
     }
 
+    static int luaSoundPause(lua_State* ls) {
+        luaSoundStop(ls);
+        return 0;
+    }
     static int luaSoundStop(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (rt && rt->soundService) rt->soundService->stopAll();
+        if (!rt || !rt->soundService) return 0;
+        if (lua_istable(ls, 1)) {
+            lua_getfield(ls, 1, "_voice");
+            if (lua_isnumber(ls, -1)) {
+                const int v = (int)lua_tointeger(ls, -1);
+                if (v > 0) rt->soundService->forgetVoice(v);
+            }
+            lua_pop(ls, 1);
+            lua_pushinteger(ls, 0);
+            lua_setfield(ls, 1, "_voice");
+            lua_pushboolean(ls, 0);
+            lua_setfield(ls, 1, "Playing");
+            lua_pushboolean(ls, 0);
+            lua_setfield(ls, 1, "IsPlaying");
+            return 0;
+        }
+        rt->soundService->stopAll();
         return 0;
     }
 
@@ -4719,8 +6420,169 @@ private:
         if (e.partIndex < 0 || !rt->workspace || e.partIndex >= (int)rt->workspace->parts.size())
             return 0;
         const auto& p = rt->workspace->parts[e.partIndex];
-        rt->particles->emitPreset((ParticlePreset)e.preset,
-            p.position + glm::vec3(0, p.size.y * 0.5f, 0), count, e.color, {0, 1, 0});
+        rt->burstEmitter(e, p.position + glm::vec3(0, p.size.y * 0.5f, 0), count);
+        return 0;
+    }
+
+    static std::string materialKey(const char* raw) {
+        std::string s = raw ? raw : "";
+        for (char& c : s)
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        s.erase(std::remove_if(s.begin(), s.end(),
+                               [](char c) { return c == ' ' || c == '_' || c == '-'; }),
+                s.end());
+        return s;
+    }
+    /** WoodPlanks, Sandstone, Pebble... diventano il materiale piu' simile, con un avviso una volta sola. */
+    static void applyNamedMaterial(WorkspacePart& p, const char* raw) {
+        if (!raw || !raw[0]) return;
+        const PartMaterial m = partMaterialFromName(raw);
+        const std::string want = materialKey(raw);
+        const std::string got = materialKey(partMaterialName(m));
+        if (want != got) {
+            static std::set<std::string> gia;
+            if (gia.insert(want).second)
+                std::fprintf(stderr, "[Lua] Materiale %s: il motore usa %s\n", raw, partMaterialName(m));
+        }
+        p.setMaterial(m);
+    }
+
+    static bool readNumRange(lua_State* ls, int idx, float& a, float& b) {
+        if (lua_isnumber(ls, idx)) { a = b = (float)lua_tonumber(ls, idx); return true; }
+        if (!lua_istable(ls, idx)) return false;
+        lua_getfield(ls, idx, "Min");
+        if (lua_isnumber(ls, -1)) a = (float)lua_tonumber(ls, -1);
+        lua_pop(ls, 1);
+        lua_getfield(ls, idx, "Max");
+        if (lua_isnumber(ls, -1)) b = (float)lua_tonumber(ls, -1);
+        else b = a;
+        lua_pop(ls, 1);
+        return true;
+    }
+
+    static int luaLightIndex(lua_State* ls) {
+        lua_getfield(ls, 1, "_v");
+        if (!lua_istable(ls, -1)) { lua_pop(ls, 1); return 0; }
+        lua_pushvalue(ls, 2);
+        lua_rawget(ls, -2);
+        if (lua_isnil(ls, -1)) { lua_pop(ls, 2); return 0; }
+        lua_remove(ls, -2);
+        return 1;
+    }
+
+    static bool lightField(const char* key) {
+        return key && (!std::strcmp(key, "Range") || !std::strcmp(key, "Brightness")
+            || !std::strcmp(key, "Enabled") || !std::strcmp(key, "Angle")
+            || !std::strcmp(key, "Face") || !std::strcmp(key, "Color")
+            || !std::strcmp(key, "Parent"));
+    }
+
+    static int luaLightNewIndex(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* key = lua_tostring(ls, 2);
+        if (!rt || !rt->workspace || !key || !lua_istable(ls, 1)) return 0;
+        auto partAt = [&](int idx) -> WorkspacePart* {
+            if (idx < 0 || idx >= (int)rt->workspace->parts.size()) return nullptr;
+            return &rt->workspace->parts[(size_t)idx];
+        };
+        auto current = [&]() -> int {
+            lua_getfield(ls, 1, "_part");
+            const int idx = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+            lua_pop(ls, 1);
+            return idx;
+        };
+        auto stored = [&](const char* name) {
+            lua_getfield(ls, 1, "_v");
+            if (!lua_istable(ls, -1)) { lua_pop(ls, 1); lua_pushnil(ls); return; }
+            lua_getfield(ls, -1, name);
+            lua_remove(ls, -2);
+        };
+        auto applyStored = [&](WorkspacePart& p) {
+            lua_getfield(ls, 1, "ClassName");
+            const char* cls = lua_tostring(ls, -1);
+            lua_pop(ls, 1);
+            if (cls && std::strcmp(cls, "SurfaceLight") == 0) p.lightKind = 2.f;
+            else if (cls && std::strcmp(cls, "SpotLight") == 0) p.lightKind = 1.f;
+            else p.lightKind = 0.f;
+            stored("Enabled");
+            p.pointLight = !lua_isboolean(ls, -1) || lua_toboolean(ls, -1) != 0;
+            lua_pop(ls, 1);
+            stored("Range");
+            p.lightRange = lua_isnumber(ls, -1) ? std::max(0.f, (float)lua_tonumber(ls, -1)) : 16.f;
+            lua_pop(ls, 1);
+            stored("Brightness");
+            p.lightBrightness = lua_isnumber(ls, -1) ? std::max(0.f, (float)lua_tonumber(ls, -1)) : 1.f;
+            lua_pop(ls, 1);
+            stored("Angle");
+            if (lua_isnumber(ls, -1)) p.lightAngle = std::clamp((float)lua_tonumber(ls, -1), 1.f, 180.f);
+            lua_pop(ls, 1);
+            stored("Face");
+            if (lua_isnumber(ls, -1)) p.lightFace = std::clamp((float)lua_tonumber(ls, -1), 0.f, 5.f);
+            lua_pop(ls, 1);
+            stored("Color");
+            if (lua_istable(ls, -1)) readColor3Arg(ls, lua_gettop(ls), p.lightColor);
+            lua_pop(ls, 1);
+        };
+        if (std::strcmp(key, "Parent") == 0) {
+            const int old = current();
+            int neu = -1;
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "__partIndex");
+                if (lua_isnumber(ls, -1)) neu = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+            }
+            if (old != neu)
+                if (WorkspacePart* o = partAt(old)) o->pointLight = false;
+            lua_pushstring(ls, "_part");
+            lua_pushinteger(ls, neu);
+            lua_rawset(ls, 1);
+            if (WorkspacePart* n = partAt(neu)) applyStored(*n);
+            else if (lua_istable(ls, 3)) {
+                // Part ancora fuori dal mondo: il valore sta sulla sua tabella.
+                lua_getfield(ls, 1, "ClassName");
+                const char* cls = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+                const int kind = (cls && std::strcmp(cls, "SurfaceLight") == 0) ? 2
+                    : (cls && std::strcmp(cls, "SpotLight") == 0) ? 1 : 0;
+                lua_pushinteger(ls, kind);
+                lua_setfield(ls, 3, "LightKind");
+                lua_pushboolean(ls, 1);
+                lua_setfield(ls, 3, "PointLight");
+            }
+        } else if (WorkspacePart* p = partAt(current())) {
+            if (!std::strcmp(key, "Range") && lua_isnumber(ls, 3))
+                p->lightRange = std::max(0.f, (float)lua_tonumber(ls, 3));
+            else if (!std::strcmp(key, "Brightness") && lua_isnumber(ls, 3))
+                p->lightBrightness = std::max(0.f, (float)lua_tonumber(ls, 3));
+            else if (!std::strcmp(key, "Enabled"))
+                p->pointLight = lua_toboolean(ls, 3) != 0;
+            else if (!std::strcmp(key, "Angle") && lua_isnumber(ls, 3))
+                p->lightAngle = std::clamp((float)lua_tonumber(ls, 3), 1.f, 180.f);
+            else if (!std::strcmp(key, "Face") && lua_isnumber(ls, 3))
+                p->lightFace = std::clamp((float)lua_tonumber(ls, 3), 0.f, 5.f);
+            else if (!std::strcmp(key, "Color") && lua_istable(ls, 3))
+                readColor3Arg(ls, 3, p->lightColor);
+        }
+        // Range, Enabled, Color... non restano sulla tabella: se ci restassero,
+        // la scrittura successiva non passerebbe da qui (Luau chiama __newindex
+        // solo se la chiave manca) e la part terrebbe il valore vecchio.
+        if (lightField(key)) {
+            lua_getfield(ls, 1, "_v");
+            if (!lua_istable(ls, -1)) {
+                lua_pop(ls, 1);
+                lua_newtable(ls);
+                lua_pushvalue(ls, -1);
+                lua_setfield(ls, 1, "_v");
+            }
+            lua_pushvalue(ls, 2);
+            lua_pushvalue(ls, 3);
+            lua_rawset(ls, -3);
+            lua_pop(ls, 1);
+        } else {
+            lua_pushvalue(ls, 2);
+            lua_pushvalue(ls, 3);
+            lua_rawset(ls, 1);
+        }
         return 0;
     }
 
@@ -4739,6 +6601,44 @@ private:
             e.enabled = lua_toboolean(ls, 3) != 0;
         else if (std::strcmp(key, "Color") == 0 && lua_istable(ls, 3))
             readColor3Arg(ls, 3, e.color);
+        else if (std::strcmp(key, "Speed") == 0) {
+            float a = e.speed, b = e.speed;
+            if (readNumRange(ls, 3, a, b)) {
+                e.speedMin = std::clamp(std::min(a, b), 0.f, 40.f);
+                e.speed = std::clamp(std::max(a, b), 0.f, 40.f);
+                e.customMotion = true;
+            }
+        } else if (std::strcmp(key, "Lifetime") == 0) {
+            float a = e.life, b = e.life;
+            if (readNumRange(ls, 3, a, b)) {
+                e.life = std::clamp(std::max(a, b), 0.05f, 8.f);
+                e.customMotion = true;
+            }
+        } else if (std::strcmp(key, "Size") == 0 && lua_isnumber(ls, 3)) {
+            const float s = std::clamp((float)lua_tonumber(ls, 3), 0.02f, 4.f);
+            e.size0 = s;
+            e.size1 = s * 0.2f;
+            e.customMotion = true;
+        } else if (std::strcmp(key, "SpreadAngle") == 0) {
+            float deg = 0.f;
+            if (lua_isnumber(ls, 3)) deg = (float)lua_tonumber(ls, 3);
+            else if (lua_istable(ls, 3))
+                deg = std::max(guiNumField(ls, 3, "X", 0.f), guiNumField(ls, 3, "Y", 0.f));
+            e.spread = std::clamp(deg / 180.f, 0.f, 2.f);
+            e.customMotion = true;
+        } else if (std::strcmp(key, "Drag") == 0 && lua_isnumber(ls, 3)) {
+            e.drag = std::clamp((float)lua_tonumber(ls, 3), 0.f, 20.f);
+            e.customMotion = true;
+        }         else if (std::strcmp(key, "Acceleration") == 0 && lua_istable(ls, 3)) {
+            glm::vec3 a{0.f, e.gravity, 0.f};
+            readVec3Arg(ls, 3, a);
+            e.gravity = std::clamp(a.y, -80.f, 40.f);
+            e.customMotion = true;
+        } else if (std::strcmp(key, "Parent") == 0 && lua_istable(ls, 3)) {
+            lua_getfield(ls, 3, "__partIndex");
+            if (lua_isnumber(ls, -1)) e.partIndex = (int)lua_tointeger(ls, -1);
+            lua_pop(ls, 1);
+        }
         lua_rawset(ls, 1);
         return 0;
     }
@@ -4953,6 +6853,7 @@ private:
             lab.bgColor = {0.f, 0.f, 0.f};
             lab.bgTransparency = 0.35f;
             lab.color = {1.f, 1.f, 1.f};
+            lab.skipNet = netRoleIsClient(rt);
             rt->workspace->labels.push_back(lab);
             lua_pushstring(ls, lab.name.c_str());
             return 1;
@@ -5005,6 +6906,7 @@ private:
         lab.color = getCol("TextColor", {1.f, 1.f, 1.f});
         lab.bgColor = getCol("BackgroundColor", {0.f, 0.f, 0.f});
         lab.visible = getBool("Visible", true);
+        lab.skipNet = netRoleIsClient(rt);
         if (auto* existing = findLabelByName(rt, lab.name.c_str())) {
             *existing = lab;
         } else {
@@ -5111,19 +7013,48 @@ private:
             lua_pushnumber(ls, (rt && rt->playerHumanoid) ? rt->playerHumanoid->maxHealth : 100.f);
             return 1;
         }
+        // Senza un valore messo da uno script (override < 0) si legge quello vero
+        // del personaggio (16 / 52 di partenza), non -1: WalkSpeed * 2 deve funzionare.
         if (std::strcmp(key, "WalkSpeed") == 0) {
-            lua_pushnumber(ls, scriptControls().walkSpeedOverride);
+            const float o = scriptControls().walkSpeedOverride;
+            lua_pushnumber(ls, o >= 0.f ? o : (rt && rt->playerHumanoid) ? rt->playerHumanoid->walkSpeed : 16.f);
             return 1;
         }
         if (std::strcmp(key, "JumpPower") == 0) {
-            lua_pushnumber(ls, scriptControls().jumpPowerOverride);
+            const float o = scriptControls().jumpPowerOverride;
+            lua_pushnumber(ls, o >= 0.f ? o : (rt && rt->playerHumanoid) ? rt->playerHumanoid->jumpPower : 50.f);
+            return 1;
+        }
+        if (std::strcmp(key, "Jump") == 0) {
+            const bool up = rt && rt->playerHumanoid && !rt->playerHumanoid->grounded
+                && rt->playerHumanoid->velocityY > 0.f;
+            lua_pushboolean(ls, up ? 1 : 0);
             return 1;
         }
         if (std::strcmp(key, "GetState") == 0) {
             blockyPushCFunction(ls, luaHumGetState);
             return 1;
         }
-        return 0;
+        if (std::strcmp(key, "ChangeState") == 0) {
+            blockyPushCFunction(ls, luaHumChangeState);
+            return 1;
+        }
+        if (std::strcmp(key, "SetStateEnabled") == 0) {
+            blockyPushCFunction(ls, luaHumSetStateEnabled);
+            return 1;
+        }
+        // Humanoid.Sit / SeatPart: seduto su un Seat (ScriptsAndPhysics.h, tickSeatAndTrails)
+        if (std::strcmp(key, "Sit") == 0) {
+            lua_pushboolean(ls, rt && rt->playerHumanoid && rt->playerHumanoid->seated ? 1 : 0);
+            return 1;
+        }
+        if (std::strcmp(key, "SeatPart") == 0) {
+            const int sp = (rt && rt->playerHumanoid && rt->playerHumanoid->seated) ? rt->playerHumanoid->seatPart : -1;
+            if (rt && rt->workspace && sp >= 0 && sp < (int)rt->workspace->parts.size()) pushLivePart(ls, sp);
+            else lua_pushnil(ls);
+            return 1;
+        }
+        return apiLayerIndex(ls, "Humanoid");
     }
 
     static int luaLivePartSetAttribute(lua_State* ls) {
@@ -5136,6 +7067,15 @@ private:
     static int luaHumNewIndex(lua_State* ls) {
         const char* key = lua_tostring(ls, 2);
         if (!key) return 0;
+        if (std::strcmp(key, "Sit") == 0) {
+            // Sit = false fa alzare (come il salto); Sit = true da solo non fa sedere
+            LuaRuntime* rt = fromState(ls);
+            if (rt && rt->playerHumanoid && !lua_toboolean(ls, 3)) {
+                rt->playerHumanoid->seated = false;
+                rt->playerHumanoid->seatPart = -1;
+            }
+            return 0;
+        }
         if (std::strcmp(key, "Health") == 0) {
             LuaRuntime* rt = fromState(ls);
             if (rt && rt->playerHumanoid) {
@@ -5152,6 +7092,12 @@ private:
         if (std::strcmp(key, "JumpPower") == 0) {
             float v = (float)luaL_optnumber(ls, 3, 50.0);
             scriptControls().jumpPowerOverride = std::clamp(v, 0.f, LuaScriptSecurity::kMaxJumpPower);
+            return 0;
+        }
+        if (std::strcmp(key, "Jump") == 0) {
+            LuaRuntime* rt = fromState(ls);
+            if (lua_toboolean(ls, 3) && rt && rt->playerHumanoid && scriptControls().jumpEnabled)
+                rt->playerHumanoid->tryJump();
             return 0;
         }
         lua_rawset(ls, 1);
@@ -5223,6 +7169,144 @@ private:
         const char* st = (rt && rt->playerHumanoid) ? rt->playerHumanoid->getState() : "Running";
         lua_pushstring(ls, st);
         return 1;
+    }
+    static const char* humStateArg(lua_State* ls, int idx, std::string& owned) {
+        if (lua_isstring(ls, idx)) return lua_tostring(ls, idx);
+        if (lua_istable(ls, idx)) {
+            lua_getfield(ls, idx, "Name");
+            if (lua_isstring(ls, -1)) owned = lua_tostring(ls, -1);
+            lua_pop(ls, 1);
+            return owned.empty() ? nullptr : owned.c_str();
+        }
+        return nullptr;
+    }
+    static void applyHumState(Humanoid* h, const char* st) {
+        if (!h || !st) return;
+        if (std::strcmp(st, "Flying") == 0) {
+            if (!h->flyEnabled) return;
+            h->scriptPose = 1;
+            h->flying = true;
+            h->ragdoll = false;
+            h->grounded = false;
+            return;
+        }
+        if (std::strcmp(st, "Swimming") == 0) {
+            if (!h->swimEnabled) return;
+            h->scriptPose = 2;
+            h->swimming = true;
+            h->flying = false;
+            h->ragdoll = false;
+            return;
+        }
+        if (std::strcmp(st, "Ragdoll") == 0 || std::strcmp(st, "FallingDown") == 0
+            || std::strcmp(st, "Physics") == 0) {
+            h->scriptPose = 3;
+            h->ragdoll = true;
+            h->flying = false;
+            return;
+        }
+        if (std::strcmp(st, "Jumping") == 0) {
+            h->scriptPose = 0;
+            h->flying = false;
+            h->ragdoll = false;
+            h->tryJump();
+            return;
+        }
+        if (std::strcmp(st, "Dead") == 0) {
+            h->health = 0.f;
+            h->dead = true;
+            h->scriptPose = 0;
+            return;
+        }
+        h->scriptPose = 0;
+        h->flying = false;
+        h->ragdoll = false;
+        h->swimming = false;
+        if (std::strcmp(st, "Freefall") == 0) {
+            h->grounded = false;
+            if (h->velocityY > -1.f) h->velocityY = -1.f;
+        } else if (std::strcmp(st, "Seated") == 0) {
+            h->seated = true;
+            h->grounded = true;
+            h->velocityY = 0.f;
+        } else if (std::strcmp(st, "Climbing") == 0) {
+            h->climbing = true;
+        } else {
+            h->grounded = true;
+            h->velocityY = 0.f;
+            h->climbing = false;
+        }
+    }
+    static int luaHumChangeState(lua_State* ls) {
+        const int arg = humHasSelf(ls) ? 2 : 1;
+        std::string owned;
+        const char* st = humStateArg(ls, arg, owned);
+        LuaRuntime* rt = fromState(ls);
+        if (rt && rt->playerHumanoid && st) applyHumState(rt->playerHumanoid, st);
+        return 0;
+    }
+    static int luaHumSetStateEnabled(lua_State* ls) {
+        const int arg = humHasSelf(ls) ? 2 : 1;
+        std::string owned;
+        const char* st = humStateArg(ls, arg, owned);
+        const bool on = lua_toboolean(ls, arg + 1) != 0;
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->playerHumanoid || !st) return 0;
+        if (std::strcmp(st, "Swimming") == 0) {
+            rt->playerHumanoid->swimEnabled = on;
+            if (!on && rt->playerHumanoid->scriptPose == 2) {
+                rt->playerHumanoid->scriptPose = 0;
+                rt->playerHumanoid->swimming = false;
+            }
+        } else if (std::strcmp(st, "Flying") == 0) {
+            rt->playerHumanoid->flyEnabled = on;
+            if (!on && rt->playerHumanoid->scriptPose == 1) {
+                rt->playerHumanoid->scriptPose = 0;
+                rt->playerHumanoid->flying = false;
+            }
+        }
+        else if (std::strcmp(st, "Jumping") == 0) scriptControls().jumpEnabled = on;
+        return 0;
+    }
+
+    static bool humHasSelf(lua_State* ls) {
+        if (!lua_istable(ls, 1)) return false;
+        lua_getfield(ls, 1, "SetWalkSpeed");
+        const bool yes = lua_isfunction(ls, -1) != 0;
+        lua_pop(ls, 1);
+        return yes;
+    }
+    static int luaHumMove(lua_State* ls) {
+        const int arg = humHasSelf(ls) ? 2 : 1;
+        glm::vec3 dir{0.f};
+        readVec3Arg(ls, arg, dir);
+        auto& sc = scriptControls();
+        sc.scriptMove = dir;
+        sc.scriptMoveAge = 0.f;
+        sc.scriptMoveCamera = true;
+        if (lua_isboolean(ls, arg + 1))
+            sc.scriptMoveCamera = lua_toboolean(ls, arg + 1) != 0;
+        sc.moveToActive = false;
+        return 0;
+    }
+    static int luaHumMoveTo(lua_State* ls) {
+        const int arg = humHasSelf(ls) ? 2 : 1;
+        glm::vec3 target{0.f};
+        if (!readVec3Arg(ls, arg, target))
+            return blockyLuaError(ls, "Humanoid:MoveTo(Vector3)");
+        auto& sc = scriptControls();
+        sc.moveToTarget = target;
+        sc.moveToActive = true;
+        sc.moveToAge = 0.f;
+        sc.scriptMoveAge = 10.f;
+        return 0;
+    }
+    static int luaHumMoveToFinishedConnect(lua_State* ls) {
+        int fidx = fnArgIndex(ls);
+        if (!fidx) return blockyLuaError(ls, "Humanoid.MoveToFinished:Connect(function)");
+        lua_pushvalue(ls, fidx);
+        scriptControls().humanoidMoveToFinished.push_back(blockyLuaRef(ls));
+        return 0;
     }
 
     static int luaHumDiedConnect(lua_State* ls) {
@@ -5325,6 +7409,8 @@ private:
             scriptControls().toolUnequipped[name].push_back(ref);
         else if (ev == "Activated")
             scriptControls().toolActivated[name].push_back(ref);
+        else if (ev == "Deactivated")
+            scriptControls().toolDeactivated[name].push_back(ref);
         else
             scriptControls().toolEquipped[name].push_back(ref);
         return 0;
@@ -5513,6 +7599,7 @@ private:
         const char* meshPath = luaL_optstring(ls, arg + 1, "");
         if (rt && rt->workspace) {
             auto& it = rt->workspace->addBackpackItem(name, 4);
+            it.localOnly = netRoleIsClient(rt);
             // Stessa pipeline gia' usata dall'import di un'arma in Avatar
             // Editor (SelectionAndInput.h) — render in mano (PlayingHudPanel.h),
             // salvataggio (PlaceExporter/GameHub) e controllo file
@@ -5533,6 +7620,301 @@ private:
                 name = rt->workspace->backpack[e].name;
         }
         lua_pushstring(ls, name.c_str());
+        return 1;
+    }
+
+    static int luaBackpackEquip(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->workspace) return 0;
+        int arg = 1;
+        if (lua_istable(ls, 1)) {
+            lua_getfield(ls, 1, "Give");
+            const bool isBackpack = lua_isfunction(ls, -1);
+            lua_pop(ls, 1);
+            if (isBackpack) arg = 2;
+        }
+        auto equipName = [&](const char* name) {
+            if (!name || !name[0]) return;
+            int slot = rt->workspace->findBackpackByName(name);
+            if (slot >= 0) rt->workspace->equipBackpackSlot(slot, false);
+        };
+        if (lua_istable(ls, arg)) {
+            lua_getfield(ls, arg, "_toolId");
+            if (lua_isstring(ls, -1)) {
+                int slot = rt->workspace->findBackpackById(lua_tostring(ls, -1));
+                lua_pop(ls, 1);
+                if (slot >= 0) {
+                    rt->workspace->equipBackpackSlot(slot, false);
+                    return 0;
+                }
+            } else lua_pop(ls, 1);
+            lua_getfield(ls, arg, "Name");
+            if (lua_isstring(ls, -1)) equipName(lua_tostring(ls, -1));
+            lua_pop(ls, 1);
+        } else if (lua_isstring(ls, arg)) {
+            equipName(lua_tostring(ls, arg));
+        }
+        return 0;
+    }
+
+    static int luaBackpackUnequip(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (rt && rt->workspace) rt->workspace->equippedBackpack = -1;
+        (void)ls;
+        return 0;
+    }
+
+    static int luaBackpackDrop(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->workspace || !rt->playerPos) return 0;
+        const float yaw = rt->playerYaw ? *rt->playerYaw : 0.f;
+        const bool dropped = rt->workspace->dropEquipped(*rt->playerPos, yaw);
+        lua_pushboolean(ls, dropped ? 1 : 0);
+        return 1;
+    }
+
+    static bool netRoleIsClient(const LuaRuntime* rt) {
+        return rt && rt->net && rt->net->role == NetRole::Client;
+    }
+
+    static int npcIndexOf(lua_State* ls, int self) {
+        if (!lua_istable(ls, self)) return -1;
+        lua_getfield(ls, self, "__npc");
+        const int i = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+        lua_pop(ls, 1);
+        return i;
+    }
+
+    /** L'NPC dell'handle in idx, o nullptr se non c'e' (o e' stato tolto con Destroy). */
+    static NpcActor* liveNpc(lua_State* ls, int idx) {
+        LuaRuntime* rt = fromState(ls);
+        const int i = npcIndexOf(ls, idx);
+        if (!rt || !rt->workspace || i < 0 || i >= (int)rt->workspace->npcs.size()) return nullptr;
+        NpcActor& n = rt->workspace->npcs[(size_t)i];
+        return n.removed ? nullptr : &n;
+    }
+
+    /** npc:Destroy() (anche npc.Parent = nil): sparisce dal mondo; Died non scatta, come su Roblox. */
+    static int luaNpcDestroy(lua_State* ls) {
+        NpcActor* n = liveNpc(ls, 1);
+        if (!n) return 0;
+        n->removed = true;
+        n->moving = false;
+        n->arrived = false;
+        n->diedFired = true;
+        n->humanoid.dead = true;
+        return 0;
+    }
+
+    static int luaNpcConnect(lua_State* ls) {
+        const int idx = (int)lua_tointeger(ls, lua_upvalueindex(1));
+        const int kind = (int)lua_tointeger(ls, lua_upvalueindex(2));
+        if (!lua_isfunction(ls, 2)) return 0;
+        lua_pushvalue(ls, 2);
+        const int ref = blockyLuaRef(ls);
+        auto& m = kind ? scriptControls().npcArrived : scriptControls().npcDied;
+        m[idx].push_back(ref);
+        return 0;
+    }
+
+    static int luaNpcMoveTo(lua_State* ls) {
+        NpcActor* live = liveNpc(ls, 1);
+        if (!live) return 0;
+        glm::vec3 goal{0.f};
+        if (!readVec3Arg(ls, 2, goal)) return 0;
+        NpcActor& n = *live;
+        if (n.humanoid.dead || n.netDriven) return 0;
+        n.moveTarget = goal;
+        n.moving = true;
+        n.arrived = false;
+        return 0;
+    }
+
+    static int luaNpcDamage(lua_State* ls) {
+        NpcActor* n = liveNpc(ls, 1);
+        if (n && !n->netDriven)
+            n->humanoid.takeDamage((float)luaL_optnumber(ls, 2, 10.0));
+        return 0;
+    }
+
+    static int luaNpcEquip(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->workspace) return 0;
+        const int idx = npcIndexOf(ls, 1);
+        if (idx < 0 || idx >= (int)rt->workspace->npcs.size()) return 0;
+        int slot = -1;
+        if (lua_istable(ls, 2)) {
+            lua_getfield(ls, 2, "_toolId");
+            if (lua_isstring(ls, -1))
+                slot = rt->workspace->findBackpackById(lua_tostring(ls, -1));
+            lua_pop(ls, 1);
+            if (slot < 0) {
+                lua_getfield(ls, 2, "Name");
+                if (lua_isstring(ls, -1))
+                    slot = rt->workspace->findBackpackByName(lua_tostring(ls, -1));
+                lua_pop(ls, 1);
+            }
+        } else if (lua_isstring(ls, 2)) {
+            slot = rt->workspace->findBackpackByName(lua_tostring(ls, 2));
+        }
+        NpcActor& n = rt->workspace->npcs[(size_t)idx];
+        if (slot >= 0 && !rt->workspace->backpack[(size_t)slot].dropped)
+            n.toolSlot = slot;
+        return 0;
+    }
+
+    static int luaNpcIndex(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        const int idx = npcIndexOf(ls, 1);
+        const char* key = lua_tostring(ls, 2);
+        if (!rt || !rt->workspace || !key || idx < 0 || idx >= (int)rt->workspace->npcs.size())
+            return 0;
+        const NpcActor& n = rt->workspace->npcs[(size_t)idx];
+        if (n.removed) {   // tolto: resta il nome, il resto e' come un Instance distrutto
+            if (std::strcmp(key, "Name") == 0) { lua_pushstring(ls, n.name.c_str()); return 1; }
+            if (std::strcmp(key, "Health") == 0) { lua_pushnumber(ls, 0); return 1; }
+            return 0;
+        }
+        if (std::strcmp(key, "Health") == 0) { lua_pushnumber(ls, n.humanoid.health); return 1; }
+        if (std::strcmp(key, "MaxHealth") == 0) { lua_pushnumber(ls, n.humanoid.maxHealth); return 1; }
+        if (std::strcmp(key, "WalkSpeed") == 0) { lua_pushnumber(ls, n.humanoid.walkSpeed); return 1; }
+        if (std::strcmp(key, "Name") == 0) { lua_pushstring(ls, n.name.c_str()); return 1; }
+        if (std::strcmp(key, "Position") == 0) {
+            pushVec3(ls, n.position.x, n.position.y, n.position.z);
+            return 1;
+        }
+        return 0;
+    }
+
+    static int luaNpcNewIndex(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        const int idx = npcIndexOf(ls, 1);
+        const char* key = lua_tostring(ls, 2);
+        if (!rt || !rt->workspace || !key || idx < 0 || idx >= (int)rt->workspace->npcs.size())
+            return 0;
+        NpcActor& n = rt->workspace->npcs[(size_t)idx];
+        if (n.netDriven || n.removed) return 0;
+        if (std::strcmp(key, "Parent") == 0 && lua_isnil(ls, 3)) return luaNpcDestroy(ls);
+        if (std::strcmp(key, "Position") == 0) {
+            // teletrasporto: si ferma li' (un MoveTo in corso finisce)
+            glm::vec3 p = n.position;
+            if (readVec3Arg(ls, 3, p)) {
+                n.position = p;
+                n.moving = false;
+            }
+            return 0;
+        }
+        if (std::strcmp(key, "Health") == 0 && lua_isnumber(ls, 3)) {
+            n.humanoid.health = std::clamp((float)lua_tonumber(ls, 3), 0.f, n.humanoid.maxHealth);
+            if (n.humanoid.health <= 0.f) {
+                n.humanoid.health = 0.f;
+                n.humanoid.dead = true;
+            } else if (n.humanoid.dead && n.humanoid.health > 0.f) {
+                n.humanoid.dead = false;
+                n.diedFired = false;
+            }
+            return 0;
+        }
+        if (std::strcmp(key, "WalkSpeed") == 0 && lua_isnumber(ls, 3)) {
+            n.humanoid.walkSpeed = std::max(0.f, (float)lua_tonumber(ls, 3));
+            return 0;
+        }
+        if (std::strcmp(key, "MaxHealth") == 0 && lua_isnumber(ls, 3)) {
+            // come su Roblox: la vita non supera mai il massimo
+            n.humanoid.maxHealth = std::max(1.f, (float)lua_tonumber(ls, 3));
+            n.humanoid.health = std::min(n.humanoid.health, n.humanoid.maxHealth);
+            return 0;
+        }
+        if (std::strcmp(key, "Name") == 0 && lua_isstring(ls, 3)) {
+            n.name = lua_tostring(ls, 3);
+            return 0;
+        }
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    static int luaNpcLoadAnimation(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const int idx = npcIndexOf(ls, 1);
+        if (!rt || !rt->workspace || idx < 0 || idx >= (int)rt->workspace->npcs.size())
+            return blockyLuaError(ls, "LoadAnimation su un NPC che non c'e'");
+        std::string id;
+        for (int i = 2; i <= lua_gettop(ls) && id.empty(); ++i) {
+            if (lua_type(ls, i) == LUA_TSTRING) id = lua_tostring(ls, i);
+            else if (lua_istable(ls, i)) {
+                lua_getfield(ls, i, "AnimationId");
+                if (lua_isstring(ls, -1)) id = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+            }
+        }
+        if (id.empty()) return blockyLuaError(ls, "LoadAnimation(animation): serve un AnimationId");
+        auto& anim = rt->npcAnim_[idx];
+        if (!anim.ready()) {
+            std::vector<blk::anim::PartBox> body;
+            for (const auto& d : Humanoid::createR6Blocky().parts)
+                if (d.name != "HumanoidRootPart")
+                    body.push_back({d.name, d.offset, d.size, glm::quat(1.f, 0.f, 0.f, 0.f)});
+            anim.setupFromParts(body);
+        }
+        blk::anim::Action a;
+        std::string err;
+        if (!resolveAnimation(id, a, err)) return blockyLuaError(ls, "LoadAnimation: %s", err.c_str());
+        const int tid = anim.load(a);
+        pushCharTrack(ls, tid, a.name, idx);
+        return 1;
+    }
+
+    static void pushNpc(lua_State* ls, int idx) {
+        lua_newtable(ls);
+        lua_pushinteger(ls, idx);
+        lua_setfield(ls, -2, "__npc");
+        lua_pushstring(ls, "Npc");
+        lua_setfield(ls, -2, "ClassName");
+        blockyPushCFunction(ls, luaNpcMoveTo);
+        lua_setfield(ls, -2, "MoveTo");
+        blockyPushCFunction(ls, luaNpcLoadAnimation);
+        lua_setfield(ls, -2, "LoadAnimation");
+        blockyPushCFunction(ls, luaNpcDamage);
+        lua_setfield(ls, -2, "TakeDamage");
+        blockyPushCFunction(ls, luaNpcEquip);
+        lua_setfield(ls, -2, "EquipTool");
+        blockyPushCFunction(ls, luaNpcDestroy);
+        lua_setfield(ls, -2, "Destroy");
+        auto pushSig = [&](const char* field, int kind) {
+            lua_newtable(ls);
+            lua_pushinteger(ls, idx);
+            lua_pushinteger(ls, kind);
+            lua_pushcclosure(ls, luaNpcConnect, "luaNpcConnect", 2);
+            lua_setfield(ls, -2, "Connect");
+            lua_setfield(ls, -2, field);
+        };
+        pushSig("Died", 0);
+        pushSig("MoveToFinished", 1);
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaNpcIndex);
+        lua_setfield(ls, -2, "__index");
+        blockyPushCFunction(ls, luaNpcNewIndex);
+        lua_setfield(ls, -2, "__newindex");
+        lua_setmetatable(ls, -2);
+    }
+
+    static int luaNpcSpawn(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->workspace) return 0;
+        int arg = lua_istable(ls, 1) ? 2 : 1;
+        const char* name = "Npc";
+        if (lua_isstring(ls, arg)) {
+            name = lua_tostring(ls, arg);
+            ++arg;
+        }
+        glm::vec3 pos{0.f, 0.f, 0.f};
+        readVec3Arg(ls, arg, pos);
+        NpcActor npc;
+        npc.name = name && name[0] ? name : "Npc";
+        npc.position = pos;
+        npc.skipNet = netRoleIsClient(rt);
+        rt->workspace->npcs.push_back(std::move(npc));
+        pushNpc(ls, (int)rt->workspace->npcs.size() - 1);
         return 1;
     }
 
@@ -5568,24 +7950,113 @@ private:
         return 2;
     }
 
-    static int luaCameraScreenPointToRay(lua_State* ls) {
-        (void)luaL_optnumber(ls, 1, 0);
-        (void)luaL_optnumber(ls, 2, 0);
-        LuaRuntime* rt = fromState(ls);
-        glm::vec3 o, d;
-        fillAimRay(rt, o, d);
+    struct CamFrame {
+        glm::vec3 pos{0.f, 10.f, 20.f};
+        glm::vec3 f{0.f, 0.f, -1.f};
+        glm::vec3 r{1.f, 0.f, 0.f};
+        glm::vec3 u{0.f, 1.f, 0.f};
+        float tanHalf = 0.7f;
+        float aspect = 16.f / 9.f;
+        float w = 1280.f;
+        float h = 720.f;
+    };
+    static CamFrame camFrameOf(LuaRuntime* rt) {
+        CamFrame c;
+        c.w = (rt && rt->viewW > 0) ? (float)rt->viewW : 1280.f;
+        c.h = (rt && rt->viewH > 0) ? (float)rt->viewH : 720.f;
+        glm::vec3 look{0.f, 0.f, -1.f};
+        if (rt && rt->scriptCamOn) {
+            c.pos = rt->scriptCamPos;
+            look = rt->scriptCamLook;
+        } else if (rt) {
+            glm::vec3 o, d;
+            fillAimRay(rt, o, d);
+            c.pos = o;
+            look = d;
+        }
+        if (glm::length(look) < 1e-4f) look = {0.f, 0.f, -1.f};
+        c.f = glm::normalize(look);
+        glm::vec3 up{0.f, 1.f, 0.f};
+        if (std::abs(glm::dot(c.f, up)) > 0.98f) up = {0.f, 0.f, 1.f};
+        c.r = glm::normalize(glm::cross(c.f, up));
+        c.u = glm::cross(c.r, c.f);
+        float fov = (rt && rt->cameraFov) ? *rt->cameraFov : 70.f;
+        fov = std::clamp(fov, 20.f, 120.f);
+        c.tanHalf = std::tan(fov * 0.5f * 3.14159265f / 180.f);
+        c.aspect = c.w / std::max(1.f, c.h);
+        return c;
+    }
+    static void pushRay(lua_State* ls, const glm::vec3& o, const glm::vec3& d) {
         lua_newtable(ls);
         pushVec3(ls, o.x, o.y, o.z);
         lua_setfield(ls, -2, "Origin");
         pushVec3(ls, d.x, d.y, d.z);
         lua_setfield(ls, -2, "Direction");
+    }
+    static int camPixelBase(lua_State* ls) {
+        return (lua_istable(ls, 1) && !lua_isnumber(ls, 1)) ? 2 : 1;
+    }
+    static bool camHasPixels(lua_State* ls) {
+        const int b = camPixelBase(ls);
+        return lua_isnumber(ls, b) && lua_isnumber(ls, b + 1);
+    }
+    static int luaCameraScreenPointToRay(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!camHasPixels(ls)) {
+            glm::vec3 o, d;
+            fillAimRay(rt, o, d);
+            pushRay(ls, o, d);
+            return 1;
+        }
+        const int b = camPixelBase(ls);
+        const CamFrame c = camFrameOf(rt);
+        const float px = (float)lua_tonumber(ls, b);
+        const float py = (float)lua_tonumber(ls, b + 1);
+        const float ndcX = (px / std::max(1.f, c.w)) * 2.f - 1.f;
+        const float ndcY = 1.f - (py / std::max(1.f, c.h)) * 2.f;
+        glm::vec3 dir = c.f + c.r * (ndcX * c.tanHalf * c.aspect) + c.u * (ndcY * c.tanHalf);
+        if (glm::length(dir) < 1e-4f) dir = c.f;
+        else dir = glm::normalize(dir);
+        pushRay(ls, c.pos, dir);
         return 1;
+    }
+    static int luaCameraViewportPointToRay(lua_State* ls) {
+        return luaCameraScreenPointToRay(ls);
+    }
+    static int luaCameraWorldToScreen(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        const int b = (lua_istable(ls, 1) && lua_istable(ls, 2)) ? 2 : 1;
+        glm::vec3 world{0.f};
+        readVec3Arg(ls, b, world);
+        const CamFrame c = camFrameOf(rt);
+        const glm::vec3 rel = world - c.pos;
+        const float camX = glm::dot(rel, c.r);
+        const float camY = glm::dot(rel, c.u);
+        const float camZ = glm::dot(rel, c.f);
+        const float z = std::max(camZ, 1e-3f);
+        const float ndcX = camX / (z * c.tanHalf * c.aspect);
+        const float ndcY = camY / (z * c.tanHalf);
+        const float sx = (ndcX * 0.5f + 0.5f) * c.w;
+        const float sy = (0.5f - ndcY * 0.5f) * c.h;
+        const bool on = camZ > 0.f && sx >= 0.f && sy >= 0.f && sx <= c.w && sy <= c.h;
+        pushVec3(ls, sx, sy, camZ);
+        lua_pushboolean(ls, on ? 1 : 0);
+        return 2;
+    }
+
+    static void cameraPose(LuaRuntime* rt, glm::vec3& o, glm::vec3& d) {
+        if (rt && rt->scriptCamOn) {
+            o = rt->scriptCamPos;
+            d = glm::length(rt->scriptCamLook) > 1e-4f ? glm::normalize(rt->scriptCamLook) : glm::vec3(0.f, 0.f, -1.f);
+            return;
+        }
+        fillAimRay(rt, o, d);
     }
 
     static int luaCameraGetLook(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         glm::vec3 o, d;
-        fillAimRay(rt, o, d);
+        cameraPose(rt, o, d);
         pushVec3(ls, d.x, d.y, d.z);
         return 1;
     }
@@ -5593,7 +8064,7 @@ private:
     static int luaCameraGetCFrame(lua_State* ls) {
         LuaRuntime* rt = fromState(ls);
         glm::vec3 o, d;
-        fillAimRay(rt, o, d);
+        cameraPose(rt, o, d);
         if (pushPreludeField(ls, "CFrame")) {
             lua_getfield(ls, -1, "lookAt");
             lua_remove(ls, -2);
@@ -5624,7 +8095,7 @@ private:
         }
         if (std::strcmp(key, "CameraType") == 0) {
             int t = rt ? rt->cameraType : 0;
-            lua_pushstring(ls, t == 2 ? "Attach" : (t == 1 ? "Scriptable" : "Custom"));
+            pushEnumOrName(ls, "CameraType", t == 2 ? "Attach" : (t == 1 ? "Scriptable" : "Custom"));
             return 1;
         }
         if (std::strcmp(key, "CameraSubject") == 0) {
@@ -5633,7 +8104,7 @@ private:
         }
         if (std::strcmp(key, "CFrame") == 0)
             return luaCameraGetCFrame(ls);
-        return 0;
+        return apiLayerIndex(ls, "Camera");
     }
 
     static int luaCameraNewIndex(lua_State* ls) {
@@ -5644,58 +8115,149 @@ private:
             *rt->cameraFov = std::clamp((float)luaL_optnumber(ls, 3, 70.0), 40.f, 120.f);
             return 0;
         }
-        if (std::strcmp(key, "CameraType") == 0 && lua_isstring(ls, 3)) {
-            const char* t = lua_tostring(ls, 3);
+        if (std::strcmp(key, "CameraType") == 0 && (lua_isstring(ls, 3) || lua_istable(ls, 3))) {
+            std::string owned;
+            const char* t = nullptr;
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "Name");
+                if (lua_isstring(ls, -1)) owned = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+                t = owned.empty() ? nullptr : owned.c_str();
+            } else {
+                t = lua_tostring(ls, 3);
+            }
+            if (!t) return 0;
             if (std::strcmp(t, "Scriptable") == 0) rt->cameraType = 1;
             else if (std::strcmp(t, "Attach") == 0 || std::strcmp(t, "FirstPerson") == 0) {
                 rt->cameraType = 2;
+                rt->scriptCamOn = false;
                 if (rt->firstPersonFlag) *rt->firstPersonFlag = true;
             } else {
                 rt->cameraType = 0;
+                rt->scriptCamOn = false;
                 if (rt->firstPersonFlag) *rt->firstPersonFlag = false;
             }
+            return 0;
+        }
+        if (std::strcmp(key, "CFrame") == 0 && lua_istable(ls, 3)) {
+            auto readV = [&](const char* field, glm::vec3& out) {
+                lua_getfield(ls, 3, field);
+                if (!lua_istable(ls, -1)) { lua_pop(ls, 1); return false; }
+                lua_getfield(ls, -1, "X"); out.x = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+                lua_getfield(ls, -1, "Y"); out.y = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+                lua_getfield(ls, -1, "Z"); out.z = (float)lua_tonumber(ls, -1); lua_pop(ls, 1);
+                lua_pop(ls, 1);
+                return true;
+            };
+            readV("Position", rt->scriptCamPos);
+            if (!readV("LookVector", rt->scriptCamLook) || glm::length(rt->scriptCamLook) < 0.01f)
+                rt->scriptCamLook = {0.f, 0.f, -1.f};
+            else
+                rt->scriptCamLook = glm::normalize(rt->scriptCamLook);
+            rt->scriptCamOn = true;
+            rt->cameraType = 1;
             return 0;
         }
         lua_rawset(ls, 1);
         return 0;
     }
 
+    static float pathNum(lua_State* ls, int t, const char* k, float def) {
+        if (!lua_istable(ls, t)) return def;
+        lua_getfield(ls, t, k);
+        const float v = lua_isnumber(ls, -1) ? (float)lua_tonumber(ls, -1) : def;
+        lua_pop(ls, 1);
+        return v;
+    }
+    static bool pathBool(lua_State* ls, int t, const char* k, bool def) {
+        if (!lua_istable(ls, t)) return def;
+        lua_getfield(ls, t, k);
+        const bool v = lua_isnil(ls, -1) ? def : lua_toboolean(ls, -1) != 0;
+        lua_pop(ls, 1);
+        return v;
+    }
+    static NavAgent pathAgent(lua_State* ls, int t) {
+        NavAgent a;
+        a.radius = std::clamp(pathNum(ls, t, "AgentRadius", 2.f), 0.f, 16.f);
+        a.height = std::clamp(pathNum(ls, t, "AgentHeight", 5.f), 1.f, 20.f);
+        a.canJump = pathBool(ls, t, "AgentCanJump", true);
+        a.jumpHeight = std::clamp(pathNum(ls, t, "AgentJumpHeight", 7.f), 0.f, 40.f);
+        a.spacing = std::clamp(pathNum(ls, t, "WaypointSpacing", 4.f), 0.f, 32.f);
+        return a;
+    }
     static int luaPathCreatePath(lua_State* ls) {
         lua_newtable(ls);
+        const int params = lua_istable(ls, 2) ? 2 : (lua_istable(ls, 1) && lua_gettop(ls) >= 1
+            && !lua_isfunction(ls, 1) ? 1 : 0);
+        if (params) {
+            lua_pushvalue(ls, params);
+            lua_setfield(ls, -2, "_agent");
+        }
         blockyPushCFunction(ls, luaPathComputeAsync);
         lua_setfield(ls, -2, "ComputeAsync");
-        blockyPushCFunction(ls, luaWorkspaceFindPath);
-        lua_setfield(ls, -2, "GetWaypoints"); // alias se ComputeAsync non usato
+        blockyPushCFunction(ls, luaPathGetWaypoints);
+        lua_setfield(ls, -2, "GetWaypoints");
         return 1;
     }
 
+    static void storePathResult(lua_State* ls, const char* status) {
+        if (!lua_istable(ls, 1)) return;
+        lua_pushvalue(ls, -1);
+        lua_setfield(ls, 1, "_waypoints");
+        lua_pushstring(ls, status);
+        lua_setfield(ls, 1, "Status");
+    }
+    static int luaPathGetWaypoints(lua_State* ls) {
+        if (lua_istable(ls, 1)) {
+            lua_getfield(ls, 1, "_waypoints");
+            if (lua_istable(ls, -1)) return 1;
+            lua_pop(ls, 1);
+        }
+        lua_newtable(ls);
+        return 1;
+    }
     static int luaPathComputeAsync(lua_State* ls) {
-        // path:ComputeAsync(from, to) -> waypoints table with .Status
         auto* rt = fromState(ls);
         int a = lua_istable(ls, 1) ? 2 : 1;
         glm::vec3 from{0}, to{0};
         if (!readVec3Arg(ls, a, from) || !readVec3Arg(ls, a + 1, to))
             return blockyLuaError(ls, "ComputeAsync(Vector3 from, Vector3 to)");
-        if (!rt || !rt->nav) {
-            lua_newtable(ls);
-            lua_pushstring(ls, "NoPath");
-            lua_setfield(ls, -2, "Status");
-            return 1;
+        std::vector<glm::vec3> path;
+        std::vector<uint8_t> jumps;
+        const char* status = "NoPath";
+        NavAgent agent;
+        if (lua_istable(ls, 1)) {
+            lua_getfield(ls, 1, "_agent");
+            if (lua_istable(ls, -1)) agent = pathAgent(ls, lua_gettop(ls));
+            lua_pop(ls, 1);
         }
-        if (!rt->nav->ready() && rt->navRebuild) rt->navRebuild();
-        const std::vector<glm::vec3> path = rt->nav->findPath(from, to);
+        if (rt && rt->nav) {
+            if (!rt->nav->ready() && rt->navRebuild) rt->navRebuild();
+            path = rt->nav->findPath(from, to, agent, &jumps);
+            if (!path.empty()) status = "Success";
+        }
         lua_newtable(ls);
-        if (path.empty()) {
-            lua_pushstring(ls, "NoPath");
-            lua_setfield(ls, -2, "Status");
-            return 1;
-        }
         for (size_t i = 0; i < path.size(); ++i) {
+            lua_newtable(ls);
             pushVec3(ls, path[i].x, path[i].y, path[i].z);
+            lua_setfield(ls, -2, "Position");
+            const bool jump = i < jumps.size() && jumps[i];
+            lua_getglobal(ls, "Enum");
+            if (lua_istable(ls, -1)) lua_getfield(ls, -1, "PathWaypointAction");
+            else lua_pushnil(ls);
+            if (lua_istable(ls, -1)) lua_getfield(ls, -1, jump ? "Jump" : "Walk");
+            else lua_pushnil(ls);
+            if (lua_isnil(ls, -1)) {
+                lua_pop(ls, 1);
+                lua_pushstring(ls, jump ? "Jump" : "Walk");
+            }
+            lua_setfield(ls, -4, "Action");
+            lua_pop(ls, 2);
             lua_rawseti(ls, -2, (int)i + 1);
         }
-        lua_pushstring(ls, "Success");
+        lua_pushstring(ls, status);
         lua_setfield(ls, -2, "Status");
+        storePathResult(ls, status);
         return 1;
     }
 
@@ -5706,6 +8268,23 @@ private:
         float fx = std::sin(r), fz = std::cos(r);
         pushVec3(ls, fx, 0.f, fz);
         return 1;
+    }
+
+    /** Humanoid:SetLook(dir): gira il personaggio verso dir (solo in orizzontale), il contrario di GetLook. */
+    static int luaHumSetLook(lua_State* ls) {
+        LuaRuntime* rt = fromState(ls);
+        if (!rt || !rt->playerYaw) return 0;
+        const int t = lua_istable(ls, 2) ? 2 : 1;
+        if (!lua_istable(ls, t)) return 0;
+        lua_getfield(ls, t, "X");
+        const double x = lua_isnumber(ls, -1) ? lua_tonumber(ls, -1) : 0.0;
+        lua_pop(ls, 1);
+        lua_getfield(ls, t, "Z");
+        const double z = lua_isnumber(ls, -1) ? lua_tonumber(ls, -1) : 0.0;
+        lua_pop(ls, 1);
+        if (std::fabs(x) + std::fabs(z) < 1e-6) return 0;
+        *rt->playerYaw = (float)(std::atan2(x, z) * 180.0 / 3.14159265358979);
+        return 0;
     }
 
     static int luaEventCreate(lua_State* ls) {
@@ -6049,6 +8628,242 @@ private:
         return 1;
     }
 
+    static void pushVector2(lua_State* ls, double x, double y) {
+        lua_getglobal(ls, "Vector2");
+        if (lua_istable(ls, -1)) {
+            lua_getfield(ls, -1, "new");
+            if (lua_isfunction(ls, -1)) {
+                lua_pushnumber(ls, x);
+                lua_pushnumber(ls, y);
+                if (lua_pcall(ls, 2, 1, 0) == LUA_OK) {
+                    lua_remove(ls, -2);
+                    return;
+                }
+            }
+            lua_pop(ls, 1);
+        }
+        lua_pop(ls, 1);
+        lua_newtable(ls);
+        lua_pushnumber(ls, x); lua_setfield(ls, -2, "X");
+        lua_pushnumber(ls, y); lua_setfield(ls, -2, "Y");
+    }
+    static int svcArg(lua_State* ls) { return lua_istable(ls, 1) ? 2 : 1; }
+
+    static int luaTextGetTextSize(lua_State* ls) {
+        const int a = svcArg(ls);
+        const char* text = luaL_optstring(ls, a, "");
+        const float size = std::max(1.f, (float)luaL_optnumber(ls, a + 1, 14.0));
+        const float charW = size * 0.5f;
+        glm::vec3 bounds{1e9f, 1e9f, 0.f};
+        if (!(readVec3Arg(ls, a + 3, bounds) || readVec3Arg(ls, a + 2, bounds)))
+            bounds = {1e9f, 1e9f, 0.f};
+        const float maxW = bounds.x > 1.f ? bounds.x : 1e9f;
+        const std::string s = text ? text : "";
+        float lineW = 0.f, widest = 0.f;
+        int lines = 1;
+        auto brk = [&]() {
+            widest = std::max(widest, lineW);
+            lineW = 0.f;
+            ++lines;
+        };
+        for (size_t i = 0; i < s.size();) {
+            if (s[i] == '\n') { brk(); ++i; continue; }
+            size_t j = i;
+            while (j < s.size() && s[j] != ' ' && s[j] != '\n') ++j;
+            const float word = (float)(j - i) * charW;
+            if (lineW > 0.f && lineW + word > maxW) brk();
+            if (word > maxW && charW > 0.f) {
+                const int fit = std::max(1, (int)std::floor(maxW / charW));
+                size_t left = j - i;
+                while (left > 0) {
+                    const size_t n = std::min(left, (size_t)fit);
+                    lineW += (float)n * charW;
+                    left -= n;
+                    if (left > 0) brk();
+                }
+            } else {
+                lineW += word;
+            }
+            i = j;
+            if (i < s.size() && s[i] == ' ') {
+                if (lineW + charW > maxW) brk();
+                else lineW += charW;
+                ++i;
+            }
+        }
+        widest = std::max(widest, lineW);
+        if (s.empty()) lines = 0;
+        float h = (float)lines * size;
+        if (bounds.x > 1.f) widest = std::min(widest, bounds.x);
+        if (bounds.y > 1.f) h = std::min(h, bounds.y);
+        pushVector2(ls, widest, h);
+        return 1;
+    }
+    static int luaTextFilter(lua_State* ls) {
+        const int a = svcArg(ls);
+        lua_pushvalue(ls, a);
+        return 1;
+    }
+    static void loadBadges() {
+        static bool loaded = false;
+        if (loaded) return;
+        loaded = true;
+        std::ifstream in(blockyDataDir() + "/badges.txt");
+        std::string line;
+        while (std::getline(in, line))
+            if (!line.empty()) scriptControls().badges[line] = true;
+    }
+    static void saveBadges() {
+        std::ofstream out(blockyDataDir() + "/badges.txt", std::ios::trunc);
+        if (!out) return;
+        for (const auto& kv : scriptControls().badges)
+            if (kv.second) out << kv.first << "\n";
+    }
+    static int luaBadgeAward(lua_State* ls) {
+        loadBadges();
+        const int a = svcArg(ls);
+        const std::string key = std::to_string((long long)luaL_checkinteger(ls, a))
+            + ":" + std::to_string((long long)luaL_checkinteger(ls, a + 1));
+        scriptControls().badges[key] = true;
+        saveBadges();
+        lua_pushboolean(ls, 1);
+        return 1;
+    }
+    static int luaBadgeHas(lua_State* ls) {
+        loadBadges();
+        const int a = svcArg(ls);
+        const std::string key = std::to_string((long long)luaL_checkinteger(ls, a))
+            + ":" + std::to_string((long long)luaL_checkinteger(ls, a + 1));
+        lua_pushboolean(ls, scriptControls().badges.count(key) ? 1 : 0);
+        return 1;
+    }
+    static int luaContentPreload(lua_State* ls) {
+        int list = 0, cb = 0;
+        for (int i = 1; i <= lua_gettop(ls); ++i) {
+            if (lua_isfunction(ls, i)) cb = i;
+            else if (!list && lua_istable(ls, i) && i > 1) list = i;
+        }
+        if (cb && list) {
+            const int n = lua_objlen(ls, list);
+            for (int i = 1; i <= n; ++i) {
+                lua_pushvalue(ls, cb);
+                lua_rawgeti(ls, list, i);
+                lua_pushstring(ls, "Success");
+                if (lua_pcall(ls, 2, 0, 0) != LUA_OK) lua_pop(ls, 1);
+            }
+        }
+        return 0;
+    }
+    static int luaGuiGetInset(lua_State* ls) {
+        // Come la topbar di Roblox: 36 px in alto, niente inset in basso.
+        pushVector2(ls, 0, 36);
+        pushVector2(ls, 0, 0);
+        return 2;
+    }
+    static int luaMsgSubscribe(lua_State* ls) {
+        const int a = svcArg(ls);
+        const char* topic = luaL_checkstring(ls, a);
+        if (!lua_isfunction(ls, a + 1))
+            return blockyLuaError(ls, "SubscribeAsync(topic, function)");
+        lua_pushvalue(ls, a + 1);
+        scriptControls().topics[topic ? topic : ""].push_back(blockyLuaRef(ls));
+        return 0;
+    }
+    static void fireTopic(lua_State* ls, const std::string& topic, int msgIdx) {
+        auto it = scriptControls().topics.find(topic);
+        if (it == scriptControls().topics.end()) return;
+        auto* rt = fromState(ls);
+        for (int ref : it->second) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(ls, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(ls, -1)) { lua_pop(ls, 1); continue; }
+            if (msgIdx > 0) lua_pushvalue(ls, msgIdx);
+            else lua_pushnil(ls);
+            if (rt) rt->callStart_ = std::chrono::steady_clock::now();
+            if (lua_pcall(ls, 1, 0, 0) != LUA_OK) lua_pop(ls, 1);
+        }
+    }
+    static int luaMsgPublish(lua_State* ls) {
+        const int a = svcArg(ls);
+        const char* topic = luaL_checkstring(ls, a);
+        const std::string topicStr = topic ? topic : "";
+        std::string body;
+        if (lua_gettop(ls) >= a + 1 && !lua_isnil(ls, a + 1)) {
+            const char* s = luaL_tolstring(ls, a + 1, nullptr);
+            if (s) body = s;
+            lua_pop(ls, 1);
+        }
+        const std::string wire = topicStr + "\n" + body;
+        auto* rt = fromState(ls);
+        bool sent = false;
+        if (rt && rt->net && rt->net->connected && rt->net->role == NetRole::Client)
+            sent = rt->net->sendRemoteEventToServer("__blkMsg", wire.c_str());
+        if (!sent)
+            fireTopic(ls, topicStr, lua_gettop(ls) >= a + 1 ? a + 1 : 0);
+        if (rt && rt->net && rt->net->connected && rt->net->role == NetRole::Host)
+            rt->net->fireRemoteEventAllClients("__blkMsg", wire.c_str());
+        return 0;
+    }
+    static int luaInsertLoadAsset(lua_State* ls) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->workspace) { lua_pushnil(ls); return 1; }
+        const int a = svcArg(ls);
+        std::string path;
+        if (lua_type(ls, a) == LUA_TNUMBER) {
+            const std::string id = std::to_string((long long)lua_tointeger(ls, a));
+            const char* exts[] = {".obj", ".glb", ".fbx"};
+            const std::string roots[] = {blockyDataDir() + "/insert/", std::string("assets/insert/")};
+            for (const std::string& root : roots) {
+                for (const char* ext : exts) {
+                    std::ifstream in(root + id + ext);
+                    if (in.good()) { path = root + id + ext; break; }
+                }
+                if (!path.empty()) break;
+            }
+        } else if (lua_isstring(ls, a)) {
+            path = resolveScriptPath(lua_tostring(ls, a));
+        }
+        std::ifstream in(path);
+        if (path.empty() || !in.good()) { lua_pushnil(ls); return 1; }
+        std::string name = path;
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos) name = name.substr(slash + 1);
+        rt->workspace->addModel(name, path, glm::vec3(0.f));
+        pushLiveModel(ls, (int)rt->workspace->models.size() - 1);
+        return 1;
+    }
+    static int luaPolicyInfo(lua_State* ls) {
+        lua_newtable(ls);
+        lua_pushboolean(ls, 0); lua_setfield(ls, -2, "AreAdsAllowed");
+        lua_pushboolean(ls, 0); lua_setfield(ls, -2, "IsSubjectToChinaPolicies");
+        lua_pushboolean(ls, 0); lua_setfield(ls, -2, "ArePaidRandomItemsRestricted");
+        lua_pushboolean(ls, 1); lua_setfield(ls, -2, "IsEligibleToPurchaseSubscription");
+        lua_pushboolean(ls, 1); lua_setfield(ls, -2, "IsPaidItemTradingAllowed");
+        lua_newtable(ls); lua_setfield(ls, -2, "AllowedExternalLinkReferences");
+        return 1;
+    }
+    static int luaPartGetTouchingParts(lua_State* ls) {
+        auto* rt = fromState(ls);
+        lua_newtable(ls);
+        if (!rt || !rt->workspace || !lua_istable(ls, 1)) return 1;
+        lua_getfield(ls, 1, "__partIndex");
+        const int self = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+        lua_pop(ls, 1);
+        if (self < 0 || self >= (int)rt->workspace->parts.size()) return 1;
+        const WorkspacePart& p = rt->workspace->parts[(size_t)self];
+        const glm::vec3 half = partHitboxSize(p) * 0.5f;
+        const glm::mat3 rot(partRotationMatrix(p.rotation));
+        int n = 1;
+        for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
+            if (i == self) continue;
+            if (!partOverlapsOrientedBox(rt->workspace->parts[(size_t)i], p.position, half, rot)) continue;
+            lua_pushinteger(ls, n++);
+            pushLivePart(ls, i);
+            lua_settable(ls, -3);
+        }
+        return 1;
+    }
+
     static int luaGetService(lua_State* ls) {
         const char* name = luaL_checkstring(ls, 2);
         if (lua_isstring(ls, 1) && !lua_istable(ls, 1))
@@ -6063,6 +8878,7 @@ private:
         };
         if (n == "runservice") return fromGame("RunService");
         if (n == "soundservice") return fromGame("SoundService");
+        if (n == "actors" || n == "characters") return fromGame("Actors");
         if (n == "particles") return fromGame("Particles");
         if (n == "players") return fromGame("Players");
         if (n == "animator") return fromGame("Animator");
@@ -6074,7 +8890,7 @@ private:
         if (n == "lighting" || n == "lightingservice") return fromGame("Lighting");
         if (n == "tweenservice") return fromGame("TweenService");
         if (n == "debris") return fromGame("Debris");
-        if (n == "chat" || n == "textchatservice") return fromGame("Chat");
+        if (n == "chat") return fromGame("Chat");
         if (n == "startergui") return fromGame("StarterGui");
         if (n == "userinputservice") return fromGame("UserInputService");
         if (n == "datastoreservice") return fromGame("DataStoreService");
@@ -6130,6 +8946,9 @@ private:
         if (n == "zoneservice" || n == "zone") {
             if (fromGlobal("Zone")) return 1;
         }
+        if (n == "gamekit" || n == "round") {
+            if (fromGlobal("GameKit")) return 1;
+        }
         if (n == "staminaservice" || n == "stamina") {
             if (fromGlobal("Stamina")) return 1;
         }
@@ -6164,17 +8983,44 @@ private:
             lua_setfield(ls, -2, "CreateCollisionGroup");
             return 1;
         }
-        if (n == "marketplaceservice"
-            || n == "guiservice"
-            || n == "messagingservice"
-            || n == "localizationservice"
+        if (n == "marketplaceservice") {
+            if (fromGlobal("MarketplaceService")) return 1;
+        }
+        if (n == "groupservice") {
+            if (fromGlobal("GroupService")) return 1;
+        }
+        if (n == "textservice") return fromGame("TextService");
+        if (n == "badgeservice") return fromGame("BadgeService");
+        if (n == "contentprovider") return fromGame("ContentProvider");
+        if (n == "guiservice") return fromGame("GuiService");
+        if (n == "messagingservice") return fromGame("MessagingService");
+        if (n == "insertservice") {
+            lua_newtable(ls);
+            lua_pushstring(ls, "InsertService");
+            lua_setfield(ls, -2, "Name");
+            blockyPushCFunction(ls, luaInsertLoadAsset);
+            lua_setfield(ls, -2, "LoadAsset");
+            return 1;
+        }
+        if (n == "policyservice") return fromGame("PolicyService");
+        if (n == "terrain") {
+            lua_getglobal(ls, "workspace");
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "Terrain");
+                lua_remove(ls, -2);
+                if (lua_istable(ls, -1)) return 1;
+                lua_pop(ls, 1);
+            } else {
+                lua_pop(ls, 1);
+            }
+        }
+        if (n == "localizationservice"
             || n == "audioservice"
             || n == "analyticsservice"
             || n == "assetservice"
             || n == "replication" || n == "replicationservice"
             || n == "startercharacter"
-            || n == "starterpack"
-            || n == "terrain") {
+            || n == "starterpack") {
             lua_newtable(ls);
             lua_pushstring(ls, name ? name : "");
             lua_setfield(ls, -2, "Name");
@@ -6729,6 +9575,134 @@ private:
         return 1;
     }
 
+    static const char* emitterClassC(const ScriptParticleEmitter& e) {
+        if (!e.className.empty()) return e.className.c_str();
+        if (e.preset == (int)ParticlePreset::Smoke) return "Smoke";
+        if (e.customMotion) return "Fire";
+        return "Sparkles";
+    }
+    static void pushSavedEmitter(lua_State* ls, int emIdx) {
+        auto* rt = fromState(ls);
+        const auto& e = rt->scriptEmitters_[(size_t)emIdx];
+        const char* cls = emitterClassC(e);
+        lua_newtable(ls);
+        lua_pushstring(ls, cls); lua_setfield(ls, -2, "ClassName");
+        lua_pushstring(ls, e.name.empty() ? cls : e.name.c_str()); lua_setfield(ls, -2, "Name");
+        lua_pushinteger(ls, emIdx); lua_setfield(ls, -2, "__emitterIndex");
+        blockyPushCFunction(ls, luaParticleEmitterEmit); lua_setfield(ls, -2, "Emit");
+    }
+    static void pushSavedAttachment(lua_State* ls, int ai) {
+        const auto& a = scriptControls().attachments[(size_t)ai];
+        lua_newtable(ls);
+        lua_pushstring(ls, "Attachment"); lua_setfield(ls, -2, "ClassName");
+        lua_pushstring(ls, a.name.c_str()); lua_setfield(ls, -2, "Name");
+        lua_pushinteger(ls, ai); lua_setfield(ls, -2, "__attachmentIndex");
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaAttachmentNewIndex); lua_setfield(ls, -2, "__newindex");
+        lua_setmetatable(ls, -2);
+    }
+    static void pushSavedTrail(lua_State* ls, int ti) {
+        const auto& t = scriptControls().trails[(size_t)ti];
+        lua_newtable(ls);
+        lua_pushstring(ls, "Trail"); lua_setfield(ls, -2, "ClassName");
+        lua_pushstring(ls, t.name.c_str()); lua_setfield(ls, -2, "Name");
+        lua_pushinteger(ls, ti); lua_setfield(ls, -2, "__trailIndex");
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaTrailNewIndex); lua_setfield(ls, -2, "__newindex");
+        lua_setmetatable(ls, -2);
+    }
+    static void pushSavedClick(lua_State* ls, int partIdx) {
+        lua_newtable(ls);
+        lua_pushstring(ls, "ClickDetector"); lua_setfield(ls, -2, "ClassName");
+        lua_pushstring(ls, "ClickDetector"); lua_setfield(ls, -2, "Name");
+        lua_pushinteger(ls, partIdx); lua_setfield(ls, -2, "__partIndex");
+        trackPartTable(ls, -1);
+        lua_newtable(ls);
+        lua_pushinteger(ls, partIdx); lua_setfield(ls, -2, "__partIndex");
+        trackPartTable(ls, -1);
+        pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 0);
+        lua_setfield(ls, -2, "Connect");
+        pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 1);
+        lua_setfield(ls, -2, "Once");
+        pushSignalMethod(ls, luaPartClickConnect, "luaPartClickConnect", 2);
+        lua_setfield(ls, -2, "Wait");
+        lua_setfield(ls, -2, "MouseClick");
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaClickNewIndex); lua_setfield(ls, -2, "__newindex");
+        lua_setmetatable(ls, -2);
+    }
+    static void appendEffectChildren(lua_State* ls, int parent, int& n) {
+        auto* rt = fromState(ls);
+        if (!rt || parent < 0) return;
+        for (int i = 0; i < (int)rt->scriptEmitters_.size(); ++i) {
+            if (rt->scriptEmitters_[(size_t)i].partIndex != parent) continue;
+            pushSavedEmitter(ls, i);
+            lua_rawseti(ls, -2, n++);
+        }
+        auto& sc = scriptControls();
+        for (int i = 0; i < (int)sc.attachments.size(); ++i) {
+            if (sc.attachments[(size_t)i].partIndex != parent) continue;
+            pushSavedAttachment(ls, i);
+            lua_rawseti(ls, -2, n++);
+        }
+        for (int i = 0; i < (int)sc.trails.size(); ++i) {
+            if (sc.trails[(size_t)i].partIndex != parent) continue;
+            pushSavedTrail(ls, i);
+            lua_rawseti(ls, -2, n++);
+        }
+        if (sc.clickReach.count(parent)) {
+            pushSavedClick(ls, parent);
+            lua_rawseti(ls, -2, n++);
+        }
+    }
+    static bool pushNamedEffect(lua_State* ls, int parent, const char* name) {
+        auto* rt = fromState(ls);
+        if (!rt || !name || parent < 0) return false;
+        for (int i = 0; i < (int)rt->scriptEmitters_.size(); ++i) {
+            const auto& e = rt->scriptEmitters_[(size_t)i];
+            if (e.partIndex != parent) continue;
+            const char* nm = e.name.empty() ? emitterClassC(e) : e.name.c_str();
+            if (std::strcmp(nm, name) == 0) { pushSavedEmitter(ls, i); return true; }
+        }
+        auto& sc = scriptControls();
+        for (int i = 0; i < (int)sc.attachments.size(); ++i) {
+            if (sc.attachments[(size_t)i].partIndex == parent && sc.attachments[(size_t)i].name == name) {
+                pushSavedAttachment(ls, i); return true;
+            }
+        }
+        for (int i = 0; i < (int)sc.trails.size(); ++i) {
+            if (sc.trails[(size_t)i].partIndex == parent && sc.trails[(size_t)i].name == name) {
+                pushSavedTrail(ls, i); return true;
+            }
+        }
+        if (std::strcmp(name, "ClickDetector") == 0 && sc.clickReach.count(parent)) {
+            pushSavedClick(ls, parent); return true;
+        }
+        return false;
+    }
+    static bool pushClassEffect(lua_State* ls, int parent, const char* cls) {
+        auto* rt = fromState(ls);
+        if (!rt || !cls || parent < 0) return false;
+        for (int i = 0; i < (int)rt->scriptEmitters_.size(); ++i) {
+            const auto& e = rt->scriptEmitters_[(size_t)i];
+            if (e.partIndex == parent && std::strcmp(emitterClassC(e), cls) == 0) {
+                pushSavedEmitter(ls, i); return true;
+            }
+        }
+        auto& sc = scriptControls();
+        if (std::strcmp(cls, "Attachment") == 0) {
+            for (int i = 0; i < (int)sc.attachments.size(); ++i)
+                if (sc.attachments[(size_t)i].partIndex == parent) { pushSavedAttachment(ls, i); return true; }
+        }
+        if (std::strcmp(cls, "Trail") == 0) {
+            for (int i = 0; i < (int)sc.trails.size(); ++i)
+                if (sc.trails[(size_t)i].partIndex == parent) { pushSavedTrail(ls, i); return true; }
+        }
+        if (std::strcmp(cls, "ClickDetector") == 0 && sc.clickReach.count(parent)) {
+            pushSavedClick(ls, parent); return true;
+        }
+        return false;
+    }
     static int luaPartFindFirstChild(lua_State* ls) {
         auto* rt = fromState(ls);
         int parent = partIndexFromSelf(ls, 1);
@@ -6736,7 +9710,7 @@ private:
         if (!rt || !rt->workspace || parent < 0) { lua_pushnil(ls); return 1; }
         int child = rt->workspace->findPartChild(parent, name);
         if (child >= 0) pushLivePart(ls, child);
-        else lua_pushnil(ls);
+        else if (!pushNamedEffect(ls, parent, name)) lua_pushnil(ls);
         return 1;
     }
     static int luaPartGetChildren(lua_State* ls) {
@@ -6751,6 +9725,7 @@ private:
                 lua_rawseti(ls, -2, n++);
             }
         }
+        appendEffectChildren(ls, parent, n);
         return 1;
     }
     static int beginChildWait(lua_State* ls, int kind, int parentOrSvc, const char* name, float timeout) {
@@ -6806,15 +9781,50 @@ private:
         readVec3Field(ls, idx, "Size", size);
         if (!readVec3Field(ls, idx, "Orientation", rot))
             readVec3Field(ls, idx, "Rotation", rot);
-        if (!readColor3Field(ls, idx, "BrickColor", col))
-            readColor3Field(ls, idx, "Color", col);
+        {
+            // La part in attesa (Instance.new senza Parent) ha gia' BrickColor e
+            // Color grigi di partenza: vince quello che lo script ha cambiato.
+            // Prima vinceva sempre BrickColor, e p.Color = ... prima del Parent si perdeva.
+            const glm::vec3 base = col;
+            glm::vec3 brick = col, color3 = col;
+            const bool hasBrick = readColor3Field(ls, idx, "BrickColor", brick);
+            const bool hasColor = readColor3Field(ls, idx, "Color", color3);
+            auto changed = [&](const glm::vec3& c) { return glm::length(c - base) > 1e-3f; };
+            if (hasColor && changed(color3)) col = color3;
+            else if (hasBrick) col = brick;
+            else if (hasColor) col = color3;
+        }
 
         auto& part = rt->workspace->addPart(name, pos, size, col);
+        part.skipNet = netRoleIsClient(rt);
         part.rotation = rot;
         partprops::luaReadTable(ls, idx, part);
-        lua_getfield(ls, idx, "Material");
-        if (lua_isstring(ls, -1))
-            part.setMaterial(partMaterialFromName(lua_tostring(ls, -1)));
+        // Material / Shape: testo ("Wood") o Enum (Enum.Material.Wood), come su Roblox.
+        auto enumOrName = [&](const char* field) -> std::string {
+            std::string out;
+            lua_getfield(ls, idx, field);
+            if (lua_type(ls, -1) == LUA_TSTRING) out = lua_tostring(ls, -1);
+            else if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "Name");
+                if (lua_type(ls, -1) == LUA_TSTRING) out = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+            }
+            lua_pop(ls, 1);
+            return out;
+        };
+        if (const std::string m = enumOrName("Material"); !m.empty())
+            part.setMaterial(partMaterialFromName(m));
+        if (const std::string sh = enumOrName("Shape"); !sh.empty() && sh != "Part") {
+            part.shape = partShapeFromName(sh);
+            if (part.shape != PartShape::Block) part.useStud = false;
+        }
+        lua_getfield(ls, idx, "ClassName");
+        if (lua_isstring(ls, -1) && lua_tostring(ls, -1)[0])
+            part.className = lua_tostring(ls, -1);
+        lua_pop(ls, 1);
+        lua_getfield(ls, idx, "MeshId");
+        if (lua_isstring(ls, -1) && lua_tostring(ls, -1)[0])
+            part.meshFile = resolveScriptPath(lua_tostring(ls, -1));
         lua_pop(ls, 1);
         lua_getfield(ls, idx, "Emissive");
         if (lua_isnumber(ls, -1)) part.emissive = (float)lua_tonumber(ls, -1);
@@ -6873,6 +9883,283 @@ private:
         return 0;
     }
 
+    static int luaClickNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        lua_getfield(ls, 1, "__partIndex");
+        const int pi = lua_isnumber(ls, -1) ? (int)lua_tointeger(ls, -1) : -1;
+        lua_pop(ls, 1);
+        if (key && std::strcmp(key, "MaxActivationDistance") == 0 && pi >= 0 && lua_isnumber(ls, 3))
+            scriptControls().clickReach[pi] = std::clamp((float)lua_tonumber(ls, 3), 0.5f, 128.f);
+        lua_pushvalue(ls, 2);
+        lua_pushvalue(ls, 3);
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    /** tool.Name: il nome dell'oggetto nello zaino. */
+    static int luaToolIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (key && std::strcmp(key, "Name") == 0) {
+            lua_pushstring(ls, "_toolName");
+            lua_rawget(ls, 1);
+            return 1;
+        }
+        if (key && std::strcmp(key, "MeshId") == 0) {
+            lua_pushstring(ls, "_toolId");
+            lua_rawget(ls, 1);
+            const std::string id = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+            lua_pop(ls, 1);
+            auto* rt = fromState(ls);
+            if (!rt || !rt->workspace || id.empty()) { lua_pushstring(ls, ""); return 1; }
+            const int slot = rt->workspace->findBackpackById(id);
+            const char* path = (slot >= 0) ? rt->workspace->backpack[(size_t)slot].meshPath.c_str() : "";
+            lua_pushstring(ls, path);
+            return 1;
+        }
+        return 0;
+    }
+
+    /** tool.Name = "Spada": rinomina l'oggetto nello zaino e sposta gli eventi gia' collegati. */
+    static int luaToolNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        auto* rt = fromState(ls);
+        if (key && std::strcmp(key, "Name") == 0) {
+            if (lua_type(ls, 3) != LUA_TSTRING || !rt || !rt->workspace) return 0;
+            const std::string nuovo = lua_tostring(ls, 3);
+            lua_pushstring(ls, "_toolId");
+            lua_rawget(ls, 1);
+            const std::string id = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+            lua_pop(ls, 1);
+            const int slot = id.empty() ? -1 : rt->workspace->findBackpackById(id);
+            if (slot < 0 || nuovo.empty()) return 0;
+            auto& it = rt->workspace->backpack[(size_t)slot];
+            const std::string vecchio = it.name;
+            if (vecchio == nuovo) return 0;
+            it.name = nuovo;
+            auto& sc = scriptControls();
+            for (auto* m : {&sc.toolEquipped, &sc.toolUnequipped, &sc.toolActivated, &sc.toolDeactivated}) {
+                auto f = m->find(vecchio);
+                if (f == m->end()) continue;
+                std::vector<int> refs = std::move(f->second);
+                m->erase(f);
+                auto& dst = (*m)[nuovo];
+                dst.insert(dst.end(), refs.begin(), refs.end());
+            }
+            lua_pushstring(ls, "_toolName");
+            lua_pushstring(ls, nuovo.c_str());
+            lua_rawset(ls, 1);
+            for (const char* ev : {"Equipped", "Unequipped", "Activated", "Deactivated"}) {
+                lua_pushstring(ls, ev);
+                lua_rawget(ls, 1);
+                if (lua_istable(ls, -1)) {
+                    lua_pushstring(ls, "_toolName");
+                    lua_pushstring(ls, nuovo.c_str());
+                    lua_rawset(ls, -3);
+                }
+                lua_pop(ls, 1);
+            }
+            return 0;
+        }
+        if (key && std::strcmp(key, "Parent") == 0) {
+            // tra i figli del nuovo Parent (Backpack:FindFirstChild("Spada"), ChildAdded)
+            lua_pushstring(ls, "Parent");
+            lua_rawget(ls, 1);
+            const int old = lua_gettop(ls);
+            lua_pushstring(ls, "Parent");
+            lua_pushvalue(ls, 3);
+            lua_rawset(ls, 1);
+            if (pushPreludeField(ls, "engineReparent")) {
+                lua_pushvalue(ls, 1);
+                lua_pushvalue(ls, old);
+                lua_pushvalue(ls, 3);
+                if (lua_pcall(ls, 3, 0, 0) != LUA_OK) lua_pop(ls, 1);
+            }
+            lua_settop(ls, 3);
+            return 0;
+        }
+        if (key && std::strcmp(key, "MeshId") == 0 && rt && rt->workspace) {
+            lua_pushstring(ls, "_toolId");
+            lua_rawget(ls, 1);
+            const std::string id = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+            lua_pop(ls, 1);
+            const int slot = id.empty() ? -1 : rt->workspace->findBackpackById(id);
+            if (slot >= 0) {
+                const char* raw = lua_tostring(ls, 3);
+                rt->workspace->backpack[(size_t)slot].meshPath =
+                    (raw && raw[0]) ? resolveScriptPath(raw) : std::string();
+            }
+        }
+        lua_pushvalue(ls, 2);
+        lua_pushvalue(ls, 3);
+        lua_rawset(ls, 1);
+        return 0;
+    }
+
+    /** Il prompt del motore di questa tabella ProximityPrompt (nullptr se distrutto). */
+    static Prossimita::Prompt* promptOf(lua_State* ls, int self, std::string* keyOut = nullptr) {
+        auto* rt = fromState(ls);
+        if (!rt || !rt->proximity || !lua_istable(ls, self)) return nullptr;
+        lua_pushstring(ls, "_promptName");
+        lua_rawget(ls, self);
+        const std::string key = lua_isstring(ls, -1) ? lua_tostring(ls, -1) : "";
+        lua_pop(ls, 1);
+        if (keyOut) *keyOut = key;
+        return key.empty() ? nullptr : rt->proximity->find(key);
+    }
+
+    /** Un valore scritto dallo script (in _v), lasciato sullo stack (nil se non c'e'). */
+    static void promptStored(lua_State* ls, int self, const char* key) {
+        lua_pushstring(ls, "_v");
+        lua_rawget(ls, self);
+        if (!lua_istable(ls, -1)) { lua_pop(ls, 1); lua_pushnil(ls); return; }
+        lua_pushstring(ls, key);
+        lua_rawget(ls, -2);
+        lua_remove(ls, -2);
+    }
+
+    /** Acceso = Enabled (di partenza true) e attaccato a una part. */
+    static void promptRefreshEnabled(lua_State* ls, int self, Prossimita::Prompt& p) {
+        promptStored(ls, self, "Enabled");
+        const bool wanted = lua_isnil(ls, -1) || lua_toboolean(ls, -1) != 0;
+        lua_pop(ls, 1);
+        p.enabled = wanted && p.partIndex >= 0;
+    }
+
+    static int luaPromptNewIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        // il valore va in _v: i campi raw nasconderebbero le scritture successive
+        lua_pushstring(ls, "_v");
+        lua_rawget(ls, 1);
+        if (lua_istable(ls, -1)) {
+            lua_pushvalue(ls, 2);
+            lua_pushvalue(ls, 3);
+            lua_rawset(ls, -3);
+        }
+        lua_pop(ls, 1);
+        if (!key) return 0;
+        Prossimita::Prompt* p = promptOf(ls, 1);
+        if (!p) return 0;
+        if (std::strcmp(key, "ActionText") == 0 && lua_isstring(ls, 3))
+            p->text = std::string(lua_tostring(ls, 3)).substr(0, 32);
+        else if (std::strcmp(key, "ObjectText") == 0 && lua_isstring(ls, 3))
+            p->objectText = std::string(lua_tostring(ls, 3)).substr(0, 32);
+        else if (std::strcmp(key, "KeyboardKeyCode") == 0) {
+            // Enum.KeyCode.F (tabella con Name) oppure "F"
+            std::string s;
+            if (lua_istable(ls, 3)) {
+                lua_getfield(ls, 3, "Name");
+                if (lua_type(ls, -1) == LUA_TSTRING) s = lua_tostring(ls, -1);
+                lua_pop(ls, 1);
+            } else if (lua_type(ls, 3) == LUA_TSTRING) s = lua_tostring(ls, 3);
+            else if (lua_type(ls, 3) == LUA_TNUMBER) {   // Enum.KeyCode.F in Blocky e' il codice del tasto (70)
+                const int code = (int)lua_tointeger(ls, 3);
+                if (code >= 'A' && code <= 'Z') s = std::string(1, (char)code);
+                else if (code >= 'a' && code <= 'z') s = std::string(1, (char)(code - 32));
+            }
+            if (s.size() == 1) p->key = proxNormKey(s[0]);
+        } else if (std::strcmp(key, "HoldDuration") == 0 && lua_isnumber(ls, 3))
+            p->holdDuration = std::clamp((float)lua_tonumber(ls, 3), 0.f, 8.f);
+        else if (std::strcmp(key, "MaxActivationDistance") == 0 && lua_isnumber(ls, 3))
+            p->radius = std::clamp((float)lua_tonumber(ls, 3), 0.5f, 512.f);
+        else if (std::strcmp(key, "Enabled") == 0)
+            promptRefreshEnabled(ls, 1, *p);
+        else if (std::strcmp(key, "Parent") == 0) {
+            // Dentro una part (o il PrimaryPart di un Model): si accende li'.
+            int partIdx = -1;
+            if (lua_istable(ls, 3)) {
+                lua_pushstring(ls, "__partIndex");
+                lua_rawget(ls, 3);
+                if (lua_isnumber(ls, -1)) partIdx = (int)lua_tointeger(ls, -1);
+                lua_pop(ls, 1);
+                if (partIdx < 0) {
+                    lua_getfield(ls, 3, "PrimaryPart");
+                    if (lua_istable(ls, -1)) {
+                        lua_pushstring(ls, "__partIndex");
+                        lua_rawget(ls, -2);
+                        if (lua_isnumber(ls, -1)) partIdx = (int)lua_tointeger(ls, -1);
+                        lua_pop(ls, 1);
+                    }
+                    lua_pop(ls, 1);
+                }
+            }
+            auto* rt = fromState(ls);
+            if (partIdx >= 0 && rt && rt->workspace && partIdx < (int)rt->workspace->parts.size()) {
+                const auto& part = rt->workspace->parts[(size_t)partIdx];
+                p->partIndex = partIdx;
+                p->x = part.position.x; p->y = part.position.y; p->z = part.position.z;
+            } else {
+                p->partIndex = -1;
+                // La part non e' ancora nel mondo (niente __partIndex): quando
+                // le danno il Parent, luaPendingPartNewIndex ricollega questi prompt.
+                if (lua_istable(ls, 3)) {
+                    lua_getfield(ls, 3, "__blkPrompts");
+                    if (!lua_istable(ls, -1)) {
+                        lua_pop(ls, 1);
+                        lua_newtable(ls);
+                        lua_pushvalue(ls, -1);
+                        lua_setfield(ls, 3, "__blkPrompts");
+                    }
+                    const int n = (int)lua_objlen(ls, -1);
+                    lua_pushvalue(ls, 1);
+                    lua_rawseti(ls, -2, n + 1);
+                    lua_pop(ls, 1);
+                }
+            }
+            p->hold = 0.f;
+            promptRefreshEnabled(ls, 1, *p);
+        }
+        return 0;
+    }
+
+    static int luaPromptIndex(lua_State* ls) {
+        const char* key = lua_tostring(ls, 2);
+        if (!key) return 0;
+        if (Prossimita::Prompt* p = promptOf(ls, 1)) {
+            if (!std::strcmp(key, "ActionText")) { lua_pushstring(ls, p->text.c_str()); return 1; }
+            if (!std::strcmp(key, "ObjectText")) { lua_pushstring(ls, p->objectText.c_str()); return 1; }
+            if (!std::strcmp(key, "HoldDuration")) { lua_pushnumber(ls, p->holdDuration); return 1; }
+            if (!std::strcmp(key, "MaxActivationDistance")) { lua_pushnumber(ls, p->radius); return 1; }
+            if (!std::strcmp(key, "KeyboardKeyCode")) {
+                const char k[2] = {p->key ? p->key : 'E', 0};
+                pushEnumOrName(ls, "KeyCode", k);
+                return 1;
+            }
+        }
+        promptStored(ls, 1, key);
+        if (!lua_isnil(ls, -1)) return 1;
+        lua_pop(ls, 1);
+        if (!std::strcmp(key, "Enabled")) { lua_pushboolean(ls, 1); return 1; }
+        if (!std::strcmp(key, "Parent")) return 0;
+        return apiLayerIndex(ls, "ProximityPrompt");
+    }
+
+    /** prompt:Destroy(): sparisce e i suoi Triggered si scollegano. */
+    static int luaPromptDestroy(lua_State* ls) {
+        auto* rt = fromState(ls);
+        std::string key;
+        promptOf(ls, 1, &key);
+        if (!rt || key.empty()) return 0;
+        if (rt->proximity) rt->proximity->remove(key);
+        rt->unrefPromptHandlers(key);
+        lua_pushstring(ls, "_v");
+        lua_rawget(ls, 1);
+        if (lua_istable(ls, -1)) {
+            lua_pushstring(ls, "Parent");
+            lua_pushnil(ls);
+            lua_rawset(ls, -3);
+        }
+        lua_pop(ls, 1);
+        return 0;
+    }
+
+    void unrefPromptHandlers(const std::string& key) {
+        auto& m = scriptControls().proximityTriggered;
+        auto it = m.find(key);
+        if (it == m.end()) return;
+        if (L) for (int ref : it->second) if (ref != LUA_NOREF) lua_unref(L, ref);
+        m.erase(it);
+    }
+
     static int luaPartClickConnect(lua_State* ls) {
         int partIdx = -1;
         if (lua_istable(ls, 1)) {
@@ -6911,6 +10198,16 @@ private:
         return 1;
     }
 
+    struct WorldRayHit {
+        bool ok = false;
+        bool voxel = false;
+        int part = -1;
+        glm::vec3 pos{0.f};
+        glm::vec3 normal{0.f, 1.f, 0.f};
+        float dist = 0.f;
+        const char* material = "Air";
+    };
+
     static int luaWorkspaceRaycast(lua_State* ls) {
         auto* rt = fromState(ls);
         if (!rt || !rt->workspace) return 0;
@@ -6935,11 +10232,49 @@ private:
         if (len < 1e-6f) { lua_pushnil(ls); return 1; }
         dir /= len;
 
+        WorldRayHit hit = castWorld(rt, origin, dir, maxDist);
+        if (!hit.ok) { lua_pushnil(ls); return 1; }
+        if (hit.voxel) {
+            lua_newtable(ls);
+            lua_pushnil(ls); lua_setfield(ls, -2, "Instance");
+            pushVec3(ls, hit.pos.x, hit.pos.y, hit.pos.z);
+            lua_setfield(ls, -2, "Position");
+            pushVec3(ls, hit.normal.x, hit.normal.y, hit.normal.z);
+            lua_setfield(ls, -2, "Normal");
+            lua_pushnumber(ls, hit.dist);
+            lua_setfield(ls, -2, "Distance");
+            lua_pushstring(ls, hit.material ? hit.material : "Air");
+            lua_setfield(ls, -2, "Material");
+            return 1;
+        }
+        lua_newtable(ls);
+        pushLivePart(ls, hit.part);
+        lua_setfield(ls, -2, "Instance");
+        pushVec3(ls, hit.pos.x, hit.pos.y, hit.pos.z);
+        lua_setfield(ls, -2, "Position");
+        lua_pushnumber(ls, hit.dist);
+        lua_setfield(ls, -2, "Distance");
+        return 1;
+    }
+
+    static WorldRayHit castWorld(LuaRuntime* rt, glm::vec3 origin, glm::vec3 dir, float maxDist) {
+        WorldRayHit out;
+        if (!rt || !rt->workspace) return out;
+        float len = glm::length(dir);
+        if (len < 1e-6f || maxDist <= 0.f) return out;
+        dir /= len;
         float bestT = maxDist;
         int bestI = -1;
         glm::vec3 bestHit{0};
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
             const auto& p = rt->workspace->parts[i];
+            // Un tool equipaggiato sta in mano: i suoi pezzi non sono nel mondo,
+            // quindi un colpo non si ferma sull'arma.
+            if (p.toolSlot >= 0) {
+                const bool dropped = p.toolSlot < (int)rt->workspace->backpack.size()
+                    && rt->workspace->backpack[(size_t)p.toolSlot].dropped;
+                if (!dropped) continue;
+            }
             glm::mat4 inv = glm::inverse(partHitboxMatrix(p));
             glm::vec3 o = glm::vec3(inv * glm::vec4(origin, 1.f));
             glm::vec3 d = glm::vec3(inv * glm::vec4(dir, 0.f));
@@ -6966,35 +10301,65 @@ private:
         VoxelHit vh;
         if (rt->voxelRaycast && rt->voxelRaycast(origin, dir, maxDist, vh) && vh.ok
             && vh.dist < bestT) {
-            lua_newtable(ls);
-            lua_pushnil(ls); lua_setfield(ls, -2, "Instance");
-            pushVec3(ls, vh.pos.x, vh.pos.y, vh.pos.z);
-            lua_setfield(ls, -2, "Position");
-            pushVec3(ls, vh.normal.x, vh.normal.y, vh.normal.z);
-            lua_setfield(ls, -2, "Normal");
-            lua_pushnumber(ls, vh.dist);
-            lua_setfield(ls, -2, "Distance");
-            lua_pushstring(ls, vh.material ? vh.material : "Air");
-            lua_setfield(ls, -2, "Material");
-            return 1;
+            out.ok = true;
+            out.voxel = true;
+            out.pos = vh.pos;
+            out.normal = vh.normal;
+            out.dist = vh.dist;
+            out.material = vh.material ? vh.material : "Air";
+            return out;
         }
-        if (bestI < 0) { lua_pushnil(ls); return 1; }
-        lua_newtable(ls);
-        pushLivePart(ls, bestI);
-        lua_setfield(ls, -2, "Instance");
-        pushVec3(ls, bestHit.x, bestHit.y, bestHit.z);
-        lua_setfield(ls, -2, "Position");
-        lua_pushnumber(ls, bestT);
-        lua_setfield(ls, -2, "Distance");
-        return 1;
+        if (bestI < 0) return out;
+        out.ok = true;
+        out.part = bestI;
+        out.pos = bestHit;
+        out.dist = bestT;
+        return out;
     }
 
-    static bool partOverlapsAabb(const WorkspacePart& p, const glm::vec3& bmin, const glm::vec3& bmax) {
-        glm::vec3 h = partHitboxSize(p) * 0.5f;
-        glm::vec3 pmin = p.position - h, pmax = p.position + h;
-        return pmin.x <= bmax.x && pmax.x >= bmin.x
-            && pmin.y <= bmax.y && pmax.y >= bmin.y
-            && pmin.z <= bmax.z && pmax.z >= bmin.z;
+    // La Part (anche ruotata) contro una scatola orientata: centro, meta-size, assi in colonna.
+    static bool partOverlapsOrientedBox(const WorkspacePart& p, const glm::vec3& center,
+                                       const glm::vec3& half, const glm::mat3& boxRot) {
+        if (p.destroyPending) return false;
+        glm::vec3 ph = partHitboxSize(p) * 0.5f;
+        glm::mat3 partRot(partRotationMatrix(p.rotation));
+        glm::mat3 intoBox = glm::transpose(boxRot);
+        glm::vec3 lo(1e9f), hi(-1e9f);
+        for (int ix = 0; ix < 2; ++ix)
+            for (int iy = 0; iy < 2; ++iy)
+                for (int iz = 0; iz < 2; ++iz) {
+                    glm::vec3 corner = p.position + partRot * glm::vec3(ix ? ph.x : -ph.x, iy ? ph.y : -ph.y, iz ? ph.z : -ph.z);
+                    glm::vec3 local = intoBox * (corner - center);
+                    lo = glm::min(lo, local);
+                    hi = glm::max(hi, local);
+                }
+        return lo.x <= half.x && hi.x >= -half.x
+            && lo.y <= half.y && hi.y >= -half.y
+            && lo.z <= half.z && hi.z >= -half.z;
+    }
+
+    static bool readBoxFrame(lua_State* ls, int idx, glm::vec3& center, glm::mat3& rot) {
+        rot = glm::mat3(1.f);
+        center = glm::vec3(0.f);
+        if (!lua_istable(ls, idx)) return false;
+        if (!readVec3Arg(ls, idx, center)) {
+            lua_getfield(ls, idx, "Position");
+            if (lua_istable(ls, -1)) readVec3Arg(ls, lua_gettop(ls), center);
+            lua_pop(ls, 1);
+        }
+        lua_getfield(ls, idx, "R00");
+        if (!lua_isnumber(ls, -1)) { lua_pop(ls, 1); return true; }
+        lua_pop(ls, 1);
+        auto num = [&](const char* k) {
+            lua_getfield(ls, idx, k);
+            float v = lua_isnumber(ls, -1) ? (float)lua_tonumber(ls, -1) : 0.f;
+            lua_pop(ls, 1);
+            return v;
+        };
+        rot[0] = glm::vec3(num("R00"), num("R10"), num("R20"));
+        rot[1] = glm::vec3(num("R01"), num("R11"), num("R21"));
+        rot[2] = glm::vec3(num("R02"), num("R12"), num("R22"));
+        return true;
     }
 
     static int luaWorkspaceGetPartBoundsInBox(lua_State* ls) {
@@ -7011,19 +10376,14 @@ private:
             if (self && !hasX) b = 2;
         }
         glm::vec3 center{}, size{4, 4, 4};
-        if (!readVec3Arg(ls, b, center)) { lua_newtable(ls); return 1; }
-        if (lua_istable(ls, b)) {
-            lua_getfield(ls, b, "Position");
-            if (lua_istable(ls, -1)) readVec3Arg(ls, lua_gettop(ls), center);
-            lua_pop(ls, 1);
-        }
+        glm::mat3 rot(1.f);
+        if (!readBoxFrame(ls, b, center, rot)) { lua_newtable(ls); return 1; }
         readVec3Arg(ls, b + 1, size);
-        glm::vec3 h = size * 0.5f;
-        glm::vec3 bmin = center - h, bmax = center + h;
+        glm::vec3 half = glm::abs(size) * 0.5f;
         lua_newtable(ls);
         int n = 1;
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
-            if (!partOverlapsAabb(rt->workspace->parts[i], bmin, bmax)) continue;
+            if (!partOverlapsOrientedBox(rt->workspace->parts[i], center, half, rot)) continue;
             lua_pushinteger(ls, n++);
             pushLivePart(ls, i);
             lua_settable(ls, -3);
@@ -7042,13 +10402,13 @@ private:
         }
         lua_newtable(ls);
         if (idx < 0 || idx >= (int)rt->workspace->parts.size()) return 1;
-        glm::vec3 h = partHitboxSize(rt->workspace->parts[idx]) * 0.5f;
-        glm::vec3 bmin = rt->workspace->parts[idx].position - h;
-        glm::vec3 bmax = rt->workspace->parts[idx].position + h;
+        const WorkspacePart& host = rt->workspace->parts[idx];
+        glm::vec3 half = partHitboxSize(host) * 0.5f;
+        glm::mat3 rot(partRotationMatrix(host.rotation));
         int n = 1;
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
             if (i == idx) continue;
-            if (!partOverlapsAabb(rt->workspace->parts[i], bmin, bmax)) continue;
+            if (!partOverlapsOrientedBox(rt->workspace->parts[i], host.position, half, rot)) continue;
             lua_pushinteger(ls, n++);
             pushLivePart(ls, i);
             lua_settable(ls, -3);
@@ -7068,10 +10428,12 @@ private:
             if (lua_istable(ls, -1)) readVec3Arg(ls, lua_gettop(ls), mx);
             lua_pop(ls, 1);
         }
+        glm::vec3 center = (mn + mx) * 0.5f;
+        glm::vec3 half = glm::abs(mx - mn) * 0.5f;
         lua_newtable(ls);
         int n = 1;
         for (int i = 0; i < (int)rt->workspace->parts.size(); ++i) {
-            if (!partOverlapsAabb(rt->workspace->parts[i], mn, mx)) continue;
+            if (!partOverlapsOrientedBox(rt->workspace->parts[i], center, half, glm::mat3(1.f))) continue;
             lua_pushinteger(ls, n++);
             pushLivePart(ls, i);
             lua_settable(ls, -3);
@@ -7105,41 +10467,246 @@ private:
         return 1;
     }
 
+    // Filo dei remote: "B1\\n" poi valori (nil, bool, numero, testo, Vector3,
+    // Color3, tabella piatta). Un testo vecchio, senza quel prefisso, resta un testo.
+    static bool remotePacked(const std::string& s) {
+        return s.size() >= 3 && s.compare(0, 3, "B1\n") == 0;
+    }
+    static void packNum(std::string& out, char tag, double n) {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%c%.9g\n", tag, n);
+        out += b;
+    }
+    static bool packRemoteValue(lua_State* ls, int idx, std::string& out, int depth) {
+        idx = lua_absindex(ls, idx);
+        const int t = lua_type(ls, idx);
+        if (t == LUA_TNIL) { out += "N\n"; return true; }
+        if (t == LUA_TBOOLEAN) { out += lua_toboolean(ls, idx) ? "T\n" : "F\n"; return true; }
+        if (t == LUA_TNUMBER) { packNum(out, 'D', lua_tonumber(ls, idx)); return true; }
+        if (t == LUA_TSTRING) {
+            size_t len = 0;
+            const char* s = lua_tolstring(ls, idx, &len);
+            if (len > 500) len = 500;
+            char h[24];
+            std::snprintf(h, sizeof(h), "S%u\n", (unsigned)len);
+            out += h;
+            if (s && len) out.append(s, len);
+            return true;
+        }
+        if (t != LUA_TTABLE || depth >= 3 || out.size() > 800) { out += "N\n"; return true; }
+        lua_getfield(ls, idx, "Position");
+        const bool nested = lua_istable(ls, -1);
+        lua_pop(ls, 1);
+        if (!nested) {
+            lua_getfield(ls, idx, "X"); lua_getfield(ls, idx, "Y"); lua_getfield(ls, idx, "Z");
+            const bool vec = lua_isnumber(ls, -3) && lua_isnumber(ls, -2) && lua_isnumber(ls, -1);
+            const double x = lua_tonumber(ls, -3), y = lua_tonumber(ls, -2), z = lua_tonumber(ls, -1);
+            lua_pop(ls, 3);
+            if (vec) { packNum(out, 'X', x); packNum(out, 'Y', y); packNum(out, 'Z', z); return true; }
+            lua_getfield(ls, idx, "R"); lua_getfield(ls, idx, "G"); lua_getfield(ls, idx, "B");
+            const bool col = lua_isnumber(ls, -3) && lua_isnumber(ls, -2) && lua_isnumber(ls, -1);
+            const double r = lua_tonumber(ls, -3), g = lua_tonumber(ls, -2), b = lua_tonumber(ls, -1);
+            lua_pop(ls, 3);
+            if (col) { packNum(out, 'R', r); packNum(out, 'G', g); packNum(out, 'B', b); return true; }
+        }
+        std::string body;
+        int n = 0;
+        const int top = lua_gettop(ls);
+        lua_pushnil(ls);
+        while (lua_next(ls, idx) != 0 && n < 24 && body.size() < 700) {
+            if (lua_isstring(ls, -2)) {
+                std::string pair;
+                packRemoteValue(ls, -2, pair, depth + 1);
+                packRemoteValue(ls, -1, pair, depth + 1);
+                body += pair;
+                ++n;
+            }
+            lua_pop(ls, 1);
+        }
+        lua_settop(ls, top);
+        char h[16];
+        std::snprintf(h, sizeof(h), "M%d\n", n);
+        out += h;
+        out += body;
+        return true;
+    }
+    static std::string packRemote(lua_State* ls, int first, int last) {
+        std::string out = "B1\n";
+        if (first > last) return out;
+        for (int i = first; i <= last && out.size() < (size_t)kRemoteExMaxPayload - 8; ++i)
+            packRemoteValue(ls, i, out, 0);
+        if (out.size() > (size_t)kRemoteExMaxPayload) out.resize((size_t)kRemoteExMaxPayload);
+        return out;
+    }
+    static bool takeLine(const char*& p, const char* end, std::string& line) {
+        if (p >= end) return false;
+        const char* nl = (const char*)std::memchr(p, '\n', (size_t)(end - p));
+        if (!nl) return false;
+        line.assign(p, nl);
+        p = nl + 1;
+        return true;
+    }
+    static int unpackRemoteValue(lua_State* ls, const char*& p, const char* end) {
+        if (p >= end) return 0;
+        const char tag = *p;
+        if (tag == 'N' || tag == 'T' || tag == 'F') {
+            if (p + 1 >= end || p[1] != '\n') return 0;
+            p += 2;
+            if (tag == 'N') lua_pushnil(ls);
+            else lua_pushboolean(ls, tag == 'T');
+            return 1;
+        }
+        if (tag == 'X') {
+            std::string a, b, c;
+            const char* q = p;
+            if (!takeLine(q, end, a) || !takeLine(q, end, b) || !takeLine(q, end, c)) return 0;
+            if (a.empty() || a[0] != 'X' || b.empty() || b[0] != 'Y' || c.empty() || c[0] != 'Z') return 0;
+            p = q;
+            pushVec3(ls, (float)std::atof(a.c_str() + 1), (float)std::atof(b.c_str() + 1), (float)std::atof(c.c_str() + 1));
+            return 1;
+        }
+        if (tag == 'R') {
+            std::string a, b, c;
+            const char* q = p;
+            if (!takeLine(q, end, a) || !takeLine(q, end, b) || !takeLine(q, end, c)) return 0;
+            if (a.empty() || a[0] != 'R' || b.empty() || b[0] != 'G' || c.empty() || c[0] != 'B') return 0;
+            p = q;
+            lua_getglobal(ls, "Color3");
+            if (lua_istable(ls, -1)) {
+                lua_getfield(ls, -1, "new");
+                if (lua_isfunction(ls, -1)) {
+                    lua_pushnumber(ls, std::atof(a.c_str() + 1));
+                    lua_pushnumber(ls, std::atof(b.c_str() + 1));
+                    lua_pushnumber(ls, std::atof(c.c_str() + 1));
+                    if (lua_pcall(ls, 3, 1, 0) == LUA_OK) { lua_remove(ls, -2); return 1; }
+                }
+                lua_pop(ls, 1);
+            }
+            lua_pop(ls, 1);
+            lua_newtable(ls);
+            lua_pushnumber(ls, std::atof(a.c_str() + 1)); lua_setfield(ls, -2, "R");
+            lua_pushnumber(ls, std::atof(b.c_str() + 1)); lua_setfield(ls, -2, "G");
+            lua_pushnumber(ls, std::atof(c.c_str() + 1)); lua_setfield(ls, -2, "B");
+            return 1;
+        }
+        if (tag == 'D' || tag == 'S' || tag == 'M') {
+            std::string line;
+            if (!takeLine(p, end, line) || line.empty()) return 0;
+            if (tag == 'D') { lua_pushnumber(ls, std::atof(line.c_str() + 1)); return 1; }
+            if (tag == 'S') {
+                unsigned len = 0;
+                std::sscanf(line.c_str() + 1, "%u", &len);
+                if (p + len > end) return 0;
+                lua_pushlstring(ls, p, len);
+                p += len;
+                return 1;
+            }
+            int count = std::atoi(line.c_str() + 1);
+            if (count < 0 || count > 24) return 0;
+            lua_newtable(ls);
+            for (int i = 0; i < count; ++i) {
+                if (!unpackRemoteValue(ls, p, end)) { lua_pushnil(ls); }
+                if (!unpackRemoteValue(ls, p, end)) { lua_pushnil(ls); }
+                if (lua_isnumber(ls, -2) && lua_type(ls, -2) == LUA_TNUMBER) {
+                    // chiave numero: resta numero (lua_isstring e' vero anche per i numeri)
+                }
+                lua_settable(ls, -3);
+            }
+            return 1;
+        }
+        return 0;
+    }
+    static int unpackRemote(lua_State* ls, const std::string& payload) {
+        if (!remotePacked(payload)) {
+            lua_pushlstring(ls, payload.data(), payload.size());
+            return 1;
+        }
+        const char* p = payload.data() + 3;
+        const char* end = payload.data() + payload.size();
+        int n = 0;
+        while (p < end && n < 16) {
+            if (!unpackRemoteValue(ls, p, end)) break;
+            ++n;
+        }
+        return n;
+    }
+
+    static void callRemoteListeners(lua_State* ls, const std::vector<int>& refs, bool passPlayer, int firstArg) {
+        auto* rt = fromState(ls);
+        const int top = lua_gettop(ls);
+        const int nargs = std::max(0, top - firstArg + 1);
+        for (int ref : refs) {
+            if (ref == LUA_NOREF) continue;
+            lua_rawgeti(ls, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(ls, -1)) { lua_pop(ls, 1); continue; }
+            int n = 0;
+            if (passPlayer) {
+                if (rt) rt->pushLocalPlayer(ls);
+                else lua_pushnil(ls);
+                if (lua_isnil(ls, -1)) {
+                    lua_pop(ls, 1);
+                    lua_pushstring(ls, "Player");
+                }
+                ++n;
+            }
+            for (int i = 0; i < nargs; ++i) {
+                lua_pushvalue(ls, firstArg + i);
+                ++n;
+            }
+            if (rt) rt->callStart_ = std::chrono::steady_clock::now();
+            if (lua_pcall(ls, n, 0, 0) != LUA_OK) {
+                const char* err = lua_tostring(ls, -1);
+                if (rt) rt->lastError = err ? err : "RemoteEvent";
+                std::fprintf(stderr, "RemoteEvent: %s\n", err ? err : "?");
+                lua_pop(ls, 1);
+            }
+        }
+    }
     static int luaRemoteFireServer(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt || !rt->net) return blockyLuaError(ls, "RemoteEvent: rete offline");
         std::string name = "Remote";
         int arg = 1;
         if (lua_istable(ls, 1)) {
             name = readStringField(ls, 1, "Name", "Remote");
             arg = 2;
         }
-        const char* payload = luaL_optstring(ls, arg, "");
-        rt->net->sendRemoteEventToServer(name.c_str(), payload);
+        const bool netClient = rt && rt->net && rt->net->role == NetRole::Client;
+        if (!netClient) {
+            auto it = scriptControls().remoteServer.find(name);
+            if (it != scriptControls().remoteServer.end())
+                callRemoteListeners(ls, it->second, true, arg);
+        }
+        if (netClient) {
+            const std::string wire = packRemote(ls, arg, lua_gettop(ls));
+            rt->net->sendRemoteEventToServer(name.c_str(), wire.c_str());
+        }
         return 0;
     }
 
     static int luaRemoteFireAllClients(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt || !rt->net) return blockyLuaError(ls, "RemoteEvent: rete offline");
         std::string name = "Remote";
         int arg = 1;
         if (lua_istable(ls, 1)) {
             name = readStringField(ls, 1, "Name", "Remote");
             arg = 2;
         }
-        const char* payload = luaL_optstring(ls, arg, "");
-        if (rt->net->role != NetRole::Host)
+        if (rt && rt->net && rt->net->role == NetRole::Client)
             return blockyLuaError(ls, "FireAllClients solo su Host");
-        rt->net->fireRemoteEventAllClients(name.c_str(), payload);
+        auto it = scriptControls().remoteClient.find(name);
+        if (it != scriptControls().remoteClient.end())
+            callRemoteListeners(ls, it->second, false, arg);
+        if (rt && rt->net && rt->net->role == NetRole::Host) {
+            const std::string wire = packRemote(ls, arg, lua_gettop(ls));
+            rt->net->fireRemoteEventAllClients(name.c_str(), wire.c_str());
+        }
         return 0;
     }
 
     // FireClient(remote, player, payload) — player = nome stringa o peer id number
     static int luaRemoteFireClient(lua_State* ls) {
         auto* rt = fromState(ls);
-        if (!rt || !rt->net) return blockyLuaError(ls, "RemoteEvent: rete offline");
-        if (rt->net->role != NetRole::Host)
+        if (rt && rt->net && rt->net->role == NetRole::Client)
             return blockyLuaError(ls, "FireClient solo su Host (server)");
         std::string name = "Remote";
         int arg = 1;
@@ -7147,16 +10714,17 @@ private:
             name = readStringField(ls, 1, "Name", "Remote");
             arg = 2;
         }
+        auto lit = scriptControls().remoteClient.find(name);
+        if (lit != scriptControls().remoteClient.end())
+            callRemoteListeners(ls, lit->second, false, arg + 1);
+        if (!(rt && rt->net && rt->net->role == NetRole::Host))
+            return 0;
         uint8_t peerId = 0;
         if (lua_isnumber(ls, arg)) {
             peerId = (uint8_t)lua_tointeger(ls, arg);
         } else if (lua_isstring(ls, arg)) {
             peerId = rt->net->findPeerIdByName(lua_tostring(ls, arg));
-            if (peerId == 0)
-                return blockyLuaError(ls, "FireClient: giocatore '%s' non trovato",
-                                     lua_tostring(ls, arg));
         } else if (lua_istable(ls, arg)) {
-            // Player-like table: .Name o .UserId
             lua_getfield(ls, arg, "UserId");
             if (lua_isnumber(ls, -1))
                 peerId = (uint8_t)lua_tointeger(ls, -1);
@@ -7167,16 +10735,10 @@ private:
                     peerId = rt->net->findPeerIdByName(lua_tostring(ls, -1));
                 lua_pop(ls, 1);
             }
-            if (peerId == 0)
-                return blockyLuaError(ls, "FireClient: Player senza Name/UserId validi");
-        } else {
-            return blockyLuaError(ls, "FireClient(player, payload): player = id|nome|Player");
         }
-        const char* payload = luaL_optstring(ls, arg + 1, "");
-        if (payload && std::strlen(payload) > (size_t)kRemoteExMaxPayload)
-            return blockyLuaError(ls, "FireClient: payload troppo lungo (max %d)",
-                                 kRemoteExMaxPayload);
-        rt->net->fireRemoteEventToClient(peerId, name.c_str(), payload);
+        if (peerId == 0) return 0;
+        const std::string wire = packRemote(ls, arg + 1, lua_gettop(ls));
+        rt->net->fireRemoteEventToClient(peerId, name.c_str(), wire.c_str());
         return 0;
     }
 
@@ -7361,6 +10923,21 @@ private:
         lua_setfield(ls, -2, "GetChildren");
         blockyPushCFunction(ls, luaServiceWaitForChild);
         lua_setfield(ls, -2, "WaitForChild");
+        // game.ReplicatedStorage.Shared: i figli si leggono anche per nome, come in Roblox.
+        lua_newtable(ls);
+        blockyPushCFunction(ls, luaServiceIndex);
+        lua_setfield(ls, -2, "__index");
+        lua_setmetatable(ls, -2);
+    }
+
+    static int luaServiceIndex(lua_State* ls) {
+        auto* rt = fromState(ls);
+        const char* key = lua_tostring(ls, 2);
+        if (!rt || !rt->workspace || !key) return 0;
+        const int child = rt->workspace->findSharedChild(serviceFromSelf(ls, 1), -1, key);
+        if (child < 0) return 0;
+        pushSharedInstance(ls, child);
+        return 1;
     }
 
     static int sharedIndexFromSelf(lua_State* ls, int selfIdx) {
@@ -7487,9 +11064,9 @@ private:
             name = readStringField(ls, 1, "Name", "Remote");
             arg = 2;
         }
-        const char* payload = luaL_optstring(ls, arg, "");
         // Client online: invia RFREQ e yield finche' arriva RFRES
         if (rt && rt->net && rt->net->role == NetRole::Client) {
+            const std::string payload = packRemote(ls, arg, lua_gettop(ls));
             if (lua_pushthread(ls)) {
                 lua_pop(ls, 1);
                 // non in coroutine — fallback sync impossibile, ritorna nil
@@ -7499,7 +11076,7 @@ private:
             int id = scriptControls().nextInvokeId++;
             char corr[32];
             std::snprintf(corr, sizeof(corr), "%d", id);
-            std::string wire = std::string("RFREQ|") + corr + "|" + (payload ? payload : "");
+            std::string wire = std::string("RFREQ|") + corr + "|" + payload;
             rt->net->sendRemoteEventToServer(name.c_str(), wire.c_str());
             lua_pushthread(ls);
             lua_xmove(ls, rt->L, 1);
@@ -7517,15 +11094,22 @@ private:
             lua_pushnil(ls);
             return 1;
         }
+        const int base = lua_gettop(ls);
         lua_rawgeti(ls, LUA_REGISTRYINDEX, it->second);
         if (!lua_isfunction(ls, -1)) { lua_pop(ls, 1); lua_pushnil(ls); return 1; }
-        if (rt && rt->net && rt->net->localName[0])
-            lua_pushstring(ls, rt->net->localName);
-        else
+        if (rt) rt->pushLocalPlayer(ls);
+        else lua_pushnil(ls);
+        if (lua_isnil(ls, -1)) {
+            lua_pop(ls, 1);
             lua_pushstring(ls, "Player");
-        lua_pushstring(ls, payload ? payload : "");
+        }
+        int n = 1;
+        for (int i = arg; i <= base; ++i) {
+            lua_pushvalue(ls, i);
+            ++n;
+        }
         if (rt) rt->callStart_ = std::chrono::steady_clock::now();
-        if (lua_pcall(ls, 2, 1, 0) != LUA_OK) {
+        if (lua_pcall(ls, n, LUA_MULTRET, 0) != LUA_OK) {
             const char* err = lua_tostring(ls, -1);
             if (rt) rt->lastError = err ? err : "InvokeServer error";
             std::fprintf(stderr, "InvokeServer error: %s\n", err ? err : "?");
@@ -7533,7 +11117,7 @@ private:
             lua_pushnil(ls);
             return 1;
         }
-        return 1;
+        return lua_gettop(ls) - base;
     }
 
     static int luaRemoteInvokeClient(lua_State* ls) {
@@ -7544,45 +11128,62 @@ private:
             name = readStringField(ls, 1, "Name", "Remote");
             arg = 2;
         }
-        // player arg opzionale, poi payload
-        const char* payload = "";
-        if (lua_isstring(ls, arg) && !lua_isnumber(ls, arg)) {
-            // potrebbe essere player name o payload — se c'e' arg+1 e' payload
-            if (lua_gettop(ls) >= arg + 1)
-                payload = luaL_optstring(ls, arg + 1, "");
-            else
-                payload = luaL_optstring(ls, arg, "");
-        } else {
-            payload = luaL_optstring(ls, arg + 1, "");
+        // InvokeClient(player, ...). Senza player, gli argomenti partono da subito.
+        int first = arg;
+        uint8_t peer = 0;
+        if (lua_isnumber(ls, arg) && rt && rt->net) {
+            peer = (uint8_t)lua_tointeger(ls, arg);
+            first = arg + 1;
+        } else if (lua_istable(ls, arg)) {
+            first = arg + 1;
+            if (rt && rt->net) {
+                lua_getfield(ls, arg, "Name");
+                if (lua_isstring(ls, -1)) peer = rt->net->findPeerIdByName(lua_tostring(ls, -1));
+                lua_pop(ls, 1);
+            }
+        } else if (lua_isstring(ls, arg) && !lua_isnumber(ls, arg) && lua_gettop(ls) >= arg + 1 && rt && rt->net) {
+            peer = rt->net->findPeerIdByName(lua_tostring(ls, arg));
+            if (peer) first = arg + 1;
         }
-        // Locale: OnClientInvoke
         auto it = scriptControls().remoteInvokeClient.find(name);
         if (it != scriptControls().remoteInvokeClient.end() && it->second != LUA_NOREF) {
+            const int base = lua_gettop(ls);
             lua_rawgeti(ls, LUA_REGISTRYINDEX, it->second);
             if (lua_isfunction(ls, -1)) {
-                lua_pushstring(ls, payload ? payload : "");
+                const int n = std::max(0, base - first + 1);
+                for (int i = 0; i < n; ++i) lua_pushvalue(ls, first + i);
                 if (rt) rt->callStart_ = std::chrono::steady_clock::now();
-                if (lua_pcall(ls, 1, 1, 0) != LUA_OK) {
+                if (lua_pcall(ls, n, LUA_MULTRET, 0) != LUA_OK) {
+                    if (rt) rt->lastError = rt->safeToString(-1);
                     lua_pop(ls, 1);
                     lua_pushnil(ls);
+                    return 1;
                 }
-                return 1;
+                return lua_gettop(ls) - base;
             }
             lua_pop(ls, 1);
         }
-        // Rete: FireClient con RFREQ (client risponde con RFRES se ha OnClientInvoke via drain)
-        if (rt && rt->net && rt->net->role == NetRole::Host) {
-            uint8_t peer = 0;
-            if (lua_isnumber(ls, arg)) peer = (uint8_t)lua_tointeger(ls, arg);
-            else if (lua_isstring(ls, arg) && lua_gettop(ls) >= arg + 1)
-                peer = rt->net->findPeerIdByName(lua_tostring(ls, arg));
-            if (peer) {
-                int id = scriptControls().nextInvokeId++;
-                char corr[32];
-                std::snprintf(corr, sizeof(corr), "c%d", id);
-                std::string wire = std::string("RFREQ|") + corr + "|" + (payload ? payload : "");
-                rt->net->fireRemoteEventToClient(peer, name.c_str(), wire.c_str());
+        if (rt && rt->net && rt->net->role == NetRole::Host && peer) {
+            const std::string payload = packRemote(ls, first, lua_gettop(ls));
+            if (lua_pushthread(ls)) {
+                lua_pop(ls, 1);
+                lua_pushnil(ls);
+                return 1;
             }
+            int id = scriptControls().nextInvokeId++;
+            char corr[32];
+            std::snprintf(corr, sizeof(corr), "c%d", id);
+            std::string wire = std::string("RFREQ|") + corr + "|" + payload;
+            rt->net->fireRemoteEventToClient(peer, name.c_str(), wire.c_str());
+            lua_pushthread(ls);
+            lua_xmove(ls, rt->L, 1);
+            int ref = blockyLuaRef(rt->L);
+            ScriptControls::PendingInvoke p;
+            p.coRef = ref;
+            p.corrId = corr;
+            p.remaining = 10.f;
+            scriptControls().pendingInvokes.push_back(std::move(p));
+            return lua_yield(ls, 0);
         }
         lua_pushnil(ls);
         return 1;
@@ -7675,6 +11276,10 @@ private:
             int idx = sharedIndexFromSelf(ls, 1);
             if (idx >= 0 && idx < (int)rt->workspace->instances.size())
                 path = rt->workspace->instances[idx].name;
+            // La Instance stessa (anche dentro cartelle annidate): niente ricerca per nome.
+            if (idx >= 0 && idx < (int)rt->workspace->instances.size()
+                && rt->workspace->instances[idx].className == "ModuleScript")
+                return requireModuleIndex(ls, rt, idx, path);
         }
         if (path.empty())
             return blockyLuaError(ls, "require(ModuleScript | \"Name\")");
@@ -7717,9 +11322,13 @@ private:
         if (modIdx < 0)
             return blockyLuaError(ls, "require: ModuleScript '%s' non trovato in ReplicatedStorage", path.c_str());
 
-        const auto& mod = rt->workspace->instances[modIdx];
-        if (mod.className != "ModuleScript")
+        if (rt->workspace->instances[modIdx].className != "ModuleScript")
             return blockyLuaError(ls, "require: '%s' non e' un ModuleScript", path.c_str());
+        return requireModuleIndex(ls, rt, modIdx, path);
+    }
+
+    static int requireModuleIndex(lua_State* ls, LuaRuntime* rt, int modIdx, const std::string& path) {
+        const auto& mod = rt->workspace->instances[modIdx];
 
         std::string cacheKey = std::to_string((int)mod.service) + "/" + std::to_string(modIdx);
         auto it = rt->moduleCache_.find(cacheKey);
@@ -7735,6 +11344,8 @@ private:
         std::string chunk = mod.source;
         if (chunk.find("return") == std::string::npos)
             chunk = "local module = {}\n" + chunk + "\nreturn module\n";
+        // Ogni ModuleScript ha il suo script (require(script.Figlio) dentro i moduli).
+        chunk = "local script = script; " + chunk;
         const std::string bc = Luau::compile(chunk);
         std::string cname = "=" + mod.name;
         if (luau_load(rt->L, cname.c_str(), bc.data(), bc.size(), 0) != 0) {
@@ -7744,7 +11355,15 @@ private:
             return blockyLuaError(ls, "require compile: %s", rt->lastError.c_str());
         }
         rt->callStart_ = std::chrono::steady_clock::now();
-        if (lua_pcall(rt->L, 0, 1, 0) != LUA_OK) {
+        lua_getglobal(rt->L, "script");          // quello di chi chiama, da rimettere dopo
+        lua_insert(rt->L, -2);
+        pushSharedInstance(rt->L, modIdx);
+        lua_setglobal(rt->L, "script");
+        const int callRc = lua_pcall(rt->L, 0, 1, 0);
+        lua_pushvalue(rt->L, -2);
+        lua_setglobal(rt->L, "script");
+        lua_remove(rt->L, -2);
+        if (callRc != LUA_OK) {
             rt->requireStack_.pop_back();
             rt->lastError = rt->safeToString(-1);
             lua_pop(rt->L, 1);
@@ -7828,8 +11447,9 @@ private:
         if (nargs < 0) return blockyLuaError(ls, "task.spawn(funzione o thread, ...)");
         rt->callStart_ = std::chrono::steady_clock::now();
         int st = lua_resume(co, rt->L, nargs);
-        int nres = lua_gettop(co);
-        if (st != LUA_OK && st != LUA_YIELD) {
+        if (st == LUA_BREAK) rt->onDebugBreak(co);   // pausa del debugger, non un errore
+        int nres = st == LUA_BREAK ? 0 : lua_gettop(co);
+        if (st != LUA_OK && st != LUA_YIELD && st != LUA_BREAK) {
             const char* err = lua_tostring(co, -1);
             std::string msg = err ? err : "error";
             lua_pop(rt->L, 1);

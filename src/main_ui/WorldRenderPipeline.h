@@ -7,6 +7,11 @@
 //   passStudioGizmos → passWorkspaceModels → passAvatars → friends
 
 #include "render/RenderCullLod.h"
+#include "engine/RuntimeScale.h"
+#include "render/PartSpatialGrid.h"
+#include "main_ui/PartInstancedDraw.h"
+
+#include <chrono>
 #include "render/RenderPipeline.h"
 
 static const glm::vec3 kGizmoRGB[3] = {
@@ -15,7 +20,242 @@ static const glm::vec3 kGizmoRGB[3] = {
     {0.28f, 0.52f, 1.00f},
 };
 
+// ---- Gizmo stile Roblox Studio (disegnati sopra la scena) -----------------------------------
+// Sempre della stessa grandezza sullo schermo e sempre visibili sopra le part:
+// Sposta = 6 frecce (anche verso il negativo) che escono dalla superficie,
+// Ridimensiona = una sfera per faccia, Ruota = 3 anelli attorno alla part.
+// Si illumina solo la maniglia sotto il mouse.
+static ImU32 gizmoCol(int axis, bool hot) {
+    const glm::vec3 c = hot ? glm::mix(kGizmoRGB[axis], glm::vec3(1.f, 0.95f, 0.55f), 0.55f) : kGizmoRGB[axis];
+    return IM_COL32((int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255), 255);
+}
+
+static void drawStudioGizmoOverlay() {
+    if (g_screen != AppScreen::Studio || g_studioTesting) return;
+    if (g_tool != StudioTool::Move && g_tool != StudioTool::Scale && g_tool != StudioTool::Rotate) return;
+    const WorkspacePart* pt = gizmoPart();
+    if (!pt) return;
+    const WorkspacePart& p = *pt;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImU32 kShadow = IM_COL32(15, 18, 24, 170);
+    double mxd = 0, myd = 0;
+    glfwGetCursorPos(glfwGetCurrentContext(), &mxd, &myd);
+    const float mx = (float)mxd, my = (float)myd;
+    const bool mouseFree = !ImGui::GetIO().WantCaptureMouse && !g_rmbLook;
+
+    if (g_tool == StudioTool::Move) {
+        int hAx = -1;
+        g_gizmoHoverSign = 0;
+        if (g_moveDragging) hAx = g_moveAxis;
+        else if (mouseFree && !pickMoveHandle(mx, my, hAx)) hAx = -1;
+        for (int axis = 0; axis < 3; ++axis)
+            for (int s = -1; s <= 1; s += 2) {
+                glm::vec3 a, b;
+                moveHandleSeg(p, axis, s, a, b);
+                float ax, ay, bx, by;
+                if (!gizmoWorldToScreen(a, ax, ay) || !gizmoWorldToScreen(b, bx, by)) continue;
+                const bool hot = hAx == axis && (g_moveDragging || g_gizmoHoverSign == s);
+                const ImU32 c = gizmoCol(axis, hot);
+                const float dx = bx - ax, dy = by - ay, l = std::max(1.f, std::sqrt(dx * dx + dy * dy));
+                const ImVec2 dn{dx / l, dy / l}, nn{-dy / l, dx / l};
+                const float cone = std::min(18.f, l * 0.45f), w = hot ? 8.f : 6.5f;
+                const ImVec2 base{bx - dn.x * cone, by - dn.y * cone};
+                dl->AddLine({ax, ay}, base, kShadow, hot ? 6.f : 5.f);
+                dl->AddLine({ax, ay}, base, c, hot ? 4.f : 3.f);
+                dl->AddTriangleFilled({bx + dn.x, by + dn.y}, {base.x + nn.x * (w + 1), base.y + nn.y * (w + 1)},
+                                      {base.x - nn.x * (w + 1), base.y - nn.y * (w + 1)}, kShadow);
+                dl->AddTriangleFilled({bx, by}, {base.x + nn.x * w, base.y + nn.y * w}, {base.x - nn.x * w, base.y - nn.y * w}, c);
+            }
+    } else if (g_tool == StudioTool::Scale) {
+        int hAx = -1, hSg = 0;
+        if (g_scaleDragging) { hAx = g_scaleAxis; hSg = g_scaleSign; }
+        else if (mouseFree && !pickScaleHandle(mx, my, hAx, hSg)) hAx = -1;
+        for (int axis = 0; axis < 3; ++axis)
+            for (int s = -1; s <= 1; s += 2) {
+                float sx, sy;
+                if (!gizmoWorldToScreen(handleWorldPos(p, axis, s), sx, sy)) continue;
+                const bool hot = hAx == axis && hSg == s;
+                const float r = hot ? 9.f : 7.f;
+                dl->AddCircleFilled({sx, sy}, r + 1.5f, kShadow, 20);
+                dl->AddCircleFilled({sx, sy}, r, gizmoCol(axis, hot), 20);
+                dl->AddCircleFilled({sx - r * 0.3f, sy - r * 0.3f}, r * 0.32f, IM_COL32(255, 255, 255, 110), 10);
+            }
+    } else {
+        int hAx = -1;
+        if (g_rotateDragging) hAx = g_rotateAxis;
+        else if (mouseFree && !pickRotateHandle(mx, my, hAx)) hAx = -1;
+        const float R = gizmoRingRadius(p);
+        for (int axis = 0; axis < 3; ++axis) {
+            const glm::vec3 axisV = g_rotateDragging && g_rotateAxis == axis ? g_rotateAxisW : gizmoAxisDir(p, axis);
+            const glm::vec3 ref = (std::fabs(axisV.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+            const glm::vec3 u = glm::normalize(glm::cross(axisV, ref)), v = glm::normalize(glm::cross(axisV, u));
+            ImVec2 pts[65];
+            int n = 0;
+            for (int i = 0; i <= 64; ++i) {
+                const float a = (float)i / 64.f * 6.2831853f;
+                float sx, sy;
+                if (!gizmoWorldToScreen(p.position + (u * std::cos(a) + v * std::sin(a)) * R, sx, sy)) { n = 0; break; }
+                pts[n++] = {sx, sy};
+            }
+            if (n < 2) continue;
+            const bool hot = hAx == axis;
+            dl->AddPolyline(pts, n, kShadow, 0, hot ? 6.f : 4.5f);
+            dl->AddPolyline(pts, n, gizmoCol(axis, hot), 0, hot ? 4.f : 2.5f);
+            // Spicchio del giro fatto mentre trascini l'anello.
+            if (g_rotateDragging && g_rotateAxis == axis && std::fabs(g_rotateLiveDelta) > 0.2f) {
+                float cx, cy;
+                if (gizmoWorldToScreen(p.position, cx, cy)) {
+                    const int steps = std::clamp((int)std::fabs(g_rotateLiveDelta) / 4 + 2, 2, 90);
+                    const float sgn = g_rotateLiveDelta >= 0.f ? 1.f : -1.f;
+                    ImVec2 prev{};
+                    for (int i = 0; i <= steps; ++i) {
+                        const float a = g_rotateStartAngle + sgn * glm::radians(std::fabs(g_rotateLiveDelta)) * (float)i / (float)steps;
+                        float sx, sy;
+                        if (!gizmoWorldToScreen(p.position + (u * std::cos(a) + v * std::sin(a)) * R, sx, sy)) continue;
+                        if (i > 0) dl->AddTriangleFilled({cx, cy}, prev, {sx, sy}, IM_COL32(255, 220, 90, 70));
+                        prev = {sx, sy};
+                    }
+                }
+            }
+        }
+    }
+
+    // Quanto hai spostato / allargato / girato, vicino al mouse.
+    char info[48] = "";
+    if (g_moveDragging) std::snprintf(info, sizeof(info), "%+.2f stud", g_moveLiveDelta);
+    else if (g_scaleDragging) std::snprintf(info, sizeof(info), "%.2f stud", g_scaleLiveSize);
+    else if (g_rotateDragging) std::snprintf(info, sizeof(info), "%+.1f\xC2\xB0", g_rotateLiveDelta);
+    if (info[0]) {
+        const ImVec2 ts = ImGui::CalcTextSize(info);
+        dl->AddRectFilled({mx + 14, my + 10}, {mx + 22 + ts.x, my + 14 + ts.y}, IM_COL32(20, 24, 32, 215), 4.f);
+        dl->AddText({mx + 18, my + 12}, IM_COL32(255, 235, 140, 255), info);
+    }
+}
+
+// Contorno azzurro della part sotto il mouse (come il "hover" di Roblox Studio)
+// e la griglia sul terreno quando "Mostra griglia" e' acceso.
+static bool studioMultiContains(int i);   // StudioFeaturesUi.h
+
+static void drawPartOutline(ImDrawList* dl, const WorkspacePart& p, ImU32 col, float thick) {
+    const glm::mat4 m = partModelMatrix(p);
+    ImVec2 c[8];
+    for (int k = 0; k < 8; ++k) {
+        const glm::vec3 v = glm::vec3(m * glm::vec4((k & 1) ? 0.5f : -0.5f, (k & 2) ? 0.5f : -0.5f, (k & 4) ? 0.5f : -0.5f, 1.f));
+        float x, y;
+        if (!gizmoWorldToScreen(v, x, y)) return;   // un angolo dietro la camera: niente contorno
+        c[k] = {x, y};
+    }
+    static const int e[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& ed : e) dl->AddLine(c[ed[0]], c[ed[1]], col, thick);
+}
+
+static void drawStudioHoverAndGrid() {
+    if (g_screen != AppScreen::Studio || g_studioTesting) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    if (g_studioGridVisible) {
+        // Griglia sul passo di spostamento, centrata sulla part selezionata.
+        float step = g_studioSnapEnabled ? g_studioSnapMove : g_studioGridSize;
+        step = std::clamp(step, kMinPartSize, 16.f);
+        glm::vec3 c = g_cam.pos + g_cam.front() * std::clamp(studioFocusDistance(), 0.2f, 40.f);
+        float planeY = 0.02f;
+        if (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size()) {
+            c = g_world.parts[g_selectedPart].position;
+            planeY = c.y;
+        }
+        c.x = std::round(c.x / step) * step;
+        c.z = std::round(c.z / step) * step;
+        const int n = 16;
+        const float half = step * (float)n;
+        for (int axis = 0; axis < 2; ++axis)
+            for (int i = -n; i <= n; ++i) {
+                const float off = (float)i * step;
+                const float along = (axis == 0 ? c.z : c.x) + off;
+                const float period = step * 4.f;
+                const bool major = std::fmod(std::fabs(along), period) < step * 0.25f;
+                for (int sgm = -n; sgm < n; ++sgm) {
+                    glm::vec3 a = c, b = c;
+                    if (axis == 0) { a += glm::vec3((float)sgm * step, 0.f, off); b += glm::vec3((float)(sgm + 1) * step, 0.f, off); }
+                    else { a += glm::vec3(off, 0.f, (float)sgm * step); b += glm::vec3(off, 0.f, (float)(sgm + 1) * step); }
+                    a.y = b.y = planeY;
+                    float ax, ay, bx, by;
+                    if (!gizmoWorldToScreen(a, ax, ay) || !gizmoWorldToScreen(b, bx, by)) continue;
+                    const float d = glm::length(glm::vec2(a.x - c.x, a.z - c.z)) / half;   // sfuma verso il bordo
+                    const int alpha = (int)((major ? 110.f : 55.f) * std::max(0.f, 1.f - d));
+                    if (alpha > 3) dl->AddLine({ax, ay}, {bx, by}, IM_COL32(200, 210, 225, alpha), major ? 1.4f : 1.f);
+                }
+            }
+    }
+    const bool dragging = g_moveDragging || g_rotateDragging || g_scaleDragging || g_freeDragging;
+    if (dragging || ImGui::GetIO().WantCaptureMouse || g_rmbLook) return;
+    double mx = 0, my = 0;
+    glfwGetCursorPos(glfwGetCurrentContext(), &mx, &my);
+    const int hov = pickPartAtMouse((float)mx, (float)my);
+    if (hov < 0 || hov >= (int)g_world.parts.size() || hov == g_selectedPart || studioMultiContains(hov)) return;
+    const WorkspacePart& p = g_world.parts[(size_t)hov];
+    if (p.locked) return;
+    drawPartOutline(dl, p, IM_COL32(120, 190, 255, 200), 1.6f);
+}
+
+/** Strumento vincoli: il punto gia' scelto e la linea fino al mouse. Esc lo spegne. */
+static void drawConstraintToolOverlay() {
+    if (g_constraintToolKind < 0) return;
+    if (g_screen != AppScreen::Studio || g_studioTesting || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        g_constraintToolKind = -1;
+        g_ctPart0 = -1;
+        return;
+    }
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    float sx, sy;
+    if (g_ctPart0 >= 0 && gizmoWorldToScreen(g_ctPoint0, sx, sy)) {
+        dl->AddLine({sx, sy}, m, IM_COL32(110, 230, 120, 200), 2.f);
+        dl->AddCircleFilled({sx, sy}, 6.f, IM_COL32(110, 230, 120, 255));
+    }
+    char txt[96];
+    std::snprintf(txt, sizeof(txt), "%s: %s", constraintKindName((ConstraintKind)g_constraintToolKind),
+                  g_ctPart0 < 0 ? "clic sulla prima part" : "clic sulla seconda part");
+    dl->AddRectFilled({m.x + 14, m.y + 12}, {m.x + 22 + ImGui::CalcTextSize(txt).x, m.y + 32}, IM_COL32(20, 24, 32, 215), 4.f);
+    dl->AddText({m.x + 18, m.y + 14}, IM_COL32(170, 240, 170, 255), txt);
+}
+
+static void drawScriptAdornmentOutlines() {
+    if (!ImGui::GetCurrentContext()) return;
+    const bool show = g_screen == AppScreen::Playing || g_screen == AppScreen::Studio;
+    if (!show) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    for (const auto& c : g_world.welds) {
+        if (!c.enabled || c.part0 < 0 || c.part1 < 0) continue;
+        if (c.part0 >= (int)g_world.parts.size() || c.part1 >= (int)g_world.parts.size()) continue;
+        float ax, ay, bx, by;
+        if (!gizmoWorldToScreen(g_world.parts[(size_t)c.part0].position, ax, ay)) continue;
+        if (!gizmoWorldToScreen(g_world.parts[(size_t)c.part1].position, bx, by)) continue;
+        dl->AddLine({ax, ay}, {bx, by}, IM_COL32(120, 220, 140, 180), 1.5f);
+    }
+    for (const auto& p : g_world.parts) {
+        if (p.highlightEnabled) {
+            const int r = (int)std::lround(std::clamp(p.highlightR, 0.f, 1.f) * 255.f);
+            const int g = (int)std::lround(std::clamp(p.highlightG, 0.f, 1.f) * 255.f);
+            const int b = (int)std::lround(std::clamp(p.highlightB, 0.f, 1.f) * 255.f);
+            drawPartOutline(dl, p, IM_COL32(r, g, b, 230), 2.4f);
+        }
+        if (p.selectionBox)
+            drawPartOutline(dl, p, IM_COL32(80, 200, 255, 220), 1.6f);
+        if (p.selectionSphere) {
+            float cx, cy, ex, ey;
+            const float rad = 0.5f * std::max(p.size.x, std::max(p.size.y, p.size.z));
+            if (gizmoWorldToScreen(p.position, cx, cy)
+                && gizmoWorldToScreen(p.position + glm::vec3(rad, 0.f, 0.f), ex, ey)) {
+                const float pr = std::max(6.f, std::hypot(ex - cx, ey - cy));
+                dl->AddCircle({cx, cy}, pr, IM_COL32(80, 220, 255, 210), 32, 1.8f);
+            }
+        }
+    }
+}
+
 static void drawGizmoOverlayHud() {
+    drawStudioHoverAndGrid();   // contorno sotto il mouse + griglia
+    drawConstraintToolOverlay(); // strumento vincoli (due clic)
+    drawStudioGizmoOverlay();   // le maniglie (stile Roblox)
     if (g_studioTesting || g_screen != AppScreen::Studio) return;
     if (!g_moveDragging && !g_rotateDragging && !g_scaleDragging) return;
     ImGui::SetNextWindowPos({(float)g_w * 0.5f - 140.f, 64.f}, ImGuiCond_Always);
@@ -26,15 +266,15 @@ static void drawGizmoOverlayHud() {
     if (g_rotateDragging) {
         const char* ax = (g_rotateAxis == 0) ? "X" : (g_rotateAxis == 1) ? "Y" : "Z";
         ImGui::TextColored({1.f, 0.85f, 0.3f, 1.f}, "Rotate %s  %+0.1f°", ax, g_rotateLiveDelta);
-        ImGui::TextDisabled("Snap 5° · Shift=1° · Ctrl=libero");
+        ImGui::TextDisabled("Scatti dal passo di rotazione · Ctrl=libero");
     } else if (g_moveDragging) {
         const char* ax = (g_moveAxis == 0) ? "X" : (g_moveAxis == 1) ? "Y" : "Z";
         ImGui::TextColored({0.5f, 0.9f, 1.f, 1.f}, "Move %s  %+0.2f", ax, g_moveLiveDelta);
-        ImGui::TextDisabled("Snap 0.25 · Shift=0.05 · Ctrl=libero");
+        ImGui::TextDisabled("Scatti dal passo di spostamento · Ctrl=libero");
     } else if (g_scaleDragging) {
         const char* ax = (g_scaleAxis == 0) ? "X" : (g_scaleAxis == 1) ? "Y" : "Z";
         ImGui::TextColored({0.6f, 1.f, 0.55f, 1.f}, "Scale %s  %.2f", ax, g_scaleLiveSize);
-        ImGui::TextDisabled("Snap 0.25 · Shift=0.1 · Ctrl=libero");
+        ImGui::TextDisabled("Ctrl = tutti e due i lati · Shift = in proporzione");
     }
     ImGui::End();
 }
@@ -252,6 +492,23 @@ static void drawCubeShadow(GLuint vao, GLuint prog, const glm::mat4& m, const gl
     glDrawArrays(GL_TRIANGLES, 0, vc);
 }
 
+static glm::mat4 cachedPartModel(int index, const WorkspacePart& p) {
+    struct Key { glm::vec3 pos{0}, rot{0}, size{0}; int shape{-1}; glm::mat4 m{0}; };
+    static std::vector<Key> cache;
+    if (index < 0) return partModelMatrix(p);
+    if ((int)cache.size() <= index) cache.resize((size_t)index + 1);
+    Key& k = cache[(size_t)index];
+    if (k.m[3][3] == 1.f && k.pos == p.position && k.rot == p.rotation && k.size == p.size
+        && k.shape == (int)p.shape)
+        return k.m;
+    k.pos = p.position;
+    k.rot = p.rotation;
+    k.size = p.size;
+    k.shape = (int)p.shape;
+    k.m = partModelMatrix(p);
+    return k.m;
+}
+
 static void renderShadowDepth(GLuint vao, GLuint meshP) {
     g_sunShadowOn = false;
     bumpSceneUniforms();   // uSunShadow / uLightVP cambiano qui
@@ -268,11 +525,18 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
     const float shapeLow2Shadow =
         lodDistancesFor(g_engine.quality).shapeLow * lodDistancesFor(g_engine.quality).shapeLow;
 
-    for (const auto& p : g_world.parts) {
-        if (p.isTransparent()) continue;
+    struct ShadowItem { GLuint vao; int verts; glm::mat4 model; };
+    static std::vector<ShadowItem> shadowItems;
+    shadowItems.clear();
+    auto pushShadowPart = [&](int i) {
+        if (blk::scale::stream().hides(i)) return;
+        const WorkspacePart& p = g_world.parts[(size_t)i];
+        if (g_world.partHeldInHand(p)) return;
+        if (partFileMeshReady(p)) return;
+        if (!p.castShadow || p.isTransparent() || p.transparency >= 0.92f) return;
         glm::vec3 d = p.position - focus;
         float d2 = glm::dot(d, d);
-        if (d2 > reach2) continue;
+        if (d2 > reach2) return;
         GLuint dv = vao;
         int vc = 36;
         PartMeshLod shadowLod = (d2 > shapeLow2Shadow) ? PartMeshLod::Low : PartMeshLod::High;
@@ -283,9 +547,38 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
             dv = g_partMeshes.wedge.vao;
             vc = g_partMeshes.wedge.vertexCount;
         }
-        g_shadowMap.setModel(partModelMatrix(p));
-        glBindVertexArray(dv);
-        glDrawArrays(GL_TRIANGLES, 0, vc);
+        if (!dv || vc <= 0) return;
+        shadowItems.push_back({dv, vc, cachedPartModel(i, p)});
+    };
+    for (int i = 0; i < (int)g_world.parts.size(); ++i) pushShadowPart(i);
+
+    if (g_shadowMap.depthInstProg && !shadowItems.empty()) {
+        std::sort(shadowItems.begin(), shadowItems.end(), [](const ShadowItem& a, const ShadowItem& b) {
+            if (a.vao != b.vao) return a.vao < b.vao;
+            return a.verts < b.verts;
+        });
+        static std::vector<glm::mat4> shadowMats;
+        size_t at = 0;
+        while (at < shadowItems.size()) {
+            size_t end = at + 1;
+            while (end < shadowItems.size()
+                   && shadowItems[end].vao == shadowItems[at].vao
+                   && shadowItems[end].verts == shadowItems[at].verts)
+                ++end;
+            shadowMats.resize(end - at);
+            for (size_t k = at; k < end; ++k)
+                shadowMats[k - at] = shadowItems[k].model;
+            g_shadowMap.drawInstanceGroup(shadowItems[at].vao, shadowItems[at].verts,
+                                          shadowMats.data(), (int)shadowMats.size());
+            at = end;
+        }
+        glUseProgram(g_shadowMap.depthProg);
+    } else {
+        for (const ShadowItem& it : shadowItems) {
+            g_shadowMap.setModel(it.model);
+            glBindVertexArray(it.vao);
+            glDrawArrays(GL_TRIANGLES, 0, it.verts);
+        }
     }
     for (int i = 0; i < (int)g_world.models.size(); ++i) {
         if (i >= (int)g_wsMeshes.size() || !g_wsMeshes[i].loaded) continue;
@@ -297,6 +590,7 @@ static void renderShadowDepth(GLuint vao, GLuint meshP) {
                              * glm::scale(glm::mat4(1.f), m.scale));
         g_wsMeshes[i].drawTextured(g_shadowMap.depthProg, {1.f, 1.f, 1.f}, 1.f);
     }
+    drawPartFileMeshShadows(g_shadowMap.depthProg, focus, reach2);
 
     const glm::mat4 idm(1.f);
     const glm::vec3 zero(0.f);
@@ -453,7 +747,7 @@ static void drawTerrainVoxels(GLuint /*vao*/, GLuint partP, const glm::mat4& vie
     float maxD = g_engine.quality.maxDrawDistance;
     if (g_engine.quality.mobile)
         maxD = std::min(maxD, 56.f);
-    if (!g_engine.quality.studTextures)
+    if (!g_engine.quality.studTextures || g_engine.quality.studLowDetail)   // qualita' Low
         maxD = std::min(maxD, 52.f);
     maxD = std::max(40.f, maxD);
     const float waterLim = g_engine.quality.mobile ? 42.f : 120.f;
@@ -480,7 +774,7 @@ static void drawTerrainVoxels(GLuint /*vao*/, GLuint partP, const glm::mat4& vie
 
     // Lite solo con preset Low (stud off): colori flat. Su mobile Medium+ usa
     // le texture materiale sui voxel come su PC.
-    const bool lite = !g_engine.quality.studTextures;
+    const bool lite = !g_engine.quality.studTextures || g_engine.quality.studLowDetail;   // qualita' Low
     TerrainDrawPass tp = beginTerrainPass(partP, view, proj, sun, lite);
 
     auto emitOf = [](uint8_t id) -> float {
@@ -518,13 +812,45 @@ static void drawTerrainVoxels(GLuint /*vao*/, GLuint partP, const glm::mat4& vie
 
 // ---- Pass nominati (stesso look di prima, ordine leggibile) ----------------
 
+// Mappe open world: oltre questa quantita' di part, in gioco, il disegno guarda
+// solo le celle della griglia attorno alla camera invece di tutte le part.
+static constexpr int kSpatialGridMinParts = 700;
+static blk::PartSpatialGrid g_partGrid;
+static std::chrono::steady_clock::time_point g_partGridBuiltAt;
+
+/** True se la griglia e' pronta. Si ricostruisce se cambia il numero di part, altrimenti ogni 1.2 s. */
+static bool partGridReadyForFrame() {
+    const bool editing = g_screen == AppScreen::Studio && !g_studioTesting;   // nello Studio le part si spostano di continuo
+    if (editing || (int)g_world.parts.size() < kSpatialGridMinParts) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (g_partGrid.builtCount() != g_world.parts.size() || now - g_partGridBuiltAt > std::chrono::milliseconds(1200)) {
+        g_partGrid.build(g_world.parts);
+        g_partGridBuiltAt = now;
+    }
+    return true;
+}
+
+
 static void passPrepare(const glm::mat4& view, const glm::mat4& proj) {
     g_lastView = view;
     g_lastProj = proj;
     g_renderCamPos = (g_screen == AppScreen::Studio && g_mode == CamMode::Studio && !g_studioTesting)
         ? g_cam.pos : g_playerPos + glm::vec3(0, 5, 0);
-    collectDynamicLights();
-    collectShadowOccluders();
+    // Mappe grandi: luci e ombre finte guardano solo le part vicine alla camera.
+    static std::vector<int> nearLights, nearOcc;
+    if (partGridReadyForFrame()) {
+        nearLights.clear();
+        nearOcc.clear();
+        const float lightR = g_engine.quality.maxDrawDistance + 60.f;   // portata delle luci oltre il disegno
+        g_partGrid.query(g_renderCamPos, lightR, [&](int i) { nearLights.push_back(i); });
+        g_partGrid.query(g_renderCamPos, 96.f, [&](int i) { nearOcc.push_back(i); });
+        collectDynamicLights(&nearLights);
+        // Poche part vicine (pianura): meglio la ricerca completa.
+        collectShadowOccluders(nearOcc.size() >= (size_t)kMaxShadowBoxes ? &nearOcc : nullptr);
+    } else {
+        collectDynamicLights();
+        collectShadowOccluders();
+    }
 }
 
 static void passShadows(GLuint vao, GLuint meshP) {
@@ -551,38 +877,56 @@ static void passOpaqueParts(GLuint vao, GLuint studP, GLuint partP, GLuint studI
     const float smallCull2 = lodD.smallCull * lodD.smallCull;
 
     const bool useFrustum = g_engine.quality.autoLod || g_engine.quality.frustumCull;
-    const bool useOcclusion = g_engine.quality.autoLod || g_engine.quality.occlusionCull;
+    // Sotto le 8000 parti il soft-Z costa piu' del disegno e, con le scatole
+    // senza rotazione, fa sparire pezzi ancora in vista quando si gira la
+    // camera. Oltre, torna: li' il fill rate pesa di piu'.
+    const bool useOcclusion = (g_world.parts.size() >= 8000)
+        && (g_engine.quality.autoLod || g_engine.quality.occlusionCull);
     const FrustumPlanes frustum = extractFrustum(proj * view);
     const glm::mat4 viewProj = proj * view;
     struct Cand { int i; float d2; bool transparent; };
     static std::vector<Cand> cands;
     cands.clear();
     cands.reserve(g_world.parts.size());
-    for (int i = 0; i < (int)g_world.parts.size(); ++i) {
+    auto consider = [&](int i) {
+        if (i < 0 || i >= (int)g_world.parts.size()) return;   // griglia vecchia di qualche frame
         const auto& part = g_world.parts[i];
-        if (part.transparency >= 0.99f) continue;
+        if (g_world.partHeldInHand(part)) return;   // Handle in mano: si disegna sul braccio
+        if (part.transparency >= 0.99f) return;
+        if (blk::scale::stream().hides(i)) {
+            ++g_renderCullStats.partsDistCulled;
+            return;
+        }
         if (g_viewIsolate && g_isolatePart >= 0
             && i != g_isolatePart && i != g_selectedPart)
-            continue;
+            return;
         glm::vec3 d = part.position - origin;
         float d2 = glm::dot(d, d);
         if (d2 > maxD * maxD) {
             ++g_renderCullStats.partsDistCulled;
-            continue;
+            return;
         }
         if (lodD.smallMaxSize > 0.f) {
             float maxS = std::max(part.size.x, std::max(part.size.y, part.size.z));
             if (maxS <= lodD.smallMaxSize && d2 > smallCull2) {
                 ++g_renderCullStats.partsSmallCulled;
-                continue;
+                return;
             }
         }
         float boundRadius = partBoundRadius(part.size);
         if (useFrustum && sphereOutsideFrustum(frustum, part.position, boundRadius)) {
             ++g_renderCullStats.partsFrustumCulled;
-            continue;
+            return;
         }
-        cands.push_back({i, d2, part.isTransparent() || part.transparency > 0.05f});
+        cands.push_back({i, d2, part.isTransparent() || part.transparency > 0.05f || part.negative});
+    };
+    if (partGridReadyForFrame()) {
+        // Solo le celle entro la distanza di disegno (le altre sono "lontane" per forza).
+        int visited = 0;
+        g_partGrid.query(origin, maxD, [&](int i) { ++visited; consider(i); });
+        g_renderCullStats.partsDistCulled += (int)g_world.parts.size() - visited;
+    } else {
+        for (int i = 0; i < (int)g_world.parts.size(); ++i) consider(i);
     }
     if (useOcclusion && !cands.empty()) {
         static std::vector<uint8_t> occMask;
@@ -633,12 +977,24 @@ static void passOpaqueParts(GLuint vao, GLuint studP, GLuint partP, GLuint studI
     }
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
         if (a.transparent != b.transparent) return !a.transparent && b.transparent;
-        if (a.transparent) return a.d2 < b.d2;
-        return a.d2 > b.d2;
+        if (a.transparent) return a.d2 > b.d2;   // vetro: dal piu' lontano
+        // Opache dalla piu' vicina: la GPU scarta subito i pixel coperti.
+        return a.d2 < b.d2;
     });
-    for (const auto& c : cands) {
+    // Due giri: prima le opache "a gruppi" (instancing), poi le altre una alla volta
+    // (trasparenti per ultime, nell'ordine dietro -> davanti di prima).
+    partInstBegin();
+    static std::vector<int> single;
+    single.clear();
+    for (int pass = 0; pass < 2; ++pass)
+    for (int ci = 0; ci < (pass == 0 ? (int)cands.size() : (int)single.size()); ++ci) {
+        const auto& c = pass == 0 ? cands[ci] : cands[single[ci]];
         auto& p = g_world.parts[c.i];
-        glm::mat4 m = partModelMatrix(p);
+        if (partFileMeshReady(p)) {
+            if (pass == 0 && ci + 1 == (int)cands.size()) partInstFlush(view, proj, sun, studId);
+            continue;
+        }
+        glm::mat4 m = cachedPartModel(c.i, p);
         const float dist2 = c.d2;
         bool useStud = p.useStud && g_engine.quality.studTextures
             && !p.isNeon() && p.material == PartMaterial::Plastic
@@ -666,10 +1022,24 @@ static void passOpaqueParts(GLuint vao, GLuint studP, GLuint partP, GLuint studI
         glm::vec3 drawCol = p.color;
         if (p.transparency > 0.05f)
             drawCol = glm::mix(drawCol, glm::vec3(0.85f, 0.9f, 1.f), p.transparency * 0.35f);
+        if (p.negative) {   // NegativePart di Roblox: rosa trasparente
+            drawCol = {1.f, 0.45f, 0.62f};
+            drawMat = PartMaterial::Glass;
+        }
         if (g_viewCollision && !p.canCollide)
             drawCol = glm::mix(drawCol, glm::vec3(1.f, 0.2f, 0.2f), 0.55f);
         if (g_viewWireframe)
             drawCol *= 0.55f;
+        if (pass == 0) {
+            if (partInstCanBatch(drawMat)) {
+                partInstAdd(useStud, drawVao, vertCount, drawMat, m, drawCol, p.effectiveEmissive());
+                ++g_renderCullStats.partsDrawn;
+            } else {
+                single.push_back(ci);
+            }
+            if (ci + 1 == (int)cands.size()) partInstFlush(view, proj, sun, studId);
+            continue;
+        }
         drawCube(drawVao, useStud ? studP : partP, m, view, proj, drawCol, sun, useStud, studId,
                  vertCount, p.effectiveEmissive(), drawMat);
         ++g_renderCullStats.partsDrawn;
@@ -679,14 +1049,173 @@ static void passOpaqueParts(GLuint vao, GLuint studP, GLuint partP, GLuint studI
 static void passStudioGizmos(GLuint vao, GLuint partP, const glm::mat4& view,
                              const glm::mat4& proj, const glm::vec3& sun) {
     drawSelectedPartBlueOutline(vao, partP, view, proj);
-    drawScaleHandles(vao, partP, view, proj, sun);
-    drawMoveHandles(vao, partP, view, proj, sun);
-    drawRotateHandles(vao, partP, view, proj, sun);
+    // Le maniglie ora le disegna drawStudioGizmoOverlay (2D, stile Roblox).
+    (void)&drawScaleHandles; (void)&drawMoveHandles; (void)&drawRotateHandles;
 }
 
 static void passWorkspaceModels(GLuint meshP, GLuint skinP, const glm::mat4& view,
                                 const glm::mat4& proj, const glm::vec3& sun) {
     drawWorkspaceModels(meshP, skinP, view, proj, sun);
+}
+
+static glm::mat4 adornPartMatrix(const WorkspacePart& p, const glm::vec3& localStuds, const glm::vec3& sizeStuds) {
+    return glm::translate(glm::mat4(1.f), p.position)
+         * partRotationMatrix(p.rotation)
+         * glm::translate(glm::mat4(1.f), localStuds)
+         * glm::scale(glm::mat4(1.f), sizeStuds);
+}
+
+static PartMaterial faceImageMaterial(const std::string& image) {
+    if (image.empty()) return PartMaterial::SmoothPlastic;
+    const PartMaterial m = partMaterialFromName(image);
+    return partMaterialTextureStem(m) ? m : PartMaterial::SmoothPlastic;
+}
+
+static void drawFaceSlab(GLuint vao, GLuint partP, const WorkspacePart& p, int face,
+                         const glm::vec3& col, float transparency, PartMaterial mat,
+                         const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    face = std::clamp(face, 0, 5);
+    const glm::vec3 normals[6] = {
+        {1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, -1.f},
+        {-1.f, 0.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}
+    };
+    const glm::vec3 axis = normals[face];
+    const glm::vec3 half = p.size * 0.5f;
+    const float out = std::max(0.01f, 0.004f * std::max(p.size.x, std::max(p.size.y, p.size.z)));
+    const glm::vec3 local = axis * (std::abs(glm::dot(axis, half)) + out);
+    glm::vec3 slab = glm::max(p.size * 0.92f, glm::vec3(kMinPartSize));
+    if (std::abs(axis.x) > 0.5f) slab.x = out * 2.f;
+    if (std::abs(axis.y) > 0.5f) slab.y = out * 2.f;
+    if (std::abs(axis.z) > 0.5f) slab.z = out * 2.f;
+    const PartMaterial drawMat = transparency > 0.05f && mat == PartMaterial::SmoothPlastic
+        ? PartMaterial::Glass : mat;
+    drawCube(vao, partP, adornPartMatrix(p, local, slab), view, proj, col, sun,
+             false, 0, 36, 0.25f, drawMat);
+}
+
+static void drawPartDecal(GLuint vao, GLuint partP, const WorkspacePart& p,
+                          const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    if (p.decalEnabled && p.decalTransparency < 0.98f) {
+        const int face = (int)std::lround(p.decalFace);
+        const PartMaterial mat = p.decalImage.empty()
+            ? PartMaterial::SmoothPlastic : faceImageMaterial(p.decalImage);
+        drawFaceSlab(vao, partP, p, face, glm::vec3(p.decalR, p.decalG, p.decalB),
+                     p.decalTransparency, mat, view, proj, sun);
+    }
+    for (const auto& fd : p.extraDecals) {
+        if (fd.transparency >= 0.98f) continue;
+        drawFaceSlab(vao, partP, p, fd.face, glm::vec3(fd.r, fd.g, fd.b),
+                     fd.transparency, faceImageMaterial(fd.image), view, proj, sun);
+    }
+}
+
+static void drawPartTexture(GLuint vao, GLuint partP, const WorkspacePart& p,
+                            const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    if (!p.textureEnabled) return;
+    const int face = std::clamp((int)std::lround(p.textureFace), 0, 5);
+    const glm::vec3 col(p.textureR, p.textureG, p.textureB);
+    if (!p.textureImage.empty()) {
+        drawFaceSlab(vao, partP, p, face, col, 0.f, faceImageMaterial(p.textureImage), view, proj, sun);
+        return;
+    }
+    const int tiles = std::clamp((int)std::lround(p.textureStuds), 1, 8);
+    const glm::vec3 normals[6] = {
+        {1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, -1.f},
+        {-1.f, 0.f, 0.f}, {0.f, -1.f, 0.f}, {0.f, 0.f, 1.f}
+    };
+    const glm::vec3 axis = normals[face];
+    const glm::vec3 half = p.size * 0.5f;
+    const float out = std::max(0.012f, 0.005f * std::max(p.size.x, std::max(p.size.y, p.size.z)));
+    glm::vec3 u(0.f), v(0.f);
+    if (std::abs(axis.y) > 0.5f) { u = {1, 0, 0}; v = {0, 0, 1}; }
+    else if (std::abs(axis.x) > 0.5f) { u = {0, 0, 1}; v = {0, 1, 0}; }
+    else { u = {1, 0, 0}; v = {0, 1, 0}; }
+    const float su = std::abs(glm::dot(u, p.size));
+    const float sv = std::abs(glm::dot(v, p.size));
+    for (int i = 0; i < tiles; ++i) {
+        if ((i & 1) == 0) continue;
+        const float t = ((float)i + 0.5f) / (float)tiles - 0.5f;
+        glm::vec3 local = axis * (std::abs(glm::dot(axis, half)) + out) + u * (t * su);
+        glm::vec3 slab = glm::max(p.size / glm::vec3((float)tiles), glm::vec3(kMinPartSize));
+        slab = u * (su / (float)tiles * 0.82f) + v * (sv * 0.9f) + axis * (out * 2.f);
+        drawCube(vao, partP, adornPartMatrix(p, local, glm::max(slab, glm::vec3(kMinPartSize))),
+                 view, proj, col, sun, false, 0, 36, 0.15f, PartMaterial::SmoothPlastic);
+    }
+}
+
+static void drawBarBetween(GLuint vao, GLuint partP, const glm::vec3& a, const glm::vec3& b,
+                           float width, const glm::vec3& col,
+                           const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    const glm::vec3 d = b - a;
+    const float len = glm::length(d);
+    if (len < 0.02f) return;
+    const glm::vec3 dir = d / len;
+    const glm::vec3 helper = std::abs(dir.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    const glm::vec3 x = glm::normalize(glm::cross(helper, dir));
+    const glm::vec3 y = glm::normalize(glm::cross(dir, x));
+    const float w = std::max(width, kMinPartSize);
+    glm::mat4 m(1.f);
+    m[0] = glm::vec4(x * w, 0.f);
+    m[1] = glm::vec4(y * w, 0.f);
+    m[2] = glm::vec4(dir * len, 0.f);
+    m[3] = glm::vec4((a + b) * 0.5f, 1.f);
+    drawCube(vao, partP, m, view, proj, col, sun, false, 0, 36, 0.35f, PartMaterial::Neon);
+}
+
+static bool attachmentWorldPos(const ScriptControls::ScriptAttachment& a, glm::vec3& out) {
+    if (a.partIndex < 0 || a.partIndex >= (int)g_world.parts.size()) return false;
+    const WorkspacePart& p = g_world.parts[(size_t)a.partIndex];
+    out = p.position + glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(a.ox, a.oy, a.oz, 0.f));
+    return true;
+}
+
+static void drawBeamsTrailsAttachments(GLuint vao, GLuint partP, const glm::mat4& view,
+                                       const glm::mat4& proj, const glm::vec3& sun) {
+    const auto& sc = scriptControls();
+    for (const auto& a : sc.attachments) {
+        glm::vec3 w;
+        if (!attachmentWorldPos(a, w)) continue;
+        glm::mat4 m = glm::translate(glm::mat4(1.f), w) * glm::scale(glm::mat4(1.f), glm::vec3(0.18f));
+        drawCube(vao, partP, m, view, proj, {1.f, 0.35f, 0.15f}, sun, false, 0, 36, 0.4f, PartMaterial::Neon);
+    }
+    for (const auto& b : sc.beams) {
+        if (!b.enabled) continue;
+        if (b.a0 < 0 || b.a1 < 0 || b.a0 >= (int)sc.attachments.size() || b.a1 >= (int)sc.attachments.size())
+            continue;
+        glm::vec3 p0, p1;
+        if (!attachmentWorldPos(sc.attachments[(size_t)b.a0], p0)) continue;
+        if (!attachmentWorldPos(sc.attachments[(size_t)b.a1], p1)) continue;
+        drawBarBetween(vao, partP, p0, p1, std::max(b.width0, b.width1), {b.r, b.g, b.b}, view, proj, sun);
+    }
+    for (const auto& t : sc.trails) {
+        if (!t.enabled || t.pts.size() < 2) continue;
+        for (size_t i = 1; i < t.pts.size(); ++i) {
+            const float fade = 1.f - t.age[i] / std::max(0.05f, t.life);
+            drawBarBetween(vao, partP, t.pts[i - 1], t.pts[i], t.width * std::max(0.15f, fade),
+                           glm::vec3(t.r, t.g, t.b) * std::max(0.25f, fade), view, proj, sun);
+        }
+    }
+}
+
+static void drawPartHighlightBody(GLuint vao, GLuint partP, const WorkspacePart& p,
+                                  const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
+    if (!p.highlightEnabled) return;
+    WorkspacePart grown = p;
+    grown.size = glm::max(p.size * 1.045f, p.size + glm::vec3(0.02f));
+    drawCube(vao, partP, partModelMatrix(grown), view, proj,
+             glm::vec3(p.highlightR, p.highlightG, p.highlightB), sun,
+             false, 0, 36, 0.45f, PartMaterial::ForceField);
+}
+
+static void drawScriptAdornments3D(GLuint vao, GLuint partP, const glm::mat4& view,
+                                   const glm::mat4& proj, const glm::vec3& sun) {
+    for (const auto& p : g_world.parts) {
+        if (p.transparency >= 0.99f) continue;
+        drawPartDecal(vao, partP, p, view, proj, sun);
+        drawPartTexture(vao, partP, p, view, proj, sun);
+        drawPartHighlightBody(vao, partP, p, view, proj, sun);
+    }
+    drawBeamsTrailsAttachments(vao, partP, view, proj, sun);
 }
 
 static void passAvatars(GLuint vao, GLuint partP, GLuint meshP, GLuint skinP,
@@ -749,10 +1278,12 @@ static void passAvatars(GLuint vao, GLuint partP, GLuint meshP, GLuint skinP,
                 g_playerPos, g_playerYaw, g_player.humanoid, vao, partP);
             drawEquippedSword(vao, partP, view, proj, sun);
             drawEquippedTorch(vao, partP, view, proj, sun);
+            drawEquippedHandle(vao, partP, view, proj, sun);
             drawEquippedItemMesh(vao, partP, meshP, view, proj, sun);
         } else {
             drawEquippedSword(vao, partP, view, proj, sun);
             drawEquippedTorch(vao, partP, view, proj, sun);
+            drawEquippedHandle(vao, partP, view, proj, sun);
             drawEquippedItemMesh(vao, partP, meshP, view, proj, sun);
         }
         if (g_remoteBodies.size() < g_net.remotes.size())
@@ -764,16 +1295,35 @@ static void passAvatars(GLuint vao, GLuint partP, GLuint meshP, GLuint skinP,
         }
     }
     drawFriendPlayers(vao, partP, view, proj, sun);
+    drawNpcActors(vao, partP, view, proj, sun);
+    drawScriptAdornments3D(vao, partP, view, proj, sun);
 }
+
+// prepara(luci+occluder) / ombre / terreno / part / modelli / avatar
+static float g_renderPassMs[6] = {};
 
 static void renderWorld3D(GLuint vao, GLuint studP, GLuint partP, GLuint studId,
                           GLuint skinP, GLuint meshP, AnimatedModel* avatarGlb, bool useGlb,
                           const glm::mat4& view, const glm::mat4& proj, const glm::vec3& sun) {
-    passPrepare(view, proj);
-    passShadows(vao, meshP);
-    passTerrain(vao, partP, view, proj, sun);
-    passOpaqueParts(vao, studP, partP, studId, view, proj, sun);
+    // Tempo CPU di ogni pass (media mobile), per capire dove va il "Mondo 3D".
+    using clk = std::chrono::steady_clock;
+    auto t = clk::now();
+    auto lap = [&](int k) {
+        const auto n = clk::now();
+        const float ms = std::chrono::duration<float, std::milli>(n - t).count();
+        g_renderPassMs[k] = g_renderPassMs[k] * 0.95f + ms * 0.05f;
+        t = n;
+        // BLOCKY_PROFILE: i frame lenti mostrano quale pass si prende il tempo
+        static const char* const kPass[6] = {"pass prepara", "pass ombre", "pass terreno",
+                                             "pass part", "pass modelli", "pass avatar"};
+        plat::prof::mark(kPass[k]);
+    };
+    plat::prof::mark("inizio mondo 3D");
+    passPrepare(view, proj);                                        lap(0);
+    passShadows(vao, meshP);                                        lap(1);
+    passTerrain(vao, partP, view, proj, sun);                       lap(2);
+    passOpaqueParts(vao, studP, partP, studId, view, proj, sun);    lap(3);
     passStudioGizmos(vao, partP, view, proj, sun);
-    passWorkspaceModels(meshP, skinP, view, proj, sun);
-    passAvatars(vao, partP, meshP, skinP, avatarGlb, useGlb, view, proj, sun);
+    passWorkspaceModels(meshP, skinP, view, proj, sun);             lap(4);
+    passAvatars(vao, partP, meshP, skinP, avatarGlb, useGlb, view, proj, sun); lap(5);
 }

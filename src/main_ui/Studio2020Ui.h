@@ -152,6 +152,7 @@ static void studioTerrainPaintAtMouse(float mx, float my, bool erase) {
         for (int dz = -r; dz <= r; ++dz)
             for (int dx = -r; dx <= r; ++dx) {
                 if (dx * dx + dy * dy + dz * dz > r * r + r) continue;
+                if (g_terrainBrushFlat && dy != 0) continue;
                 if (g_terrain.set(cx + dx, cy + dy, cz + dz, id)) ++n;
             }
     if (n > 0) {
@@ -174,11 +175,12 @@ static void drawTerrainEditorWindow() {
 
     ImGui::Checkbox("Brush attivo (click viewport)", &g_terrainToolActive);
     ImGui::Checkbox("Gomma (erase)", &g_terrainBrushErase);
+    ImGui::Checkbox("Solo piano (niente su e giu)", &g_terrainBrushFlat);
     ImGui::SliderInt("Raggio cell", &g_terrainBrushRadius, 0, 5);
     ImGui::Text("Materiale:");
     const char* mats[] = {
-        "Air","Grass","Dirt","Stone","Sand","Wood","Leaves","Water",
-        "Snow","Cobble","Bedrock","Coal","Iron","Planks","Glass","Brick","Lava"
+        "Air","Grass","Ground","Rock","Sand","Wood","LeafyGrass","Water",
+        "Snow","Cobblestone","Bedrock","Coal","Iron","WoodPlanks","Glass","Brick","CrackedLava"
     };
     int matCount = (int)(sizeof(mats) / sizeof(mats[0]));
     if (g_terrainBrushMat < 1) g_terrainBrushMat = 1;
@@ -202,8 +204,8 @@ static void drawTerrainEditorWindow() {
     }
     ImGui::Separator();
     ImGui::TextWrapped(
-        "In Luau: workspace.Terrain:FillBlock / FillBall / ReadVoxels. "
-        "Generate e brush sono gli strumenti Studio.");
+        "Gli stessi voxel di Terrain:FillBlock e FillBall. "
+        "Si salvano col posto e al Play restano. Stop annulla solo quello che ha fatto lo script.");
     ImGui::End();
 }
 
@@ -394,9 +396,27 @@ static void drawWeldsWindow() {
             changed |= ImGui::SliderFloat("Smorzamento", &w.damping, 0.f, 1.f, "%.2f");
             break;
         case ConstraintKind::Hinge:
+        case ConstraintKind::Prismatic:
+        case ConstraintKind::Cylindrical:
+        case ConstraintKind::BallSocket:
             changed |= ImGui::DragFloat3("Perno (locale Part0)", &w.pivot.x, 0.05f);
             changed |= ImGui::DragFloat3("Asse (locale Part0)", &w.axis.x, 0.01f, -1.f, 1.f);
             break;
+        case ConstraintKind::AlignPosition:
+            changed |= ImGui::DragFloat("Forza", &w.stiffness, 0.1f, 0.1f, 40.f, "%.1f");
+            break;
+        case ConstraintKind::LinearVelocity:
+            changed |= ImGui::DragFloat("Velocita'", &w.length, 0.1f, 0.f, 80.f, "%.1f");
+            changed |= ImGui::DragFloat3("Direzione", &w.axis.x, 0.01f, -1.f, 1.f);
+            break;
+        case ConstraintKind::AngularVelocity:
+        case ConstraintKind::VectorForce:
+        case ConstraintKind::Torque:
+            changed |= ImGui::DragFloat("Forza", &w.stiffness, 0.1f, 0.f, 200.f, "%.1f");
+            changed |= ImGui::DragFloat3("Asse", &w.axis.x, 0.01f, -1.f, 1.f);
+            break;
+        case ConstraintKind::AlignOrientation:
+        case ConstraintKind::NoCollision:
         case ConstraintKind::Weld:
         case ConstraintKind::Count:
             break;
@@ -457,8 +477,8 @@ static void drawPathDebugOverlay() {
 
 static void drawAtmospherePanel() {
     if (!g_showAtmospherePanel) return;
-    ImGui::SetNextWindowSize({320.f, 280.f}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Atmosphere / SunRays", &g_showAtmospherePanel)) {
+    ImGui::SetNextWindowSize({340.f, 460.f}, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Atmosphere / Effetti", &g_showAtmospherePanel)) {
         ImGui::End();
         return;
     }
@@ -470,7 +490,29 @@ static void drawAtmospherePanel() {
     ImGui::Checkbox("SunRays enabled", &g_lighting.sunRaysEnabled);
     ImGui::SliderFloat("SunRays Intensity", &g_lighting.sunRaysIntensity, 0.f, 2.f, "%.2f");
     ImGui::SliderFloat("SunRays Spread", &g_lighting.sunRaysSpread, 0.1f, 4.f, "%.2f");
-    ImGui::TextDisabled("Atmosphere modifica fog effettivo; SunRays scala il bloom.");
+    ImGui::Separator();
+    ImGui::Checkbox("ColorCorrection", &g_lighting.ccEnabled);
+    if (g_lighting.ccEnabled) {
+        ImGui::SliderFloat("Brightness", &g_lighting.ccBrightness, -1.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Contrast", &g_lighting.ccContrast, -1.f, 1.f, "%.2f");
+        ImGui::SliderFloat("Saturation", &g_lighting.ccSaturation, -1.f, 1.f, "%.2f");
+        ImGui::ColorEdit3("Tint", &g_lighting.ccTint.x);
+    }
+    ImGui::Checkbox("BloomEffect", &g_lighting.bloomFx);
+    if (g_lighting.bloomFx) {
+        ImGui::SliderFloat("Bloom Intensity", &g_lighting.bloomFxIntensity, 0.f, 4.f, "%.2f");
+        ImGui::SliderFloat("Bloom Threshold", &g_lighting.bloomFxThreshold, 0.f, 2.f, "%.2f");
+    }
+    ImGui::Checkbox("BlurEffect", &g_lighting.blurFx);
+    if (g_lighting.blurFx)
+        ImGui::SliderFloat("Blur Size", &g_lighting.blurFxSize, 0.f, 56.f, "%.0f");
+    ImGui::Checkbox("DepthOfField", &g_lighting.dofFx);
+    if (g_lighting.dofFx)
+        ImGui::SliderFloat("Far blur", &g_lighting.dofFar, 0.f, 1.f, "%.2f");
+    if (ImGui::Button("Spegni effetti")) {
+        g_lighting.ccEnabled = g_lighting.bloomFx = g_lighting.blurFx = g_lighting.dofFx = false;
+    }
+    ImGui::TextDisabled("ColorCorrection, Bloom, Blur e DoF cambiano l'immagine. Il DoF e' una sfocatura morbida, non un obiettivo.");
     ImGui::End();
 }
 
@@ -502,6 +544,217 @@ static void insertNewImageLabel() {
     l.fontScale = 0.9f;
     selectLabel((int)g_world.labels.size() - 1);
     g_exportMsg = "ImageLabel creato (placeholder tint)";
+}
+
+// GUI come in Roblox Studio: una ScreenGui accesa, i pezzi dentro come figli.
+// Position.Scale = anchorX/Y, Position.Offset = offsetX/Y,
+// Size.Offset = sizeW/H, Size.Scale = sizeScaleX/Y.
+
+static bool studioGuiHoldsChildren(const WorkspaceLabel& l) {
+    return l.className == "ScreenGui" || l.className == "Frame"
+        || l.className == "ScrollingFrame" || l.isWorldGui();
+}
+
+static int studioEnsureScreenGui() {
+    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+        WorkspaceLabel& l = g_world.labels[(size_t)i];
+        if (l.className == "ScreenGui" && l.uiLayout) {
+            l.uiAttached = true;
+            l.visible = true;
+            return i;
+        }
+    }
+    const int n = g_world.nextLabelIndex();
+    WorkspaceLabel& l = g_world.addLabel("ScreenGui" + std::to_string(n), "",
+                                         0.f, 0.f, {1.f, 1.f, 1.f}, "ScreenGui");
+    l.uiLayout = true;
+    l.uiAttached = true;
+    l.visible = true;
+    l.parentIndex = -1;
+    l.sizeScaleX = 1.f;
+    l.sizeScaleY = 1.f;
+    l.bgTransparency = 1.f;
+    l.fontScale = 1.f;
+    markPlaceDirty();
+    return (int)g_world.labels.size() - 1;
+}
+
+static int studioGuiInsertParent(const char* cls) {
+    const bool decor = std::strcmp(cls, "UIListLayout") == 0 || std::strcmp(cls, "UIGridLayout") == 0
+                    || std::strcmp(cls, "UIPadding") == 0 || std::strcmp(cls, "UICorner") == 0
+                    || std::strcmp(cls, "UIStroke") == 0;
+    if (g_selectedLabel >= 0 && g_selectedLabel < (int)g_world.labels.size()) {
+        const WorkspaceLabel& s = g_world.labels[(size_t)g_selectedLabel];
+        if (s.uiLayout || s.isWorldGui()) {
+            if (!decor || studioGuiHoldsChildren(s) || s.className == "TextLabel"
+                || s.className == "TextButton" || s.className == "TextBox"
+                || s.className == "ImageLabel" || s.className == "ImageButton")
+                return g_selectedLabel;
+        }
+    }
+    return studioEnsureScreenGui();
+}
+
+static void studioStyleNewWidget(WorkspaceLabel& l, const char* cls) {
+    l.uiLayout = true;
+    l.visible = true;
+    l.fontScale = 1.f;
+    l.anchorPointX = 0.f;
+    l.anchorPointY = 0.f;
+    l.anchorX = 0.f;
+    l.anchorY = 0.f;
+    l.bgTransparency = 0.f;
+    l.text = cls;
+    if (std::strcmp(cls, "ScreenGui") == 0) {
+        l.uiAttached = true;
+        l.parentIndex = -1;
+        l.sizeScaleX = 1.f;
+        l.sizeScaleY = 1.f;
+        l.bgTransparency = 1.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "Frame") == 0) {
+        l.sizeW = 220.f; l.sizeH = 140.f;
+        l.offsetX = 40.f; l.offsetY = 40.f;
+        l.bgColor = {0.16f, 0.17f, 0.2f};
+        l.text.clear();
+    } else if (std::strcmp(cls, "ScrollingFrame") == 0) {
+        l.sizeW = 240.f; l.sizeH = 180.f;
+        l.offsetX = 24.f; l.offsetY = 24.f;
+        l.bgColor = {0.12f, 0.13f, 0.16f};
+        l.text.clear();
+    } else if (std::strcmp(cls, "TextLabel") == 0) {
+        l.sizeW = 180.f; l.sizeH = 32.f;
+        l.offsetX = 12.f; l.offsetY = 12.f;
+        l.bgTransparency = 1.f;
+        l.color = {1.f, 1.f, 1.f};
+        l.text = "TextLabel";
+    } else if (std::strcmp(cls, "TextButton") == 0) {
+        l.sizeW = 160.f; l.sizeH = 40.f;
+        l.offsetX = 12.f; l.offsetY = 52.f;
+        l.bgColor = {0.18f, 0.45f, 0.9f};
+        l.color = {1.f, 1.f, 1.f};
+        l.text = "Button";
+    } else if (std::strcmp(cls, "TextBox") == 0) {
+        l.sizeW = 180.f; l.sizeH = 32.f;
+        l.offsetX = 12.f; l.offsetY = 100.f;
+        l.bgColor = {0.95f, 0.95f, 0.97f};
+        l.color = {0.1f, 0.1f, 0.12f};
+        l.text = "";
+    } else if (std::strcmp(cls, "ImageLabel") == 0) {
+        l.sizeW = 80.f; l.sizeH = 80.f;
+        l.offsetX = 12.f; l.offsetY = 144.f;
+        l.bgColor = {0.3f, 0.5f, 0.8f};
+        l.text.clear();
+    } else if (std::strcmp(cls, "ImageButton") == 0) {
+        l.sizeW = 80.f; l.sizeH = 80.f;
+        l.offsetX = 104.f; l.offsetY = 144.f;
+        l.bgColor = {0.2f, 0.62f, 0.38f};
+        l.text.clear();
+    } else if (std::strcmp(cls, "UIListLayout") == 0) {
+        l.sizeW = 6.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "UIGridLayout") == 0) {
+        l.sizeW = 8.f; l.sizeH = 8.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "UIPadding") == 0) {
+        l.sizeW = 8.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "UICorner") == 0) {
+        l.sizeW = 8.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "UIStroke") == 0) {
+        l.sizeW = 2.f;
+        l.color = {0.f, 0.f, 0.f};
+        l.bgTransparency = 0.f;
+        l.text.clear();
+    } else if (std::strcmp(cls, "BillboardGui") == 0 || std::strcmp(cls, "SurfaceGui") == 0) {
+        l.uiLayout = false;
+        l.parentIndex = -1;
+        l.adorneePart = (g_selectedPart >= 0 && g_selectedPart < (int)g_world.parts.size())
+            ? g_selectedPart : -1;
+        l.studsOffsetY = 3.f;
+        l.sizeW = 180.f; l.sizeH = 48.f;
+        l.fontScale = 1.2f;
+        l.bgColor = {0.08f, 0.08f, 0.1f};
+        l.bgTransparency = 0.25f;
+        l.color = {1.f, 1.f, 1.f};
+        l.text = std::strcmp(cls, "BillboardGui") == 0 ? "Billboard" : "Surface";
+    }
+}
+
+static void insertRobloxWidget(const char* className) {
+    if (!className || !className[0]) return;
+    if (std::strcmp(className, "ScreenGui") == 0) {
+        selectLabel(studioEnsureScreenGui());
+        g_exportMsg = "ScreenGui — i prossimi pezzi finiscono qui dentro";
+        return;
+    }
+    const bool world = std::strcmp(className, "BillboardGui") == 0
+                    || std::strcmp(className, "SurfaceGui") == 0;
+    const int parent = world ? -1 : studioGuiInsertParent(className);
+    const int n = g_world.nextLabelIndex();
+    WorkspaceLabel& l = g_world.addLabel(std::string(className) + std::to_string(n), className,
+                                         0.f, 0.f, {1.f, 1.f, 1.f}, className);
+    studioStyleNewWidget(l, className);
+    if (!world) l.parentIndex = parent;
+    selectLabel((int)g_world.labels.size() - 1);
+    markPlaceDirty();
+    g_exportMsg = std::string(className) + " inserito";
+}
+
+static bool studioSelectedGui(WorkspaceLabel*& out) {
+    if (g_selectedLabel < 0 || g_selectedLabel >= (int)g_world.labels.size()) return false;
+    out = &g_world.labels[(size_t)g_selectedLabel];
+    return out->uiLayout;
+}
+
+static void studioAlignGui(int axis, int mode) {
+    WorkspaceLabel* l = nullptr;
+    if (!studioSelectedGui(l)) { g_exportMsg = "Seleziona un pezzo di GUI"; return; }
+    const float t = mode == 0 ? 0.f : mode == 1 ? 0.5f : 1.f;
+    if (axis == 0) { l->anchorX = t; l->anchorPointX = t; l->offsetX = 0.f; }
+    else           { l->anchorY = t; l->anchorPointY = t; l->offsetY = 0.f; }
+    markPlaceDirty();
+}
+
+static void studioNudgeGuiZ(int delta) {
+    WorkspaceLabel* l = nullptr;
+    if (!studioSelectedGui(l)) return;
+    l->zIndex = std::max(0, l->zIndex + delta);
+    markPlaceDirty();
+}
+
+static void studioDuplicateGui() {
+    if (g_selectedLabel < 0 || g_selectedLabel >= (int)g_world.labels.size()) return;
+    WorkspaceLabel copy = g_world.labels[(size_t)g_selectedLabel];
+    copy.name += "Copy";
+    copy.offsetX += 16.f;
+    copy.offsetY += 16.f;
+    g_world.labels.push_back(std::move(copy));
+    selectLabel((int)g_world.labels.size() - 1);
+    markPlaceDirty();
+    g_exportMsg = "GUI duplicata";
+}
+
+static void ribbonGuiMenuItems() {
+    if (ImGui::MenuItem(L("rb.screengui"))) insertRobloxWidget("ScreenGui");
+    if (ImGui::MenuItem(L("rb.frame"))) insertRobloxWidget("Frame");
+    if (ImGui::MenuItem(L("rb.scroll"))) insertRobloxWidget("ScrollingFrame");
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.textlabel"))) insertRobloxWidget("TextLabel");
+    if (ImGui::MenuItem(L("rb.textbutton"))) insertRobloxWidget("TextButton");
+    if (ImGui::MenuItem(L("rb.textbox"))) insertRobloxWidget("TextBox");
+    if (ImGui::MenuItem(L("rb.image"))) insertRobloxWidget("ImageLabel");
+    if (ImGui::MenuItem(L("rb.imagebtn"))) insertRobloxWidget("ImageButton");
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.uilist"))) insertRobloxWidget("UIListLayout");
+    if (ImGui::MenuItem(L("rb.uigrid"))) insertRobloxWidget("UIGridLayout");
+    if (ImGui::MenuItem(L("rb.uipad"))) insertRobloxWidget("UIPadding");
+    if (ImGui::MenuItem(L("rb.uicorner"))) insertRobloxWidget("UICorner");
+    if (ImGui::MenuItem(L("rb.uistroke"))) insertRobloxWidget("UIStroke");
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.billboard"))) insertRobloxWidget("BillboardGui");
+    if (ImGui::MenuItem(L("rb.surface"))) insertRobloxWidget("SurfaceGui");
 }
 
 // ---------------------------------------------------------------------------

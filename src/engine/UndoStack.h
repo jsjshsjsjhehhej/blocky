@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "DataModel.h"
 
 #include <cstdint>
@@ -11,6 +13,7 @@ enum class UndoKind : int {
     DeletePart,
     TransformPart,
     GroupChange,     // Ctrl+G / Ctrl+U / rinomina Model
+    Custom,          // tutto il resto (GUI, Tool, servizi, Lighting...): sa ripristinarsi da solo
 };
 
 struct UndoEntry {
@@ -24,6 +27,8 @@ struct UndoEntry {
     // GroupChange: Model e appartenenza di ogni part, prima e dopo.
     std::vector<PartGroup> groupsBefore, groupsAfter;
     std::vector<int> partGroupsBefore, partGroupsAfter;
+    // Custom: chiamata con true per annullare, false per ripetere.
+    std::function<void(bool undoing)> custom;
 };
 
 struct UndoStack {
@@ -55,6 +60,14 @@ struct UndoStack {
         if ((int)undo.size() > kMax)
             undo.erase(undo.begin());
         redo.clear();
+    }
+
+    /** Una modifica qualsiasi che sa annullarsi e ripetersi da sola. */
+    void recordCustom(std::function<void(bool undoing)> fn) {
+        UndoEntry e;
+        e.kind = UndoKind::Custom;
+        e.custom = std::move(fn);
+        push(std::move(e));
     }
 
     void recordInsert(int index, const WorkspacePart& part) {
@@ -157,6 +170,10 @@ private:
 
     static void applyOne(UndoEntry& e, DataModel& world, int& selectedPart, bool undoing) {
         const UndoKind k = e.kind;
+        if (k == UndoKind::Custom) {
+            if (e.custom) e.custom(undoing);
+            return;
+        }
         if (k == UndoKind::GroupChange) {
             if (undoing) applyGroups(world, e.groupsBefore, e.partGroupsBefore);
             else applyGroups(world, e.groupsAfter, e.partGroupsAfter);

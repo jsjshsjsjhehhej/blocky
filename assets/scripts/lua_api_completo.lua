@@ -19,18 +19,78 @@
     workspace / Workspace
     workspace:Add(part)           → Part live
     workspace:FindFirstChild(name)→ Part live | nil
+    part:FindFirstChild("Fire"|"Smoke"|"Sparkles"|"Attachment"|"Trail"|"ClickDetector")
     workspace:GetChildren()       → lista snapshot
     workspace:SetPartPosition(name, Vector3|x,y,z)
     workspace:Raycast(origin, dir, maxDist?) → {Instance, Position, Distance} | nil
 
   PART (live = script.Parent oppure dopo Add/Find)
     .Name  .Position  .Size  .CanCollide  .ClassName
+    -- Size fino a 0.001 stud per lato (in Studio: passi 1 / .1 / .01 / .001)
+    -- DecalEnabled, HighlightEnabled, SelectionBox, SelectionSphere, DragDetector
+    -- Models.SetDragDetector("Casa", true)  → in Play si sposta tutto il Model
+    -- TextureEnabled, Seat, Beam, Trail, ParticleEmitter.Rate/Speed/Lifetime
+    -- Instance.new("Part") nasce Anchored = false. Cilindro lungo su Size.X.
+    -- Instance.new("LinearVelocity").VectorVelocity / ("VectorForce").Force, Parent = part
+    -- PathfindingService:CreatePath({AgentRadius=2, AgentHeight=5, AgentCanJump=true, AgentJumpHeight=7, WaypointSpacing=4})
+    -- TextService:GetTextSize(testo, px, font, Vector2) va a capo nel riquadro
+    -- MemoryStoreService:GetHashMap(nome):SetAsync(k, v, secondi)  GetQueue:AddAsync/ReadAsync
+    -- InsertService:LoadAsset("file.obj" oppure numero) carica un modello locale
+    -- AvatarEditorService:SearchCatalogAsync() catalogo locale Blocky
+    -- VoiceChatService:IsVoiceEnabledForUserIdAsync(id) e' false: niente microfono
+    -- MessagingService:PublishAsync arriva anche agli altri in rete
+    -- Highlight.Parent = part. Due TextButton con lo stesso nome: il clic e' sul bottone cliccato.
+    -- Shirt/Pants/Hat Color3, BodyColors, Camera.CameraType = "Scriptable"
+    -- Shirt/Pants/Hat con Parent = npc vestono anche l'NPC
+    -- ProximityPrompt: ActionText "Open", ObjectText "Door", KeyboardKeyCode "E", HoldDuration
+    -- DecalImage/TextureImage ("brick","wood",...), part:AddDecal(faccia, "fabric")
+    -- Material "Water" (nuoto), Ladder, SpawnPoint, SpawnTeam. SurfaceGui sulla faccia.
+    -- MarketplaceService:Register(id, nome, prezzo, "GamePass"|"Product")
+    -- PromptGamePassPurchase, UserOwnsGamePassAsync(userId, id), GetBalance, ProcessReceipt
+    -- GuiService:GetGuiInset() -> Vector2 Y=36. Explosion.Parent la fa scattare. BindToClose alla chiusura
+    -- Materiale WoodPlanks -> Wood (avviso una volta). PointLight.Parent dopo. ParticleEmitter Size/SpreadAngle/Drag
+    -- ImageButton.Image / ImageColor3 tinge il rettangolo. UIListLayout.FillDirection Horizontal. Sound.PlaybackSpeed / Pause / Resume
+    -- GroupService:CreateGroup :Join :Leave :GetRankInGroup :GetGroupInfoAsync
+    -- GameKit.StartMatch(secondi, countdown)  GameKit.AddPad(nome, "Win", x, y, z, 5, 3, 5)
+    -- LocalPlayer.Name / UserId sono l'account del menu. I soldi sono i B$.
+    -- Lighting: ColorCorrectionEffect, BloomEffect, BlurEffect, DepthOfFieldEffect, SunRaysEffect
     :SetPosition(v)  :GetPosition()  :Destroy()
     .Touched:Connect(function(other, partName) ... end)  -- player entra AABB
 
+  TOOL / ZAINO (hotbar 1-9)
+    Instance.new("Tool")
+    tool.RequiresHandle  tool.CanBeDropped  tool.ManualActivationOnly
+    tool.Enabled  tool.ToolTip
+    tool.MeshId = "models/arma.glb"  -- .obj .fbx .glb: sostituisce i pezzi. "" = torna alle Part
+    -- Shape Block/Ball/Cylinder/Wedge si vede anche in mano (cilindro lungo su Size.X)
+    tool.Equipped / Unequipped / Activated / Deactivated :Connect(function() end)
+    tool:Activate()
+    Part "Handle" con Parent = tool  → in mano quando equipaggiato
+    tool.Parent = Players.LocalPlayer.Backpack
+    Humanoid:EquipTool(tool)   Humanoid:UnequipTools()
+    Backpack.Give(nome)  Backpack.Equip(nome|tool)  Backpack.Unequip()  Backpack.Equipped()
+    Backpack:Drop()  -- CanBeDropped: a terra, si riprende camminandoci sopra
+
+  SUONO 3D
+    local s = Instance.new("Sound")
+    s.SoundId = "sounds/beep.wav"  s.Volume = 0.8  s.Parent = part
+    s:Play()  s:Stop()  -- Stop ferma solo questo
+
+  NPC
+    local npc = game:GetService("Actors"):Spawn("Guardia", Vector3.new(0,0,20))
+    npc:MoveTo(pos)  npc:TakeDamage(n)  npc:EquipTool(tool)
+    npc.Health  npc.WalkSpeed  npc.Died  npc.MoveToFinished
+    -- i piedi stanno sulla Part sotto; il corpo non attraversa le Part. MoveTo ignora la Y.
+    -- Health = 0: il corpo si sdraia.
+
   GAME SERVICES
     game.RunService.Heartbeat:Connect(function(dt) end)
-    game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")
+    game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace"|"Terrain")
+    -- Terrain = workspace.Terrain. FillBlock, FillBall, ReadVoxels, WriteVoxels, Clear
+    -- Camera:WorldToScreenPoint(pos) → pixel, visibile
+    -- Camera:ViewportPointToRay(x, y)  Camera:ScreenPointToRay(x, y)
+    -- Instance.new("TextBox"):CaptureFocus()  FocusLost:Connect(function(invio) end)
+    -- Instance.new("SpotLight", part).Angle   Instance.new("SurfaceLight", part).Face
     game.SoundService:Play(path [, looped])  |  :Stop()
     game.Animator:Play("Wave"|"Walk"|"Dance"|"Idle"|id)
     game.Animator:Stop()  :SetWalkAnim(id)  :SetJumpAnim(id)  :List()
@@ -41,6 +101,8 @@
     game.Events  (= Events globale)
 
   HUMANOID / INPUT
+    Humanoid:ChangeState("Flying"|"Swimming"|"Ragdoll"|"Running"|"Jumping")
+    Humanoid:GetState()  Humanoid:SetStateEnabled("Swimming"|"Flying"|"Jumping", bool)
     Humanoid.SetJumpEnabled(bool)  SetWalkEnabled  SetWalkSpeed(n)  SetJumpPower(n)
     Humanoid.Get() → {JumpEnabled, WalkEnabled, WalkSpeed, JumpPower}
     UserInputService.DisableJump() / EnableJump()
@@ -63,7 +125,7 @@
   SANDBOX (disabilitati / protetti): dofile loadfile load require collectgarbage
     rawset setmetatable getmetatable string.dump io os debug
   LIMITI: WalkSpeed≤28 JumpPower≤70 Particles≤128 Heartbeat≤64
-  task.wait / task.spawn / task.delay — wait solo dentro spawn
+  task.wait / task.spawn / task.delay — anche dentro PlayerAdded, Heartbeat e gli altri eventi
 ============================================================================]]
 
 print("========== Blocky Lua API completa ==========")
@@ -105,17 +167,28 @@ bind.Event:Connect(function()
 end)
 
 -----------------------------------------------------------------------
--- RemoteEvent (string payload; ok anche offline su Host locale)
+-- Mirino: dove guarda la camera, e il clic sinistro.
+-----------------------------------------------------------------------
+local mouse = game:GetService("Players").LocalPlayer:GetMouse()
+mouse.Button1Down:Connect(function()
+    local hit = mouse.Target
+    print("[Mouse]", hit and hit.Name or "vuoto", mouse.Hit.Position)
+end)
+
+-----------------------------------------------------------------------
+-- RemoteEvent: numeri, testi, Vector3, Color3 e tabelle.
+-- In Wi-Fi arrivano gli stessi valori. Un testo vecchio resta un testo,
+-- e in quel caso il server riceve ancora (fromName, data).
 -----------------------------------------------------------------------
 local remote = Instance.new("RemoteEvent", "ApiPing")
-remote.OnServerEvent:Connect(function(fromName, data)
-    print("[Remote Server]", fromName, data)
+remote.OnServerEvent:Connect(function(player, data)
+    print("[Remote Server]", player, data)
     pcall(function()
         remote:FireAllClients("echo:" .. tostring(data))
     end)
 end)
-remote.OnClientEvent:Connect(function(fromName, data)
-    print("[Remote Client]", fromName, data)
+remote.OnClientEvent:Connect(function(data)
+    print("[Remote Client]", data)
 end)
 
 -----------------------------------------------------------------------
@@ -287,6 +360,24 @@ end)
 -----------------------------------------------------------------------
 pcall(function()
     AnimateFrame(0, Vector3.new(0, 2, 0))
+end)
+
+-----------------------------------------------------------------------
+-- Enum.Material.Wood.Name  typeof == "EnumItem"  Enum.KeyCode.F.Value
+-- local w = Instance.new("WeldConstraint"); w.Part0 = a; w.Part1 = b
+-- PhysicsService:RegisterCollisionGroup("Train")  part.CollisionGroup = "Train"
+-- workspace:Spherecast(origine, raggio, direzione)  Region3.new(min, max)
+-- GeometryService:UnionAsync(a, {b})  GS:SeparateAsync(unione)  part.MeshId = "models/cassa.obj"
+-- game:GetService("Chat"):Chat(part, "ciao")
+-- Dev (servizio di Blocky, non esiste su Roblox)
+--   local Dev = game:GetService("Dev")
+--   Dev:Machine("Idle")  Dev:Cooldown()  Dev:Ease("Quad", "Out", t)
+--   Dev:PathGrid(8, 8)   Dev:Board()  Dev:Grid(cella)  Dev:Noise(x, y, seme)
+--   I timer non corrono da soli: chiami :Tick(dt) o :Update(dt).
+-----------------------------------------------------------------------
+pcall(function()
+    local Dev = game:GetService("Dev")
+    Dev:Trace("api completa", Dev:Ease("Linear", 1))
 end)
 
 print("========== Tocca i pad colorati (z=12) ==========")

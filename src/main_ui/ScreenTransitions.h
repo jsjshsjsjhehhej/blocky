@@ -52,6 +52,7 @@ static void bootPlaceScript(const std::string& scriptRel) {
 
 static void finishLoading() {
     applyGamePlace(g_activeGame, g_world, &g_lighting);
+    if (g_world.placeFile.empty()) g_terrain.reset();
     // ID di rete 1..N alle part del place, nell'ordine del file: gli stessi
     // che assegnano l'host e il server dedicato (blkserver::assignPlaceNetIds).
     // Senza, il client non riconosceva le part mandate dall'host e le
@@ -61,11 +62,16 @@ static void finishLoading() {
         for (auto& p : g_world.parts) p.netId = 0;
         WorldReplication::ensureNetIds(g_world, nextNetId);
         g_net.nextPartNetId = nextNetId;
+        uint32_t nextLabel = 1;
+        for (auto& l : g_world.labels) l.netId = 0;
+        WorldReplication::ensureLabelNetIds(g_world, nextLabel);
+        g_net.nextLabelNetId = nextLabel;
     }
     syncFriendsFromWorld();
 
     const char* uname = !g_mpTestName.empty() ? g_mpTestName.c_str()
                       : (g_menu.username[0] ? g_menu.username : "Player");
+    socialBind(uname);
     int gi = 0;
     for (int i = 0; i < (int)g_games.size(); ++i)
         if (g_games[i].id == g_activeGame.id) { gi = i; break; }
@@ -148,6 +154,7 @@ static void finishLoading() {
 
 static void enterStudio() {
     g_world.loadBaseplatePlace();
+    g_terrain.reset();
     g_placeFilePath.clear();
     g_wsMeshes.clear();
     g_sounds.stopAll();
@@ -235,6 +242,7 @@ static void startStudioTest(GLFWwindow* win) {
             p.canCollide = false;
         }
     }
+    rememberTerrainForPlay();
     resetGeneratedSystems();
     std::string crashReason;
     bool okBoot = TestSessionGuard::runGuarded([&]() {
@@ -277,6 +285,8 @@ static void stopStudioTest(GLFWwindow* win) {
     g_lua.clearHeartbeats();
     scriptControls().jumpEnabled = true;
     scriptControls().walkEnabled = true;
+    scriptControls().scriptMoveAge = 10.f;
+    scriptControls().moveToActive = false;
     scriptControls().walkSpeedOverride = -1.f;
     scriptControls().jumpPowerOverride = -1.f;
     g_particles.clear();
@@ -345,6 +355,8 @@ static void stopStudioTest(GLFWwindow* win) {
                  && g_selectedLabelTestBackup < (int)g_world.labels.size())
             selectLabel(g_selectedLabelTestBackup);
         syncPartEditors();
+        recallStudioFx(g_lua.scriptEmitters_);
+        recallTerrainAfterPlay();
     }
 
     g_cam.pos = g_studioCamBackup;

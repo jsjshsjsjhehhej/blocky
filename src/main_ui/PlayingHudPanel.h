@@ -41,7 +41,8 @@ static void drawHamburgerMenuHud() {
     const bool hover = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const bool on = g_playMenuOpen || hover;
-    ImU32 fill = on ? IM_COL32(70, 72, 78, 245) : IM_COL32(45, 46, 50, 230);
+    // Blu Roblox (#00A2FF), non il grigio precedente.
+    ImU32 fill = on ? IM_COL32(0, 178, 255, 250) : IM_COL32(0, 140, 220, 235);
     dl->AddCircleFilled({c.x + 1.5f, c.y + 2.f}, r, IM_COL32(0, 0, 0, 55), 28);
     dl->AddCircleFilled(c, r, fill, 28);
     const float barW = 22.f, barH = 3.f, gap = 6.5f;
@@ -159,7 +160,7 @@ static void drawChatBubbleHud() {
     const bool hover = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const bool on = g_showChat || hover;
-    ImU32 fill = on ? IM_COL32(0, 162, 255, 245) : IM_COL32(0, 132, 232, 230);
+    ImU32 fill = on ? IM_COL32(0, 120, 212, 245) : IM_COL32(48, 48, 52, 230);
     dl->AddCircleFilled({c.x + 1.5f, c.y + 2.f}, r, IM_COL32(0, 0, 0, 55), 28);
     dl->AddCircleFilled(c, r, fill, 28);
     dl->AddRectFilled({c.x - 10.f, c.y - 8.f}, {c.x + 10.f, c.y + 4.f},
@@ -349,6 +350,72 @@ static void updateFriendPlayers(float dt) {
     }
 }
 
+static bool npcRightArm(const NpcActor& n, glm::mat4& outArm) {
+    const HumanoidPartDef* arm = nullptr;
+    for (const auto& p : n.humanoid.parts)
+        if (p.name == "Right Arm") { arm = &p; break; }
+    if (!arm) return false;
+    float rx = kEquippedArmHoldDeg, ry = 0.f, rz = 0.f;
+    glm::vec3 posAdd{0.f};
+    if (n.toolSlot >= 0 && n.toolSlot < (int)g_world.backpack.size()) {
+        const BackpackItem& it = g_world.backpack[(size_t)n.toolSlot];
+        if (!it.dropped)
+            if (const HoldPartPose* hp = findHoldPose(it.holdPose, "Right Arm")) {
+                rx = hp->rot.x; ry = hp->rot.y; rz = hp->rot.z; posAdd = hp->pos;
+            }
+    }
+    glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), n.position),
+                                 glm::radians(n.yaw), glm::vec3(0, 1, 0));
+    glm::mat4 armM = glm::translate(root, arm->offset + arm->pivot + posAdd);
+    if (rx != 0) armM = glm::rotate(armM, glm::radians(rx), glm::vec3(1, 0, 0));
+    if (ry != 0) armM = glm::rotate(armM, glm::radians(ry), glm::vec3(0, 1, 0));
+    if (rz != 0) armM = glm::rotate(armM, glm::radians(rz), glm::vec3(0, 0, 1));
+    outArm = glm::translate(armM, -arm->pivot);
+    return true;
+}
+
+static void drawNpcActors(GLuint vao, GLuint partP, const glm::mat4& view,
+                          const glm::mat4& proj, const glm::vec3& sun) {
+    if (g_world.npcs.empty() && g_world.backpack.empty()) return;
+    GLuint playerVao = g_bevelCube.vao ? g_bevelCube.vao : vao;
+    BlockDrawContext bctx{ playerVao, partP, view, proj, sun };
+    for (const auto& n : g_world.npcs) {
+        if (n.removed) continue;
+        BlockPlayer vis;
+        vis.humanoid = n.humanoid;
+        const float armHold = (n.toolSlot >= 0) ? kEquippedArmHoldDeg : 0.f;
+        vis.draw(bctx, drawCubePlayer, n.position, n.yaw, nullptr, armHold, nullptr);
+        glm::vec3 namePos = n.position + glm::vec3(0.f, 5.4f, 0.f);
+        glm::vec3 col = n.humanoid.dead ? glm::vec3(1.f, 0.35f, 0.3f)
+                                        : glm::vec3(0.55f, 0.85f, 1.f);
+        drawBillboardText(namePos, n.name.c_str(), col, 0.85f, true, false);
+        if (n.humanoid.dead || n.toolSlot < 0) continue;
+        if (n.toolSlot >= (int)g_world.backpack.size()) continue;
+        const BackpackItem& it = g_world.backpack[(size_t)n.toolSlot];
+        if (it.dropped) continue;
+        glm::mat4 armM;
+        if (!npcRightArm(n, armM)) continue;
+        glm::mat4 hand = glm::translate(armM, it.gripOffset)
+            * partRotationMatrix(it.gripRotation)
+            * glm::scale(glm::mat4(1.f), glm::vec3(it.gripScale));
+        for (const auto& p : g_world.parts) {
+            if (p.toolSlot != n.toolSlot) continue;
+            glm::mat4 m = glm::translate(hand, p.position)
+                * partRotationMatrix(p.rotation)
+                * glm::scale(glm::mat4(1.f), p.size);
+            drawCube(vao, partP, m, view, proj, p.color, sun, false, 0, 36,
+                     p.effectiveEmissive(), p.material);
+        }
+    }
+    for (int s = 0; s < (int)g_world.backpack.size(); ++s) {
+        const BackpackItem& it = g_world.backpack[(size_t)s];
+        if (!it.dropped || g_world.backpackHasParts(s)) continue;
+        glm::mat4 m = glm::translate(glm::mat4(1.f), it.dropAnchor);
+        drawCube(vao, partP, m, view, proj, {0.75f, 0.78f, 0.85f}, sun, false, 0, 36,
+                 0.f, PartMaterial::Metal);
+    }
+}
+
 static void drawFriendPlayers(GLuint vao, GLuint partP, const glm::mat4& view,
                               const glm::mat4& proj, const glm::vec3& sun) {
     if (g_friends.empty()) return;
@@ -362,6 +429,8 @@ static void drawFriendPlayers(GLuint vao, GLuint partP, const glm::mat4& view,
 }
 
 static void drawHealthBarHud() {
+    // La disegna la CoreScript Luau (src/engine/lua/core/BarraVita.luau) se e' partita.
+    if (g_lua.ok && g_lua.coreHealthBar) return;
     const auto& h = g_player.humanoid;
     const float barW = 220.f, barH = 18.f;
     const float x = (float)g_w - barW - 16.f;
@@ -431,8 +500,17 @@ static bool equippedTorch() {
 static void tryUseEquippedItem() {
     const BackpackItem* it = equippedBackpackItem();
     if (!it || it->tool == BackpackTool::Sword) return;
+    if (!it->enabled || it->manualActivationOnly) return;
     if (!g_lua.ok) return;
     g_lua.fireItemActivated(it->id, it->name);
+}
+
+static void tryReleaseEquippedItem() {
+    const BackpackItem* it = equippedBackpackItem();
+    if (!it || it->tool == BackpackTool::Sword) return;
+    if (!it->enabled || it->manualActivationOnly) return;
+    if (!g_lua.ok) return;
+    g_lua.fireItemDeactivated(it->id, it->name);
 }
 
 // Matrice del braccio destro nella posa di presa (default o holdPose item).
@@ -523,6 +601,50 @@ static void drawEquippedTorch(GLuint vao, GLuint partP, const glm::mat4& view,
     // solo colore acceso: stesso linguaggio del materiale Neon delle part.
     glm::mat4 flameM = glm::translate(armM, {0, 0.68f, 0}) * glm::scale(glm::mat4(1.f), glm::vec3(0.30f, 0.34f, 0.30f));
     drawCube(vao, partP, flameM, view, proj, flame, sun, false, 0, 36, 1.4f * flicker, PartMaterial::Neon);
+}
+
+// Part con toolSlot = slot in mano (il Handle e i pezzi attaccati).
+// Stesso posto della spada: braccio destro, poi Grip dello zaino.
+static void drawEquippedHandle(GLuint vao, GLuint partP, const glm::mat4& view,
+                               const glm::mat4& proj, const glm::vec3& sun) {
+    const int slot = effectiveHeldSlot();
+    if (slot < 0 || g_player.humanoid.dead) return;
+    const BackpackItem* it = equippedBackpackItem();
+    if (!it) return;
+    // tool.MeshId punta a un file (obj, fbx, glb): lo disegna drawEquippedItemMesh.
+    if (!it->meshPath.empty()) return;
+
+    bool any = false;
+    for (const auto& p : g_world.parts)
+        if (p.toolSlot == slot) { any = true; break; }
+    if (!any) return;
+
+    glm::mat4 armM;
+    if (!heldRightArmMatrix(armM)) return;
+    glm::mat4 hand = glm::translate(armM, it->gripOffset)
+        * partRotationMatrix(it->gripRotation)
+        * glm::scale(glm::mat4(1.f), glm::vec3(it->gripScale));
+
+    for (const auto& p : g_world.parts) {
+        if (p.toolSlot != slot) continue;
+        GLuint dv = vao;
+        int vc = 36;
+        if (ShapeMesh* sm = g_partMeshes.meshFor(p.shape)) {
+            if (sm->vao && sm->vertexCount > 0) {
+                dv = sm->vao;
+                vc = sm->vertexCount;
+            }
+        }
+        // Il cilindro di Roblox e' lungo sull'asse X (Size.X = lunghezza).
+        // La mesh del motore e' lunga su Y: la ruoto prima della scala, cosi'
+        // canna, manico e lanterna restano lunghi e non diventano un disco.
+        glm::mat4 local = glm::scale(glm::mat4(1.f), p.size);
+        if (p.shape == PartShape::Cylinder)
+            local = local * glm::rotate(glm::mat4(1.f), glm::radians(-90.f), glm::vec3(0.f, 0.f, 1.f));
+        glm::mat4 m = glm::translate(hand, p.position) * partRotationMatrix(p.rotation) * local;
+        drawCube(dv, partP, m, view, proj, p.color, sun, false, 0, vc,
+                 p.effectiveEmissive(), p.material);
+    }
 }
 
 static std::map<std::string, StaticMesh> g_heldItemMeshCache;
@@ -640,14 +762,6 @@ static void trySwordAttack() {
         g_particles.emitPreset(ParticlePreset::Sparks, origin + fwd * 2.2f, 10, {-1,-1,-1}, fwd);
 }
 
-static ImU32 backpackHueColor(int hue) {
-    int i = hue % 6;
-    if (i < 0) i += 6;
-    const float* c = uiExtraColors().backpackHue[i];
-    return IM_COL32((int)std::lround(c[0] * 255), (int)std::lround(c[1] * 255),
-                    (int)std::lround(c[2] * 255), (int)std::lround(c[3] * 255));
-}
-
 static void pollBackpackSwitch(GLFWwindow* win) {
     if (!win) return;
 
@@ -670,6 +784,12 @@ static void pollBackpackSwitch(GLFWwindow* win) {
             g_world.equipBackpackSlot(i, true);
     }
 
+    static bool backspaceWas = false;
+    const bool backspace = glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+    if (backspace && !backspaceWas)
+        g_world.dropEquipped(g_playerPos, g_playerYaw);
+    backspaceWas = backspace;
+
     static bool leftWas = false, rightWas = false;
     bool left = glfwGetKey(win, GLFW_KEY_LEFT) == GLFW_PRESS;
     bool right = glfwGetKey(win, GLFW_KEY_RIGHT) == GLFW_PRESS;
@@ -687,87 +807,73 @@ static void pollBackpackSwitch(GLFWwindow* win) {
 static void drawInventoryHud() {
     auto& bp = g_world.backpack;
     const int nItems = (int)bp.size();
-    const float slotR = 26.f;
-    const float gap = 8.f;
+    // Slot quadrati come la hotbar di Roblox, non cerchi colorati.
+    const float slot = 56.f;
+    const float gap = 6.f;
+    const float pad = 8.f;
+    const float round = 8.f;
     const int showN = DataModel::kHotbarSlots;
-    const float totalW = showN * (slotR * 2.f) + (showN - 1) * gap;
-    const float x0 = ((float)g_w - totalW) * 0.5f + slotR;
-    // Sopra stick/salto: su Android il salto a destra non deve coprire gli slot.
-    const float y0 = (float)g_h - slotR - 18.f;
+    const float rowW = showN * slot + (showN - 1) * gap;
+    const float barW = rowW + pad * 2.f;
+    const float barH = slot + pad * 2.f;
+    const float x0 = ((float)g_w - barW) * 0.5f;
+    const float y0 = (float)g_h - barH - 16.f;
 
 #ifdef __ANDROID__
-    // Zona hotbar → Android non assegna Look (altrimenti il tocco gira la cam).
-    blk::touch::setInventoryUiRect(x0 - slotR - 8.f, y0 - slotR - 8.f,
-                                   x0 - slotR + totalW + 8.f, y0 + slotR + 8.f);
+    blk::touch::setInventoryUiRect(x0, y0, x0 + barW, y0 + barH);
 #else
     blk::touch::inventoryUiValid() = false;
 #endif
 
-    ImGui::SetNextWindowPos({x0 - slotR - 12, y0 - slotR - 28}, ImGuiCond_Always);
-    ImGui::SetNextWindowSize({totalW + 24, slotR * 2.f + 44}, ImGuiCond_Always);
+    ImGui::SetNextWindowPos({x0, y0}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({barW, barH}, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.f);
-    // Come l'hamburger: InvisibleButton per slot. Prima c'era NoInputs —
-    // su Android senza tasti 1-9 l'inventario era solo disegno, mai cliccabile.
     ImGui::Begin("##InvCircle", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddText({x0 - slotR, y0 - slotR - 22}, IM_COL32(255, 255, 255, 220), L("hud.inventory"));
-#ifdef __ANDROID__
-    dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(200, 205, 220, 180),
-                nItems == 0 ? "vuoto  ·  tocca uno slot" : "tocca  ·  di nuovo = togli");
-#else
-    if (nItems == 0)
-        dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(170, 170, 180, 170),
-                    "empty  ·  1-9");
-    else
-        dl->AddText({x0 - slotR + 100, y0 - slotR - 22}, IM_COL32(200, 205, 220, 180),
-                    "1-9  (di nuovo = togli)");
-#endif
+    dl->AddRectFilled({x0, y0}, {x0 + barW, y0 + barH}, IM_COL32(28, 28, 32, 210), 8.f);
+    dl->AddRect({x0, y0}, {x0 + barW, y0 + barH}, IM_COL32(70, 70, 74, 180), 8.f, 0, 1.5f);
 
     for (int i = 0; i < showN; ++i) {
-        const float cx = x0 + i * (slotR * 2.f + gap);
-        const float cy = y0;
-        const bool has = i < nItems;
+        const float sx = x0 + pad + i * (slot + gap);
+        const float sy = y0 + pad;
+        const bool has = i < nItems && !bp[i].dropped;
         const bool eq = (g_world.equippedBackpack == i);
 
-        ImGui::SetCursorScreenPos({cx - slotR, cy - slotR});
+        ImGui::SetCursorScreenPos({sx, sy});
         ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##slot", {slotR * 2.f, slotR * 2.f})) {
+        if (ImGui::InvisibleButton("##slot", {slot, slot})) {
             if (has) g_world.equipBackpackSlot(i, true);
         }
         const bool hover = ImGui::IsItemHovered();
         ImGui::PopID();
 
-        if (has)
-            dl->AddCircleFilled({cx, cy}, slotR, backpackHueColor(bp[i].iconHue), 48);
-        else
-            dl->AddCircleFilled({cx, cy}, slotR, IM_COL32(32, 34, 40, 220), 48);
-
-        ImU32 ring = eq ? IM_COL32(230, 40, 40, 255)
-                        : (hover ? IM_COL32(120, 180, 255, 255) : IM_COL32(255, 255, 255, 255));
-        dl->AddCircle({cx, cy}, slotR, ring, 48, eq ? 5.0f : 2.8f);
-        if (eq)
-            dl->AddCircle({cx, cy}, slotR + 6.f, IM_COL32(255, 50, 50, 160), 48, 2.2f);
+        ImU32 fill = eq ? IM_COL32(0, 120, 212, 245)
+                        : (has ? IM_COL32(48, 48, 52, 235)
+                               : IM_COL32(36, 36, 40, 180));
+        if (hover && !eq)
+            fill = has ? IM_COL32(62, 62, 68, 245) : IM_COL32(50, 50, 54, 210);
+        ImU32 border = eq ? IM_COL32(255, 255, 255, 255)
+                          : (hover ? IM_COL32(180, 180, 186, 255)
+                                   : IM_COL32(80, 80, 86, has ? 220 : 120));
+        dl->AddRectFilled({sx, sy}, {sx + slot, sy + slot}, fill, round);
+        dl->AddRect({sx, sy}, {sx + slot, sy + slot}, border, round, 0, eq ? 2.5f : 1.5f);
 
         char num[4];
         std::snprintf(num, sizeof(num), "%d", i + 1);
-        ImVec2 ns = ImGui::CalcTextSize(num);
-        ImU32 numCol = eq ? IM_COL32(255, 45, 45, 255) : IM_COL32(255, 255, 255, 230);
-        dl->AddText({cx - ns.x * 0.5f, cy - slotR + 4}, numCol, num);
+        dl->AddText({sx + 5.f, sy + 3.f},
+                    eq ? IM_COL32(255, 255, 255, 255) : IM_COL32(180, 220, 255, 230), num);
 
         if (has) {
-            char shortN[16];
-            std::snprintf(shortN, sizeof(shortN), "%.6s", bp[i].name.c_str());
+            char shortN[12];
+            std::snprintf(shortN, sizeof(shortN), "%.8s", bp[i].name.c_str());
             ImVec2 ts = ImGui::CalcTextSize(shortN);
-            dl->AddText({cx - ts.x * 0.5f, cy - ts.y * 0.5f + 4},
-                        IM_COL32(255, 255, 255, 250), shortN);
-        } else {
-            ImVec2 es = ImGui::CalcTextSize("—");
-            dl->AddText({cx - es.x * 0.5f, cy - es.y * 0.5f + 4},
-                        IM_COL32(120, 120, 130, 180), "—");
+            float tx = sx + (slot - ts.x) * 0.5f;
+            float ty = sy + slot * 0.5f - ts.y * 0.5f + 4.f;
+            dl->AddText({tx, ty}, IM_COL32(255, 255, 255, 245), shortN);
         }
     }
     ImGui::End();

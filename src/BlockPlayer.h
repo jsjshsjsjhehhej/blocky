@@ -61,19 +61,30 @@ private:
            ctx.view, ctx.proj, col, ctx.sunDir);
     }
 
-    static void drawSmileFace(const BlockDrawContext& ctx, DrawCubeFn fn,
-                              glm::mat4 root, float headY) {
+    /** Come partTransform ma senza la scala: porta i punti della testa (dal suo centro) nel mondo. */
+    static glm::mat4 partRigid(glm::mat4 root, glm::vec3 c, glm::vec3 pivot, float rx, float rz, const RigPose& pose) {
+        glm::mat4 m = glm::translate(root, c + pivot + pose.pos);
+        const float ax = rx + pose.rot.x, ay = pose.rot.y, az = rz + pose.rot.z;
+        if (ax != 0) m = glm::rotate(m, glm::radians(ax), glm::vec3(1, 0, 0));
+        if (ay != 0) m = glm::rotate(m, glm::radians(ay), glm::vec3(0, 1, 0));
+        if (az != 0) m = glm::rotate(m, glm::radians(az), glm::vec3(0, 0, 1));
+        return glm::translate(m, -pivot);
+    }
+
+    // head = trasformazione della testa (centro della testa): la faccia la segue
+    // quando la testa si gira o si alza (animazioni R6), invece di restare ferma.
+    static void drawSmileFace(const BlockDrawContext& ctx, DrawCubeFn fn, const glm::mat4& head) {
         const glm::vec3 black{0.05f, 0.05f, 0.05f};
         const float z = 0.64f;
 
-        drawPart(ctx, fn, root, {-0.28f, headY + 0.12f, z}, {0.18f, 0.18f, 0.06f}, black);
-        drawPart(ctx, fn, root, { 0.28f, headY + 0.12f, z}, {0.18f, 0.18f, 0.06f}, black);
+        drawPart(ctx, fn, head, {-0.28f, 0.12f, z}, {0.18f, 0.18f, 0.06f}, black);
+        drawPart(ctx, fn, head, { 0.28f, 0.12f, z}, {0.18f, 0.18f, 0.06f}, black);
 
-        drawPart(ctx, fn, root, {-0.32f, headY - 0.22f, z}, {0.12f, 0.14f, 0.05f}, black);
-        drawPart(ctx, fn, root, {-0.18f, headY - 0.32f, z}, {0.14f, 0.10f, 0.05f}, black);
-        drawPart(ctx, fn, root, { 0.00f, headY - 0.36f, z}, {0.22f, 0.10f, 0.05f}, black);
-        drawPart(ctx, fn, root, { 0.18f, headY - 0.32f, z}, {0.14f, 0.10f, 0.05f}, black);
-        drawPart(ctx, fn, root, { 0.32f, headY - 0.22f, z}, {0.12f, 0.14f, 0.05f}, black);
+        drawPart(ctx, fn, head, {-0.32f, -0.22f, z}, {0.12f, 0.14f, 0.05f}, black);
+        drawPart(ctx, fn, head, {-0.18f, -0.32f, z}, {0.14f, 0.10f, 0.05f}, black);
+        drawPart(ctx, fn, head, { 0.00f, -0.36f, z}, {0.22f, 0.10f, 0.05f}, black);
+        drawPart(ctx, fn, head, { 0.18f, -0.32f, z}, {0.14f, 0.10f, 0.05f}, black);
+        drawPart(ctx, fn, head, { 0.32f, -0.22f, z}, {0.12f, 0.14f, 0.05f}, black);
     }
 };
 
@@ -86,10 +97,15 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
     float jL = 0.f, jR = 0.f, jl = 0.f, jr = 0.f;
     humanoidJumpPose(humanoid, jL, jR, jl, jr);
     const float jb = humanoid.jumpArmBlend;
-    const float bob = humanoidBob(humanoid);
+    const float bob = humanoid.defaultAnimActive ? 0.f : humanoidBob(humanoid);
 
     glm::mat4 root = glm::rotate(glm::translate(glm::mat4(1.f), worldPos),
                                  glm::radians(yawDeg), glm::vec3(0, 1, 0));
+    if (humanoid.dead) {
+        root = glm::translate(glm::mat4(1.f), worldPos + glm::vec3(0.f, 0.85f, 0.f));
+        root = glm::rotate(root, glm::radians(yawDeg), glm::vec3(0, 1, 0));
+        root = glm::rotate(root, glm::radians(80.f), glm::vec3(1, 0, 0));
+    }
 
     float headY = 4.7f;
 
@@ -109,18 +125,25 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
         if (hideSlot && si >= 0 && hideSlot[si])
             continue;
 
+        glm::vec3 col = p.color;
+        if (humanoid.shirtOn && (p.name == "Torso" || p.name == "Left Arm" || p.name == "Right Arm"))
+            col = humanoid.shirtColor;
+        if (humanoid.pantsOn && (p.name == "Left Leg" || p.name == "Right Leg"))
+            col = humanoid.pantsColor;
+
         glm::vec3 c = p.offset;
         if (p.name == "Torso" || p.name == "Head") c.y += bob;
 
         // Posa custom dell'item: vince su camminata/salto per quella parte.
         if (const HoldPartPose* hp = holdParts ? findHoldPose(*holdParts, p.name) : nullptr) {
-            RigPose pose = p.anim;
+            // La posa dell'item sostituisce quella delle animazioni di base (non si sommano).
+            RigPose pose = p.animFromDefault ? RigPose{} : p.anim;
             pose.pos += hp->pos;
             pose.rot.y += hp->rot.y;
-            drawPart(ctx, drawCube, root, c, p.size, p.color, p.pivot,
+            drawPart(ctx, drawCube, root, c, p.size, col, p.pivot,
                      hp->rot.x, hp->rot.z, pose);
             if (p.name == "Head")
-                drawSmileFace(ctx, drawCube, root, headY + bob + hp->pos.y);
+                drawSmileFace(ctx, drawCube, partRigid(root, c, p.pivot, hp->rot.x, hp->rot.z, pose));
             continue;
         }
 
@@ -161,8 +184,10 @@ inline void BlockPlayer::draw(const BlockDrawContext& ctx, DrawCubeFn drawCube,
             rz *= keep;
         }
 
-        drawPart(ctx, drawCube, root, c, p.size, p.color, p.pivot, rx, rz, p.anim);
+        drawPart(ctx, drawCube, root, c, p.size, col, p.pivot, rx, rz, p.anim);
         if (p.name == "Head")
-            drawSmileFace(ctx, drawCube, root, headY + bob);
+            drawSmileFace(ctx, drawCube, partRigid(root, c, p.pivot, rx, rz, p.anim));
     }
+    if (humanoid.hatOn)
+        drawPart(ctx, drawCube, root, {0.f, 5.55f, 0.f}, {1.35f, 0.42f, 1.35f}, humanoid.hatColor);
 }

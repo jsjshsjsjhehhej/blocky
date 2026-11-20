@@ -1,0 +1,9 @@
+{
+  "name": "Citta",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": { "Shared": { "$path": "src/shared" } },
+    "ServerScriptService": { "Gioco": { "$path": "src/server" } },
+    "StarterPlayer": { "StarterPlayerScripts": { "Client": { "$path": "src/client" } } }
+  }
+}

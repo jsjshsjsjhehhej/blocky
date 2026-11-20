@@ -397,11 +397,11 @@ inline void drawProperties(StudioState& s) {
             }
             if (show("Position")) {
                 propRow("Position");
-                if (ImGui::DragFloat3("##pos", &p->position.x, 0.1f)) touch();
+                if (ImGui::DragFloat3("##pos", &p->position.x, 0.001f)) touch();
             }
             if (show("Size")) {
                 propRow("Size");
-                if (ImGui::DragFloat3("##size", &p->size.x, 0.1f, 0.05f, 2048.f)) touch();
+                if (ImGui::DragFloat3("##size", &p->size.x, 0.001f, kMinPartSize, 2048.f, "%.4f")) touch();
             }
             if (show("Orientation")) {
                 propRow("Orientation");

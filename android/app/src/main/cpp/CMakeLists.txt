@@ -16,6 +16,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 set(DEPS "${REPO_ROOT}/build/_deps")
 
+# API Luau del motore (src/engine/lua), incorporate nel .so come su Windows.
+include("${REPO_ROOT}/cmake/BlockyEmbedLua.cmake")
+blocky_embed_lua("${REPO_ROOT}/src/engine/lua" "${CMAKE_BINARY_DIR}/generated")
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
 # ---- Dipendenze (stesse sorgenti della build Windows) ------------------
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
@@ -78,6 +83,10 @@ target_compile_definitions(imgui_android PUBLIC
     IMGUI_DEFINE_MATH_OPERATORS
     IMGUI_IMPL_OPENGL_ES3      # il backend OpenGL3 di ImGui parla GLES
 )
+# L'APK debug di Gradle passa -O0. Sul PC il motore e' ottimizzato, quindi
+# lo stesso lab li' e' fluido e sul telefono no: ImGui e il disegno stanno
+# in questa libreria. -O2 arriva dopo -O0 e vince.
+target_compile_options(imgui_android PRIVATE -O2)
 
 # ---- libcontroller_touch: NON costruita, per ora ----------------------
 #
@@ -124,6 +133,11 @@ target_include_directories(blocky PRIVATE
     "${DEPS}/stb-src"
     "${DEPS}/miniaudio-src"
 )
+
+# Stesso motivo di Jolt e di ImGui: il motore vive tutto in main.cpp.
+# Senza -O2 l'APK debug misura un telefono lento che il PC, compilato
+# ottimizzato, non ha. Il debugger resta usabile; il codice gira come in gioco.
+target_compile_options(blocky PRIVATE -O2)
 
 # assimp imposta CMAKE_DEBUG_POSTFIX "d" e con add_subdirectory se lo porta
 # dietro anche il nostro target: la libreria diventerebbe libblockyd.so e

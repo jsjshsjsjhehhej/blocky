@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# API Luau del motore (src/engine/lua): incorporate nel programma.
+# In sviluppo il motore le rilegge dal disco a ogni Play (src/engine/lua/README.md).
+include(${CMAKE_SOURCE_DIR}/cmake/BlockyEmbedLua.cmake)
+blocky_embed_lua("${CMAKE_SOURCE_DIR}/src/engine/lua" "${CMAKE_BINARY_DIR}/generated")
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
 # --- Offuscamento a build time (solo distribuzione) ---
 # Non tocca il sorgente. Toglie dal binario i nomi di funzioni e variabili:
 # oggi Blocky.exe ne espone 64k leggibili con un editor di testo, ed e' da
@@ -900,9 +906,63 @@ if(WIN32)
 endif()
 
 # Traduttore dell'interfaccia (ui/Loc.h) con i file assets/lang/*.json.
+# CSG (Unione / Negazione / Interseca dello Studio): engine/Csg.h
+add_executable(test_csg src/tools/test_csg.cpp)
+target_include_directories(test_csg PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_csg PRIVATE glm::glm)
+if(WIN32)
+    target_link_options(test_csg PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 add_executable(test_loc src/tools/test_loc.cpp)
 target_include_directories(test_loc PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_loc PRIVATE imgui_lib engine_lib)
 if(WIN32)
     target_link_options(test_loc PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Griglia spaziale delle part (mappe open world): trova le stesse part vicine, molto piu' in fretta.
+add_executable(test_spatial_grid src/tools/test_spatial_grid.cpp)
+target_include_directories(test_spatial_grid PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_spatial_grid PRIVATE glm::glm)
+if (WIN32)
+    target_link_options(test_spatial_grid PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Animazioni R6 di base: convertitore (pose da Blender -> .blkanim) e test.
+add_executable(make_r6_anims src/tools/make_r6_anims.cpp)
+target_include_directories(make_r6_anims PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(make_r6_anims PRIVATE glm::glm)
+add_executable(test_r6_anims src/tools/test_r6_anims.cpp)
+target_include_directories(test_r6_anims PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_r6_anims PRIVATE glm::glm)
+if (WIN32)
+    target_link_options(make_r6_anims PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(test_r6_anims PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+# Progetti Rojo (engine/RojoProject.h): struttura, sincronizzazione dal vivo, require nel Luau vero.
+add_executable(test_rojo src/tools/test_rojo.cpp)
+target_include_directories(test_rojo PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_rojo PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw)
+if(WIN32)
+    target_link_libraries(test_rojo PRIVATE winmm ws2_32)
+endif()
+
+# Copertura dell'API di Roblox: prova ogni membro dell'API dump nel Luau del motore
+# (tools/roblox_api) e scrive docs/api_coverage.md.
+add_executable(test_api_coverage src/tools/test_api_coverage.cpp)
+target_include_directories(test_api_coverage PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(test_api_coverage PRIVATE BLOCKY_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_api_coverage PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw)
+if(WIN32)
+    target_link_libraries(test_api_coverage PRIVATE winmm ws2_32)
+endif()
+
+# GUI in stile Roblox (ScreenGui > Frame > TextButton dagli script) -> label del motore.
+add_executable(test_gui_bridge src/tools/test_gui_bridge.cpp)
+target_include_directories(test_gui_bridge PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_gui_bridge PRIVATE engine_lib glm::glm assimp::assimp glad_gl_core glfw)
+if(WIN32)
+    target_link_libraries(test_gui_bridge PRIVATE winmm ws2_32)
 endif()

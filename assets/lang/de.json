@@ -136,5 +136,17 @@
  "rb.prefs": "Studio-Einstellungen",
  "rb.space.world": "Welt",
  "rb.space.local": "Lokal",
- "rb.space.tip": "Gizmo-Achsen: Welt oder Part (Strg+L)"
+ "rb.space.tip": "Gizmo-Achsen: Welt oder Part (Strg+L)",
+ "rb.publish": "Veröffentlichen",
+ "rb.collide.drag": "Kollisionen",
+ "rb.collide.tip": "Verschobene Parts gehen nicht in andere hinein",
+ "rb.csg.union": "Vereinigen",
+ "rb.csg.negate": "Negieren",
+ "rb.csg.intersect": "Schneiden",
+ "rb.csg.separate": "Trennen",
+ "rb.g.solids": "Volumenmodelle",
+ "rb.c.tool": "Zwei Punkte anklicken",
+ "rb.c.fromsel": "Zwischen ausgewählten Parts",
+ "rb.theme.light": "Helles Design",
+ "rb.theme.dark": "Dunkles Design"
 }

@@ -57,15 +57,33 @@ inline bool isWithin(const DataModel& dm, int group, int ancestor) {
 }
 
 // Model piu' esterno che contiene la part (0 = la part non e' in un Model).
+// Le Folder non contano: una part in una Folder si seleziona da sola.
 inline int topGroupOf(const DataModel& dm, int partIndex) {
     if (partIndex < 0 || partIndex >= (int)dm.parts.size()) return 0;
     int g = dm.parts[(size_t)partIndex].groupId;
+    int best = 0;
     for (int steps = 0; g > 0 && steps < 256; ++steps) {
-        const int p = parentOf(dm, g);
-        if (p <= 0) return g;
+        const PartGroup* pg = find(dm, g);
+        if (!pg) break;
+        if (!pg->folder) best = g;
+        const int p = pg->parent;
+        if (p <= 0) break;
         g = p;
     }
-    return g > 0 ? g : 0;
+    return best;
+}
+
+// Model (non Folder) piu' interno che contiene la part e ha DragDetector.
+// 0 = nessuno: il drag resta sulla singola part.
+inline int dragGroupOf(const DataModel& dm, int partIndex) {
+    if (partIndex < 0 || partIndex >= (int)dm.parts.size()) return 0;
+    for (int g = dm.parts[(size_t)partIndex].groupId, steps = 0; g > 0 && steps < 256; ++steps) {
+        const PartGroup* pg = find(dm, g);
+        if (!pg) break;
+        if (!pg->folder && pg->dragDetector) return g;
+        g = pg->parent;
+    }
+    return 0;
 }
 
 // Tutte le part del Model, compresi i Model annidati.
@@ -190,6 +208,11 @@ inline void remapCopies(DataModel& dm, const std::vector<int>& originals, const 
         const PartGroup src = *find(dm, g);
         const int parent = clone.count(src.parent) ? clone[src.parent] : src.parent;
         clone[g] = addGroup(dm, src.name, parent);
+        if (PartGroup* ng = find(dm, clone[g])) {
+            ng->folder = src.folder;
+            ng->dragDetector = src.dragDetector;
+            ng->pivotOffset = src.pivotOffset;
+        }
     }
     for (size_t k = 0; k < originals.size() && k < copies.size(); ++k) {
         const int c = copies[k];
@@ -231,7 +254,9 @@ inline bool boundsOf(const DataModel& dm, const std::vector<int>& idx, glm::vec3
 // default di Roblox).
 inline glm::vec3 pivot(const DataModel& dm, int groupId) {
     glm::vec3 mn(0.f), mx(0.f);
-    return boundsOf(dm, memberParts(dm, groupId), mn, mx) ? (mn + mx) * 0.5f : glm::vec3(0.f);
+    glm::vec3 c = boundsOf(dm, memberParts(dm, groupId), mn, mx) ? (mn + mx) * 0.5f : glm::vec3(0.f);
+    if (const PartGroup* g = find(dm, groupId)) c += g->pivotOffset;
+    return c;
 }
 
 // Sposta tutto il Model cosi' che il pivot finisca in target (Model:MoveTo).
@@ -251,7 +276,7 @@ inline void scaleParts(DataModel& dm, const std::vector<int>& idx, float factor)
         if (i < 0 || i >= (int)dm.parts.size()) continue;
         WorkspacePart& p = dm.parts[(size_t)i];
         p.position = c + (p.position - c) * factor;
-        p.size = glm::clamp(p.size * factor, glm::vec3(0.05f), glm::vec3(100000.f));
+        p.size = glm::clamp(p.size * factor, glm::vec3(kMinPartSize), glm::vec3(100000.f));
     }
 }
 
@@ -287,7 +312,10 @@ inline void writeJson(std::ostream& o, const DataModel& dm) {
         for (char c : g.name)   // niente virgolette o barre che romperebbero il JSON
             if (c != '"' && c != '\\' && (unsigned char)c >= 32) name += c;
         o << (k ? "," : "") << "{\"id\":" << g.id << ",\"name\":\"" << name
-          << "\",\"parent\":" << g.parent << "}";
+          << "\",\"parent\":" << g.parent << (g.folder ? ",\"folder\":1" : "")
+          << (g.dragDetector ? ",\"drag\":1" : "")
+          << ",\"pivotx\":" << g.pivotOffset.x << ",\"pivoty\":" << g.pivotOffset.y
+          << ",\"pivotz\":" << g.pivotOffset.z << "}";
     }
     o << "],\n";
 }
@@ -310,9 +338,16 @@ inline void readJson(const std::string& json, DataModel& dm) {
                 const size_t at = obj.find(std::string("\"") + k + "\":");
                 return at == std::string::npos ? 0 : std::atoi(obj.c_str() + at + std::strlen(k) + 3);
             };
+            auto fnum = [&](const char* k) {
+                const size_t at = obj.find(std::string("\"") + k + "\":");
+                return at == std::string::npos ? 0.f : (float)std::atof(obj.c_str() + at + std::strlen(k) + 3);
+            };
             PartGroup g;
             g.id = num("id");
             g.parent = num("parent");
+            g.folder = num("folder") != 0;
+            g.dragDetector = num("drag") != 0;
+            g.pivotOffset = { fnum("pivotx"), fnum("pivoty"), fnum("pivotz") };
             const size_t n = obj.find("\"name\":\"");
             if (n != std::string::npos) {
                 const size_t s = n + 8, e = obj.find('"', s);

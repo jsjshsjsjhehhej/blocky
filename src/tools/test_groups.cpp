@@ -201,6 +201,26 @@ int main() {
               "scala x2 attorno al centro: part e distanze raddoppiano");
     }
 
+    {
+        // Folder (Raggruppa come cartella): si salva, si ricarica, e non "cattura" la selezione.
+        DataModel dm = world(4);
+        const int folder = partgroups::group(dm, {0, 1}, "Folder");
+        partgroups::find(dm, folder)->folder = true;
+        const int model = partgroups::group(dm, {2, 3});
+        check(partgroups::topGroupOf(dm, 0) == 0, "una part in una Folder si seleziona da sola (niente gruppo)");
+        check(partgroups::topGroupOf(dm, 2) == model, "una part in un Model seleziona il Model");
+        Humanoid h;
+        const std::string json = PlaceExporter::exportPlace(dm, h, {0, 0, 0}, 0.f);
+        const std::string path = "test_groups_folder.blocky";
+        { std::ofstream fo(path, std::ios::binary); fo << json; }
+        DataModel back;
+        const bool ok = loadPlaceFromJson(path, back);
+        std::remove(path.c_str());
+        const PartGroup* fb = partgroups::find(back, folder);
+        const PartGroup* mb = partgroups::find(back, model);
+        check(ok && fb && fb->folder && mb && !mb->folder, "salva e ricarica: la Folder resta Folder, il Model resta Model");
+    }
+
     std::printf("\n%s (%d falliti)\n", g_fail ? "FALLITO" : "TUTTO OK", g_fail);
     return g_fail ? 1 : 0;
 }

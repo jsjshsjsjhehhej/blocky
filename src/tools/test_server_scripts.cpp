@@ -95,6 +95,17 @@ re.OnServerEvent:Connect(function(player, what)
     q.Name = "Risposta"
     q.Anchored = true
 end)
+
+local tp = Instance.new("RemoteEvent")
+tp.Name = "Teletrasporta"
+tp.Parent = RS
+tp.OnServerEvent:Connect(function(player)
+    TPSEEN = 1
+    player.Character.HumanoidRootPart.Position = Vector3.new(50, 10, 50)
+    player.Character.Humanoid.Health = 40
+    TPPOS = tostring(player.Character.HumanoidRootPart.Position)
+    TPH = tostring(player.Character.Humanoid.Health)
+end)
 )LUA";
     const char* legacyScript =
         "local x = Instance.new(\"Part\")\n"
@@ -216,6 +227,25 @@ end)
           }),
           "FireServer: il server sposta la sua part e ne crea una nuova, il client vede tutto");
     check(watch("SENDER") == "Instance:Giocatore:rosso", "OnServerEvent riceve il Player vero (" + watch("SENDER") + ")");
+
+    // ---- Stato del giocatore: dal server al client (vita, leaderstats, teletrasporti) ----
+    {
+        std::string lastState;
+        auto stateHas = [&](const char* needle) {
+            for (const auto& in : client.incomingRemotes)
+                if (std::string(in.name) == "__blkPlayerState") lastState = in.payload;
+            return lastState.find(needle) != std::string::npos;
+        };
+        check(pump(600, [&] { return stateHas("L=Monete:1"); }),
+              "il client riceve le leaderstats decise dal server (" + lastState + ")");
+        client.sendRemoteEventToServer("Teletrasporta", "vai");
+        check(pump(600, [&] { return stateHas("T=50,7,50"); }),
+              "teletrasporto deciso da uno script del server arriva al client (" + lastState + ")");
+        check(lastState.find("H=40") != std::string::npos, "la vita cambiata dal server arriva al client (" + lastState + ", TPSEEN=" + watch("TPSEEN") + " TPPOS=" + watch("TPPOS") + " TPH=" + watch("TPH") + ")");
+        clientPos = {50.f, 7.f, 50.f};   // il client va dove lo manda il server
+        pump(180, nullptr);
+        check(client.connected, "dopo il teletrasporto del server il client non viene espulso dall'anti-cheat");
+    }
 
     // ---- Uscita ----
     client.shutdown();

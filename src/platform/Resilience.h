@@ -88,7 +88,7 @@ inline void applyEmergencyLevel(QualityProfile& q, int level) {
         break;
     case 2:
         q.renderScale = std::min(q.renderScale, q.mobile ? 0.68f : 0.88f);
-        q.studTextures = false;
+        q.studLowDetail = true;   // stud sempre visibili: sotto lag diventano semplici, non spariscono
         q.shadowOccluders = 0;
         q.maxVisibleParts = std::max(q.mobile ? 700 : 5000,
                                      (int)(q.maxVisibleParts * 0.62f));
@@ -118,7 +118,7 @@ inline void applyEmergencyLevel(QualityProfile& q, int level) {
                                                q.mobile ? 24 : 96));
         q.maxModelVerts = std::min(q.maxModelVerts,
                                    q.mobile ? 200'000 : 800'000);
-        q.studTextures = false;
+        q.studLowDetail = true;   // stud sempre visibili: sotto lag diventano semplici, non spariscono
         q.shadowOccluders = 0;
         q.priorityPartCull = true;
         break;

@@ -465,13 +465,13 @@ static void drawGameKitPlayHud() {
     ImGui::Begin("##GameKitHud", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
                  | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav);
-    ImGui::Text("Coins %d", g_gameKit.stats.coins);
+    ImGui::Text("Punti %d", g_gameKit.stats.coins);
     if (g_gameKit.phase == gamekit::MatchPhase::Countdown)
         ImGui::Text("Countdown %.0f", std::ceil(g_gameKit.countdownLeft));
     else if (g_gameKit.phase == gamekit::MatchPhase::Playing && g_gameKit.matchDuration > 0.f)
-        ImGui::Text("Time %.0f", g_gameKit.matchTimeLeft);
+        ImGui::Text("Tempo %.0f", g_gameKit.matchTimeLeft);
     else if (g_gameKit.phase == gamekit::MatchPhase::Ended)
-        ImGui::Text("Match ended");
+        ImGui::TextUnformatted("Partita finita");
     if (g_gameKit.hasKey)
         ImGui::Text("Key: %s", g_gameKit.heldKey.c_str());
     if (g_gameKit.playerSpeedMul > 1.01f || g_gameKit.playerJumpMul > 1.01f)

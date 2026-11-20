@@ -196,6 +196,9 @@ uniform float uExposure;
 uniform float uContrast;
 uniform float uSaturation;
 uniform float uVignette;
+uniform float uGradeOn;    // 1 = ColorCorrection anche senza look pack
+uniform vec3  uTint;
+uniform float uBlur;       // 0..1 BlurEffect / DepthOfField morbido
 
 // Catmull-Rom con 9 prelievi bilineari invece di 16 puntuali: stessa curva,
 // quasi meta' del lavoro. E' il filtro usato dai temporal upscaler moderni.
@@ -252,26 +255,41 @@ vec3 acesTonemap(vec3 x) {
 }
 
 vec3 applyLookGrade(vec3 c) {
-  if (uLookOn < 0.5) return c;
+  bool grade = uLookOn > 0.5 || uGradeOn > 0.5;
+  if (!grade) return c * uTint;
   c *= max(uExposure, 0.01);
-  c = acesTonemap(c);
+  if (uLookOn > 0.5) c = acesTonemap(c);
   c = (c - 0.5) * uContrast + 0.5;
   float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
   c = mix(vec3(luma), c, uSaturation);
   float r = length(vUV - vec2(0.5));
   float vig = 1.0 - smoothstep(0.35, 0.95, r) * clamp(uVignette, 0.0, 1.0);
-  return max(c * vig, vec3(0.0));
+  return max(c * vig, vec3(0.0)) * uTint;
+}
+
+vec3 sampleScene(sampler2D tex, vec2 uv, vec2 size) {
+  vec3 scene;
+  if (uUpscale > 0.5) {
+    scene = sampleCatmullRom(tex, uv, size);
+    if (uSharp > 0.001)
+      scene = sharpenRCAS(tex, uv, size, scene, uSharp * 0.25);
+  } else {
+    scene = texture(tex, uv).rgb;
+  }
+  if (uBlur > 0.001) {
+    vec2 t = (1.0 / size) * (1.0 + uBlur * 8.0);
+    vec3 acc = scene;
+    acc += texture(tex, uv + vec2(t.x, 0.0)).rgb;
+    acc += texture(tex, uv - vec2(t.x, 0.0)).rgb;
+    acc += texture(tex, uv + vec2(0.0, t.y)).rgb;
+    acc += texture(tex, uv - vec2(0.0, t.y)).rgb;
+    scene = acc / 5.0;
+  }
+  return scene;
 }
 
 void main(){
-  vec3 scene;
-  if (uUpscale > 0.5) {
-    scene = sampleCatmullRom(uScene, vUV, uSceneSize);
-    if (uSharp > 0.001)
-      scene = sharpenRCAS(uScene, vUV, uSceneSize, scene, uSharp * 0.25);
-  } else {
-    scene = texture(uScene, vUV).rgb;
-  }
+  vec3 scene = sampleScene(uScene, vUV, uSceneSize);
   vec3 bloom = texture(uBloom, vUV).rgb;
   vec3 outc = scene + bloom * uIntensity;
   FragColor = vec4(applyLookGrade(outc), 1.0);
@@ -305,12 +323,17 @@ void main(){
     }
 
     void setLookGradeUniforms(bool lookOn, float exposure, float contrast,
-                              float saturation, float vignette) {
+                              float saturation, float vignette,
+                              bool gradeOn = false, glm::vec3 tint = glm::vec3(1.f),
+                              float blur = 0.f) {
         glUniform1f(glGetUniformLocation(compositeProg, "uLookOn"), lookOn ? 1.f : 0.f);
         glUniform1f(glGetUniformLocation(compositeProg, "uExposure"), exposure);
         glUniform1f(glGetUniformLocation(compositeProg, "uContrast"), contrast);
         glUniform1f(glGetUniformLocation(compositeProg, "uSaturation"), saturation);
         glUniform1f(glGetUniformLocation(compositeProg, "uVignette"), vignette);
+        glUniform1f(glGetUniformLocation(compositeProg, "uGradeOn"), gradeOn ? 1.f : 0.f);
+        glUniform3fv(glGetUniformLocation(compositeProg, "uTint"), 1, glm::value_ptr(tint));
+        glUniform1f(glGetUniformLocation(compositeProg, "uBlur"), blur);
     }
 
     // Estrae le zone sopra soglia dalla scena appena disegnata, le sfoca
@@ -326,7 +349,9 @@ void main(){
                               float sharpen = 0.6f,
                               bool lookOn = false,
                               float exposure = 1.f, float contrast = 1.f,
-                              float saturation = 1.f, float vignette = 0.f) {
+                              float saturation = 1.f, float vignette = 0.f,
+                              bool gradeOn = false, glm::vec3 tint = glm::vec3(1.f),
+                              float blur = 0.f) {
         if (!ready) {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, screenW, screenH);
@@ -382,7 +407,7 @@ void main(){
                     (float)fullW, (float)fullH);
         glUniform1f(glGetUniformLocation(compositeProg, "uUpscale"), upscaling ? 1.f : 0.f);
         glUniform1f(glGetUniformLocation(compositeProg, "uSharp"), upscaling ? sharpen : 0.f);
-        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette);
+        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette, gradeOn, tint, blur);
         drawQuad();
 
         glActiveTexture(GL_TEXTURE0);
@@ -394,7 +419,9 @@ void main(){
     void endScenePresent(int screenW, int screenH, float sharpen = 0.45f,
                          bool lookOn = false,
                          float exposure = 1.f, float contrast = 1.f,
-                         float saturation = 1.f, float vignette = 0.f) {
+                         float saturation = 1.f, float vignette = 0.f,
+                         bool gradeOn = false, glm::vec3 tint = glm::vec3(1.f),
+                         float blur = 0.f) {
         if (!ready) {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0, 0, screenW, screenH);
@@ -421,7 +448,7 @@ void main(){
         glUniform1f(glGetUniformLocation(compositeProg, "uUpscale"), upscaling ? 1.f : 0.f);
         glUniform1f(glGetUniformLocation(compositeProg, "uSharp"),
                     upscaling ? sharpen : 0.f);
-        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette);
+        setLookGradeUniforms(lookOn, exposure, contrast, saturation, vignette, gradeOn, tint, blur);
         drawQuad();
 
         glActiveTexture(GL_TEXTURE0);

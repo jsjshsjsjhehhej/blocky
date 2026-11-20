@@ -26,6 +26,24 @@ static std::vector<int> studioSelectedWholeGroups() {
     return out;
 }
 
+// Inserisci > DragDetector su un Model: il flag sta sul Model, non su ogni
+// part. Una part sciolta nella selezione tiene il DragDetector suo.
+static void studioTagDragOnSelection() {
+    std::vector<int> covered;
+    for (int gid : studioSelectedWholeGroups()) {
+        PartGroup* mg = partgroups::find(g_world, gid);
+        if (!mg || mg->folder) continue;
+        mg->dragDetector = true;
+        for (int m : partgroups::memberParts(g_world, gid)) covered.push_back(m);
+    }
+    for (int i : studioActivePartIndices()) {
+        if (!partIndexValid(i) || g_world.parts[i].locked) continue;
+        if (std::find(covered.begin(), covered.end(), i) != covered.end()) continue;
+        g_world.parts[i].dragDetector = true;
+    }
+    markPlaceDirty();
+}
+
 static void studioSelectGroup(int gid, int primary = -1) {
     const std::vector<int> members = partgroups::memberParts(g_world, gid);
     if (members.empty()) return;

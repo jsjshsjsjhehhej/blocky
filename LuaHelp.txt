@@ -1,9 +1,305 @@
 ================================================================================
 BLOCKY LUA — Prompt per Copilot / AI  (+ esempi corretti)
 ================================================================================
-Usa QUESTO file come contesto. Non inventare API Roblox (TweenService, ScreenGui,
-TextLabel UI, DataStore, ecc. se non sono elencate QUI).
-Aggiornato: 2026-07-25 (Animator SetJumpAnim + BlockyPlayerAnim)
+Usa QUESTO file come contesto. Non inventare API che qui non ci sono.
+Aggiornato: 2026-11-20 (materiali simili, luce e particelle, ImageButton, lista orizzontale, PlaybackSpeed)
+
+================================================================================
+API CHE SERVONO A UN GIOCO
+================================================================================
+Gia' nel linguaggio Luau: math.clamp/lerp/round/sign/noise/map, table.find/clone/
+create/freeze/clear, string.split/pack, bit32, utf8, task.wait/spawn/delay/defer/cancel.
+
+Aggiunte:
+  buffer.create(n)  buffer.fromstring  buffer.tostring  buffer.readu8/writeu8 ...
+  vector.create(x, y, z)
+  debug.info(livello, "sln")   debug.traceback()
+  tick()                       -- secondi dal 1970
+  workspace:GetServerTimeNow()
+  task.synchronize() / task.desynchronize()   -- un solo thread: non fanno nulla
+
+  Humanoid:Move(Vector3, relativoAllaCamera)  -- il giocatore cammina, finche' lo chiami
+  Humanoid:MoveTo(Vector3)
+  Humanoid.MoveToFinished:Connect(function(arrivato) end)
+  part:GetTouchingParts()
+  model:ScaleTo(n)   model:GetScale()        -- Model di Part (Ctrl+G)
+
+  RemoteEvent:FireServer(...)                -- numeri, testi, Vector3, tabelle. Anche in Wi-Fi.
+  RemoteEvent:FireAllClients(...)
+  RemoteFunction:InvokeServer(...)           -- ritorna i valori veri, anche dal server
+  RemoteFunction:InvokeClient(player, ...)   -- idem, il client risponde in Wi-Fi
+  npc:LoadAnimation(anim)                    -- clip blkanim sul personaggio, poi :Play()
+  BadgeService:AwardBadge                    -- resta salvato sul dispositivo
+  Instance.new("UnreliableRemoteEvent")      -- come RemoteEvent
+
+  path = game:GetService("PathfindingService"):CreatePath({
+      AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
+      AgentJumpHeight = 7, WaypointSpacing = 4,
+  })
+  path:ComputeAsync(da, a)
+  for _, wp in ipairs(path:GetWaypoints()) do wp.Position end   -- wp.Action e' Walk o Jump
+
+  -- Testo: torna lo spazio vero, andando a capo dentro il riquadro.
+  game:GetService("TextService"):GetTextSize("ciao ciao", 18, Enum.Font.Gotham, Vector2.new(80, 200))
+
+  -- Memoria della partita (si svuota quando chiudi). Non e' un cloud.
+  local mapa = game:GetService("MemoryStoreService"):GetHashMap("punteggi")
+  mapa:SetAsync("Anna", 10, 60)
+  mapa:GetAsync("Anna")
+  local coda = game:GetService("MemoryStoreService"):GetQueue("eventi")
+  coda:AddAsync("go", 30)
+  coda:ReadAsync(10)
+
+  -- InsertService carica un file locale (obj, glb, fbx), non un asset di Roblox.
+  -- game:GetService("InsertService"):LoadAsset("models/cassa.obj")
+  -- oppure LoadAsset(12) se esiste insert/12.obj nella cartella dati.
+
+  -- Catalogo del dispositivo (il corpo Blocky), non il sito.
+  game:GetService("AvatarEditorService"):SearchCatalogAsync():GetCurrentPage()
+
+  -- La voce non apre il microfono. Risponde false.
+  game:GetService("VoiceChatService"):IsVoiceEnabledForUserIdAsync(1)
+
+  -- MessagingService:PublishAsync arriva anche agli altri giocatori in rete.
+  -- Sullo stesso dispositivo il callback riceve il valore subito.
+
+  -- Instance.new("Part") nasce Anchored = false (come Roblox). In Studio
+  -- le part inserite a mano restano ancorate, cosi' la base non cade.
+  -- Il cilindro nel mondo e' lungo su Size.X (prima solo quello in mano).
+
+  -- Punto del mondo in pixel (x, y, profondita') e se e' nello schermo.
+  local px, visibile = workspace.CurrentCamera:WorldToScreenPoint(part.Position)
+  local raggio = workspace.CurrentCamera:ViewportPointToRay(px.X, px.Y)
+  -- ScreenPointToRay(x, y) fa lo stesso. Senza x,y resta il raggio al centro.
+
+  -- Terrain e' lo stesso di workspace.Terrain. Il pennello di Studio
+  -- scrive questi voxel, e il file del posto li tiene.
+  local terreno = game:GetService("Terrain")
+  terreno:FillBlock(CFrame.new(0, 12, 0), Vector3.new(8, 4, 8), "Grass")
+  terreno:FillBall(Vector3.new(0, 16, 0), 6, "Water")
+  local letti = terreno:ReadVoxels({ Min = Vector3.new(-8, 8, -8), Max = Vector3.new(8, 20, 8) }, 4)
+
+  -- Il corpo del giocatore. Space sale quando vola o nuota.
+  Humanoid:ChangeState("Flying")     -- GetState() == "Flying", niente gravita'
+  Humanoid:ChangeState("Swimming")
+  Humanoid:ChangeState("Ragdoll")    -- anche da vivo
+  Humanoid:ChangeState("Running")    -- torna normale
+  Humanoid:SetStateEnabled("Swimming", false)
+
+  local casella = Instance.new("TextBox")
+  casella.Parent = schermo
+  casella.FocusLost:Connect(function(invio) end)  -- true se ha premuto Invio
+  casella:CaptureFocus()
+
+  -- Fire, Smoke, Sparkles, Attachment, Trail, Beam e ClickDetector messi
+  -- in Studio restano nel file. Play non li cancella. Stop toglie solo
+  -- quelli creati dagli script durante il Test.
+  local fuoco = Instance.new("Fire", part)
+
+  local cono = Instance.new("SpotLight", part)    -- part.LightKind = 1, Angle in gradi
+  cono.Angle = 40
+  cono.Range = 24
+  local faccia = Instance.new("SurfaceLight", part)  -- LightKind = 2, di base esce dalla faccia Top
+  faccia.Face = 5   -- 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front
+
+  local spinta = Instance.new("LinearVelocity")
+  spinta.VectorVelocity = Vector3.new(0, 20, 0)
+  spinta.Parent = part          -- part non ancorata: va a 20 stud/s
+  local forza = Instance.new("VectorForce")
+  forza.Force = Vector3.new(0, 50, 0)
+  forza.Parent = part
+  local luce = Instance.new("Highlight")
+  luce.Parent = part            -- Adornee / FillColor
+  local raggio = Instance.new("Beam")
+  -- Attachment0 e Attachment1 sono Attachment sulle due part
+  local scia = Instance.new("Trail")
+  scia.Parent = part
+
+  game:GetService("TextService"):GetTextSize(testo, 18, Enum.Font.Gotham, Vector2.new(200, 100))
+  game:GetService("BadgeService"):AwardBadge(userId, badgeId)
+  game:GetService("BadgeService"):UserHasBadgeAsync(userId, badgeId)
+  game:GetService("ContentProvider"):PreloadAsync({id}, function(id, stato) end)
+  game:GetService("GuiService"):GetGuiInset()  -- primo Vector2: X=0, Y=36 (barra in alto)
+  game:GetService("MessagingService"):SubscribeAsync("round", function(msg) end)
+  game:GetService("MessagingService"):PublishAsync("round", "go")
+  game:GetService("PolicyService"):GetPolicyInfoForPlayerAsync(player)
+
+  -- Gruppi di collisione per nome (il motore tiene l'id 0..31). Default c'e' gia'.
+  local PS = game:GetService("PhysicsService")
+  PS:RegisterCollisionGroup("Train")
+  PS:RegisterCollisionGroup("World")
+  PS:CollisionGroupSetCollidable("Train", "World", false)
+  PS:CollisionGroupsAreCollidable("Train", "World")
+  PS:RenameCollisionGroup("Train", "Treno")
+  PS:UnregisterCollisionGroup("Treno")
+  part.CollisionGroup = "Train"     -- si legge il nome. Si puo' ancora scrivere il numero.
+  part:CanCollideWith(altra)        -- solo i gruppi, non CanCollide
+  part:GetMass()
+  part:GetConnectedParts()          -- Weld, WeldConstraint, Motor6D
+
+  -- Ricerche. La box ignora la rotazione della Part.
+  workspace:GetPartBoundsInRadius(pos, raggio, OverlapParams.new())
+  workspace:Spherecast(origine, raggio, direzione, RaycastParams.new())
+  workspace:Blockcast(cframe, size, direzione, RaycastParams.new())
+  workspace:BulkMoveTo({ part }, { CFrame.new(0, 5, 0) })
+  workspace:ArePartsTouchingOthers({ part })
+  local zona = Region3.new(Vector3.new(0, 0, 0), Vector3.new(10, 10, 10))
+  zona:ExpandToGrid(4)
+  workspace:FindPartsInRegion3(zona)
+
+  -- Unire / bucare le Part. Il risultato e' una mesh nel mondo. Niente VR, niente corpo R15.
+  local GS = game:GetService("GeometryService")
+  local unione = GS:UnionAsync(partA, { partB })          -- oppure partA:UnionAsync({ partB })
+  local buco = partA:SubtractAsync({ partB })
+  local comune = GS:IntersectAsync(partA, { partB })
+  GS:NegateAsync(partA)                                   -- partA.IsNegative = true, il buco nell'unione
+  part:GetClosestPointOnSurface(Vector3.new(0, 5, 0))     -- segue la rotazione della Part
+  local pezzi = GS:SeparateAsync(unione)                  -- rimette le Part originali
+  part.MeshId = "models/cassa.obj"                        -- anche .fbx e .glb, al posto del cubo
+  local mesh = Instance.new("SpecialMesh")
+  mesh.MeshId = "models/cassa.obj"
+  mesh.Parent = part
+  mesh.MeshType = Enum.MeshType.Sphere                    -- Brick, Cylinder, Wedge, Head, FileMesh
+  player:Kick("motivo")                                   -- resta nel gioco, scrive solo il motivo
+  game:GetService("Chat"):Chat(part, "ciao")              -- fa scattare Chatted
+  game:GetService("TextChatService"):DisplayBubble(part, "ciao")
+  game:GetService("TextChatService").TextChannels.RBXGeneral:SendAsync("ciao")
+  UserInputService:GetLastInputType().Name   -- "Keyboard", "Gamepad1", ...
+  -- task.wait() funziona dentro PlayerAdded, Heartbeat, Touched, InputBegan, Activated
+  game:GetService("RunService").PreSimulation:Connect(function(dt) end)  -- anche PostSimulation, PreRender, PreAnimation
+  Players:GetUserIdFromNameAsync("nome")   -- id locale, stabile per quel nome
+  Players:GetNameFromUserIdAsync(id)
+  game:BindToClose(function() end)   -- parte quando la sessione si chiude
+  game:GetService("MarketplaceService"):UserOwnsGamePassAsync(userId, id)  -- false: niente acquisti
+  game:GetService("LocalizationService"):GetTranslatorForPlayerAsync(player):Translate("ciao")
+  game:GetService("GuiService"):GetGuiInset()  -- Y = 36
+  part:GetTouchingParts()
+  local boom = Instance.new("Explosion")
+  boom.Position = Vector3.new(0, 5, 0)
+  boom.BlastRadius = 8
+  boom.Parent = workspace
+  Players:GetPlayerFromCharacter(model)
+  local mouse = game.Players.LocalPlayer:GetMouse()
+  mouse.Hit          -- CFrame dove guarda il mirino
+  mouse.Target       -- la Part colpita, oppure nil
+  mouse.X  mouse.Y
+  mouse.Button1Down:Connect(function() end)
+  LocalPlayer:DistanceFromCharacter(Vector3.new(0, 0, 0))
+  Humanoid.Jump = true
+  UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+
+Non ci sono (non servono a fare un gioco qui): ads, analytics, voice, VR,
+avatar da catalogo, teletrasporto fra universi Roblox.
+
+================================================================================
+GIRO DI PARTITA
+================================================================================
+In Studio: Quick Actions → Giro di partita. Mette un blocco giallo "Traguardo".
+Premi Play. Conto alla rovescia di 3 secondi, poi 45 secondi.
+Cammina sul blocco: "Hai vinto". Se il tempo finisce: "Tempo scaduto".
+
+Da uno script (senza i due punti, sono funzioni):
+  GameKit.StartMatch(45, 3)     -- secondi, conto alla rovescia
+  GameKit.AddPad("Traguardo", "Win", x, y, z, 5, 3, 5, 1, 0)
+  game:GetService("GameKit")    -- la stessa tabella
+  game:GetService("Round")
+
+================================================================================
+TOOL / ZAINO (come Roblox Studio)
+================================================================================
+Instance.new("Tool") crea un tool nella hotbar (tasti 1-9, clic di nuovo = togli).
+Una Part di nome Handle, con Parent = tool, e' l'impugnatura: in mano quando
+il tool e' equipaggiato. Le altre Part parentate al tool restano attaccate
+al Handle (scostamento rispetto a lui).
+
+  tool.RequiresHandle = true
+  tool.CanBeDropped = true
+  tool.ManualActivationOnly = false   -- true: il clic non spara Activated
+  tool.Enabled = true
+  tool.ToolTip = "Spada"
+  tool.Equipped / Unequipped / Activated / Deactivated   -- :Connect(function() end)
+  tool:Activate()
+
+  local handle = Instance.new("Part")
+  handle.Name = "Handle"
+  handle.Size = Vector3.new(1, 4, 1)
+  handle.Parent = tool
+  tool.Parent = game:GetService("Players").LocalPlayer.Backpack
+
+  Humanoid:EquipTool(tool)
+  Humanoid:UnequipTools()
+
+Shape sulla Part conta anche in mano e nel mondo: Block, Ball, Cylinder, Wedge.
+Un cilindro e' lungo su Size.X (la canna, il manico, la ruota). Un posto
+vecchio che allungava il cilindro su Y e lo girava di 90 gradi ora lo vede
+doppio: togli quel giro.
+
+Un modello vero, al posto dei pezzi:
+
+  tool.MeshId = "models/revolver.glb"   -- anche .obj o .fbx, path del progetto
+  tool.MeshId = ""                       -- torna ai pezzi a codice
+
+Il file sostituisce le Part del tool finche' e' impostato. Grip (scala, ruota,
+sposta) resta nel pannello del backpack. Il clic sinistro in gioco spara
+Activated, il rilascio Deactivated. Sword e Pistol restano i tool gia' pronti.
+
+Backspace, o Backpack:Drop(), lascia a terra il tool equipaggiato se
+CanBeDropped e' true. Le part (il Handle) compaiono davanti al giocatore.
+Camminarci sopra lo rimette nello zaino. Senza CanBeDropped il tasto toglie
+solo l'oggetto dalla mano.
+
+================================================================================
+SUONO SULLA PART
+================================================================================
+  local s = Instance.new("Sound")
+  s.SoundId = "sounds/beep.wav"
+  s.Volume = 0.8          -- 0..1, lo rispetta
+  s.Looped = false
+  s.Parent = part         -- si sente da li' e cala con la distanza
+  s:Play()
+  s:Stop()                -- ferma solo questo, non tutti i suoni
+
+Senza Parent il suono e' globale (come SoundService:Play).
+
+================================================================================
+NPC CON HUMANOID
+================================================================================
+  local npc = game:GetService("Actors"):Spawn("Guardia", Vector3.new(0, 0, 20))
+  npc.WalkSpeed = 12
+  npc:MoveTo(Vector3.new(30, 0, 20))
+  npc.MoveToFinished:Connect(function() end)
+  npc:EquipTool(tool)     -- tool dello zaino, in mano
+  npc:TakeDamage(25)
+  npc.Health = 0          -- Died
+  npc.Died:Connect(function() end)
+  local anim = Instance.new("Animation")
+  anim.AnimationId = "blkanim://Saluto"
+  local traccia = npc:LoadAnimation(anim)
+  traccia:Play()
+
+E' un personaggio R6 nel mondo, non un mob. I piedi restano sulla Part sotto
+di lui e il corpo non attraversa le Part (muri, rocce). MoveTo ignora la Y:
+l'altezza la trova il terreno. Con Health a 0 il corpo si sdraia. In rete lo
+muove chi ospita la partita: gli altri lo vedono.
+
+================================================================================
+RETE (quello che crea uno Script)
+================================================================================
+Uno Script (server) che crea Part, GUI (ScreenGui/TextLabel), Tool o NPC lo
+manda a chi e' collegato. Un LocalScript resta su quel telefono.
+Le part del place e quelle nuove si riconoscono per id: non si raddoppiano.
+
+
+Le voci qui sotto sono del motore, non comandi Lua. Non inventare
+workspace.StreamingEnabled, ObjectPool o InterestManagement in uno script.
+
+- StreamingEnabled (Studio, Game Settings): in Play le parti lontane non si
+  disegnano. Gli slot sono un pool: se finiscono, il resto resta fuori.
+- Fisica: un corpo fermo dorme finche' qualcosa non lo urta.
+- Instancing: parti con la stessa forma condividono un disegno (anche l'ombra).
+- Rete: una part viene mandata solo ai giocatori nel raggio.
+- Apri place: la lettura del file avviene in background, il gioco non si blocca.
+- Budget di frame: se il frame e' gia' pieno, la fisica non accumula altri passi.
 ================================================================================
 
 Blocky Lua = Lua 5.4 + API stile Roblox (Blocky Game Engine).
@@ -12,11 +308,10 @@ Script solo in Test (F5) / Play. Su una Part: local part = script.Parent
 ================================================================================
 LABEL (3D) vs TextLabel UI
 ================================================================================
-SI  Label = testo 3D nel mondo (billboard). Inserisci da Studio → Label.
-    Proprietà: Name, Text, Position, Color, FontScale, Billboard, ShowBackground.
-    OGGI: solo editor Studio (non ancora API Lua per creare/modificare Label).
-
-NO  TextLabel / ScreenGui / BillboardGui — NON esistono in Blocky (niente HUD 2D Lua).
+SI  ScreenGui, Frame, TextLabel, TextButton, ScrollingFrame, BillboardGui, SurfaceGui.
+    Il Text di un TextLabel / TextButton nasce vuoto: si vede solo quello che lo script scrive.
+    BillboardGui o SurfaceGui messi come figli di una Part stanno su quella Part
+    e mostrano il Text del TextLabel dentro, non la parola "Label".
 
 ================================================================================
 PART — proprietà e metodi
@@ -24,12 +319,29 @@ PART — proprietà e metodi
 part.Name / part.ClassName
 part.Position / part.Size / part.Orientation (= Rotation)
   → Vector3 con .X .Y .Z e operatori + - * (scalare) e -unario
+  → Size puo' scendere fino a 0.001 stud per lato (modelli dettagliati).
+    In Studio i passi sono 1, 0.1, 0.01, 0.001. Shift = passo / 10.
+    Snap spento, o Ctrl mentre sposti, = posizione libera.
 part.Color / part.BrickColor = Color3.new(r,g,b) | Color3.fromRGB(r,g,b)
 part.Material = "Plastic"|"SmoothPlastic"|"Neon"|"Metal"|"Glass"|"Wood"|
                 "Concrete"|"Grass"|"Sand"|"Fabric"|"Ice"|"ForceField"
+                -- oppure Enum.Material.Wood.  Enum.Material.Wood.Name == "Wood"
+                -- typeof(Enum.Material.Wood) == "EnumItem". Vale anche Enum.KeyCode.F.Name
+                -- WoodPlanks -> Wood, Sandstone -> Sand, Pebble -> Slate, Cobblestone -> Concrete.
+                -- Una volta sola in Output: "Materiale X: il motore usa Y"
+part:SetNetworkOwner(nil)      -- non fa niente: la fisica e' gia' del server
+local w = Instance.new("WeldConstraint")
+w.Part0, w.Part1 = partA, partB   -- le due part restano attaccate. w.Enabled = false le stacca
+w.Enabled = true
 part.Emissive = 1              -- NUMERO 0..2+ (true viene coercito a 1)
 part.PointLight = true
 part.LightRange / part.LightBrightness
+local luce = Instance.new("PointLight")   -- anche SpotLight, SurfaceLight
+luce.Range = 24
+luce.Brightness = 2
+luce.Color = Color3.new(1, 0.6, 0.2)      -- tinge la luce, non la part
+luce.Parent = part                        -- anche dopo la creazione
+luce.Enabled = false
 part.CanCollide = true|false
 part.CanDestroy = true|false   -- Destroy/spada/danni a catena
 part.Health / part.MaxHealth   -- Health (MaxHealth aggiornato se serve)
@@ -46,6 +358,177 @@ Studio (non Lua):
   BoomOnTouch = true  → in Test 1 avvicinamento = boom (raggio largo, NoCollision)
   BoomAutoSecs = N    → esplode da solo dopo N secondi in Test (0 = solo tocco)
   Toolbar Boom: auto 3s + CanCollide off. Parti "Explode*" ereditano questo.
+
+part.DecalEnabled = true
+part.DecalFace = 5          -- 0 Right, 1 Top, 2 Back, 3 Left, 4 Bottom, 5 Front
+part.DecalR / DecalG / DecalB
+part.DecalTransparency = 0
+part.HighlightEnabled = true
+part.HighlightR / HighlightG / HighlightB
+part.SelectionBox = true
+part.SelectionSphere = true
+part.DragDetector = true   -- in Play il clic la trascina sul piano della camera
+Models.SetDragDetector("Casa", true)  -- cliccare una part sposta tutto il Model
+
+In Studio: seleziona il Model (Ctrl+G) e Inserisci > Part > DragDetector,
+oppure spunta DragDetector nelle proprieta' del Model.
+
+Oppure, come in Studio:
+  local d = Instance.new("Decal")
+  d.Face = "Front"          -- Right Top Back Left Bottom Front
+  d.Color3 = Color3.new(1, 0.2, 0.1)
+  d.Transparency = 0
+  d.Parent = part
+  local h = Instance.new("Highlight")
+  h.FillColor = Color3.new(1, 0.8, 0.2)
+  h.Parent = part
+  Instance.new("SelectionBox").Parent = part
+  Instance.new("SelectionSphere").Parent = part
+  Instance.new("DragDetector").Parent = part
+
+Lighting (si vedono sull'immagine):
+  local cc = Instance.new("ColorCorrectionEffect")
+  cc.Brightness = 0.1
+  cc.Contrast = 0.2
+  cc.Saturation = -0.3
+  cc.TintColor = Color3.new(1, 0.9, 0.8)
+  cc.Parent = game:GetService("Lighting")
+  local bloom = Instance.new("BloomEffect")
+  bloom.Intensity = 1.4
+  bloom.Threshold = 0.7
+  bloom.Parent = game:GetService("Lighting")
+  local blur = Instance.new("BlurEffect")
+  blur.Size = 12
+  blur.Parent = game:GetService("Lighting")
+  local dof = Instance.new("DepthOfFieldEffect")
+  dof.FarIntensity = 0.5     -- sfocatura morbida di tutto il quadro
+  dof.Parent = game:GetService("Lighting")
+  local rays = Instance.new("SunRaysEffect")
+  rays.Intensity = 0.4
+  rays.Spread = 1
+  rays.Parent = game:GetService("Lighting")
+
+In Studio: Inserisci > Part > Decal / Highlight / SelectionBox / DragDetector
+sulla part selezionata. Atmosfera nel menu apre anche ColorCorrection, Bloom, Blur e DoF.
+Lighting > Realistico: sole bianco di pomeriggio, ombre chiare, i colori delle part restano i loro.
+
+Texture (righe sulla faccia, si salva sulla part):
+  part.TextureEnabled = true
+  part.TextureFace = 5
+  part.TextureStuds = 4
+  part.TextureR, part.TextureG, part.TextureB = 0.9
+
+Beam e Trail (si vedono):
+  local a0 = Instance.new("Attachment", partA)
+  a0.Position = Vector3.new(0, 1, 0)
+  local a1 = Instance.new("Attachment", partB)
+  local beam = Instance.new("Beam")
+  beam.Attachment0 = a0
+  beam.Attachment1 = a1
+  beam.Width0 = 0.3
+  beam.Color = Color3.new(0.3, 0.8, 1)
+  local trail = Instance.new("Trail", partA)
+  trail.Lifetime = 0.8
+  trail.Color = Color3.new(1, 0.6, 0.2)
+
+ParticleEmitter:
+  local pe = Instance.new("ParticleEmitter", part)
+  pe.Rate = 12
+  pe.Speed = NumberRange.new(2, 6)    -- anche un numero
+  pe.Lifetime = 0.8
+  pe.Size = 0.4
+  pe.SpreadAngle = Vector2.new(0, 40) -- gradi. 0 = dritto in su
+  pe.Drag = 2
+  pe.Acceleration = Vector3.new(0, -20, 0)  -- conta la Y
+  pe.Color = Color3.new(1, 0.4, 0.1)
+  pe:Emit(8)
+
+Seat: part.Seat = true. In Play ci si siede camminandoci sopra. Il salto fa alzare.
+
+Vincoli (seleziona 2 part, menu vincoli):
+  BallSocketConstraint, PrismaticConstraint, CylindricalConstraint,
+  NoCollisionConstraint, AlignPosition, AlignOrientation,
+  LinearVelocity, AngularVelocity, VectorForce, Torque
+  La linea fra le due part si vede.
+
+Vestiti sul personaggio:
+  local s = Instance.new("Shirt")
+  s.Color3 = Color3.new(0.8, 0.1, 0.1)
+  local p = Instance.new("Pants")
+  p.Color3 = Color3.fromRGB(20, 40, 160)
+  local h = Instance.new("Hat")
+  h.Color3 = Color3.new(0.9, 0.8, 0.2)
+  local bc = Instance.new("BodyColors")
+  bc.HeadColor = Color3.new(1, 0.8, 0.6)
+
+Camera staccata dal giocatore:
+  workspace.CurrentCamera.CameraType = "Scriptable"
+  workspace.CurrentCamera.CFrame = CFrame.lookAt(Vector3.new(0, 20, 30), Vector3.new(0, 2, 0))
+
+Account: il nome con cui entri nel menu e' Players.LocalPlayer.Name, DisplayName e UserId.
+I soldi sono i B$ del portafoglio, non un pagamento vero.
+
+Marketplace (si salva sul telefono):
+  game:GetService("MarketplaceService"):Register(10, "Spada VIP", 50, "GamePass")
+  MarketplaceService:PromptGamePassPurchase(game.Players.LocalPlayer, 10)
+  MarketplaceService:UserOwnsGamePassAsync(player.UserId, 10)
+  MarketplaceService:GetProductInfo(10)
+  MarketplaceService:GetBalance()
+  MarketplaceService:PromptProductPurchase(player, 11)
+  MarketplaceService.ProcessReceipt = function(receipt) end
+In Play compare Compra / Annulla. In Studio: menu Account, Marketplace, Gruppi.
+
+Gruppi:
+  local id = game:GetService("GroupService"):CreateGroup("Amici")
+  GroupService:Join(id)
+  GroupService:Leave(id)
+  GroupService:GetRankInGroup(id)          -- 255 se l'hai creato, 1 se sei entrato, 0 se no
+  GroupService:GetGroupInfoAsync(id)
+  game.Players.LocalPlayer:IsInGroup(id)
+  game.Players.LocalPlayer:GetRankInGroup(id)
+
+Prompt, Beam, Trail, Attachment e Tag si salvano nel posto.
+Il server dedicato, quando apre quel file, li accende come il telefono.
+
+Decal e Texture con un'immagine (PNG dei materiali): brick, wood, metal, concrete,
+grass, fabric, marble, sand, slate, diamondplate, granite, asphalt, corrodedmetal.
+  part.DecalEnabled = true
+  part.DecalImage = "brick"
+  part.TextureEnabled = true
+  part.TextureImage = "wood"
+  part:AddDecal(1, "fabric")   -- fino a 4 facce in piu'
+
+Acqua: material Water. Ci si nuota (Spazio sale, S scende). Le part con Density < 1 galleggiano.
+Scala: part.Ladder = true. W sale, S scende, il salto stacca. Lo stato e' Climbing.
+Spawn: part.SpawnPoint = true, oppure nome SpawnLocation. SpawnTeam = "Rossi" solo per quel Team.
+  part.Material = "Water"
+
+Vestiti anche sull'NPC (il parent e' l'attore):
+  local shirt = Instance.new("Shirt", npc)
+  shirt.Color3 = Color3.new(0.8, 0.1, 0.1)
+
+SurfaceGui e' un rettangolo sulla faccia davanti, con il testo sopra. BillboardGui resta sopra la part.
+
+Prompt: in Play, sull'oggetto, il tasto nel quadrato e l'azione a fianco (come Roblox).
+Piu' prompt vicini si vedono insieme. HoldDuration > 0: tieni premuto, l'anello si chiude.
+Il prompt si puo' mettere sulla part prima che lei sia nel mondo (carbone, casse): si accende quando la part entra.
+  local pr = Instance.new("ProximityPrompt", part)
+  pr.ActionText = "Open"
+  pr.ObjectText = "Door"
+  pr.KeyboardKeyCode = "E"
+  pr.HoldDuration = 0
+  pr.MaxActivationDistance = 10
+  pr.Triggered:Connect(function() end)
+
+In Studio: ProximityPrompt, preset E Open / E Sit / F Pick up / E Talk / Tieni E Open.
+
+ClickDetector: il mirino sulla part scrive "Clic". MaxActivationDistance e' la distanza.
+
+Model: proprieta' Pivot Offset sposta solo il pivot.
+  Models.SetDragDetector("Casa", true)
+
+SurfaceGui sta sulla faccia della part. BillboardGui sta sopra.
+Il terreno ha il pennello (anche solo sul piano) in Modello > Terreno.
 
 ================================================================================
 PARTICLES
@@ -64,9 +547,13 @@ WORKSPACE / GAME
 workspace | game.Workspace
 workspace:Add({ Name, Position, Size, Color, Material, ... }) → Part live
 workspace:FindFirstChild(name) → Part live | nil
+part:FindFirstChild("Fire")  -- anche Smoke, Sparkles, Attachment, Trail, ClickDetector
+part:FindFirstChildOfClass("Fire")
+part:GetChildren()            -- le Part figlie e quegli oggetti, gli stessi del +
 workspace:GetChildren() → lista Part
 workspace:SetPartPosition(name, Vector3|x,y,z)
 workspace:Raycast(origin, direction, maxDist?) → {Instance, Position, Distance}|nil
+  -- un Tool equipaggiato non ferma il raggio (i pezzi sono in mano). A terra, si.
 
 game:GetService("RunService"|"SoundService"|"Particles"|"Players"|"Workspace")
 game.RunService.Heartbeat:Connect(function(dt) ... end)
@@ -172,13 +659,74 @@ Humanoid.SetJumpPower(60)
 Humanoid.SetJumpEnabled(true)
 
 ================================================================================
+DEV — kit di Blocky, non e' un servizio di Roblox
+================================================================================
+local Dev = game:GetService("Dev")
+
+Controlli e albero:
+  Dev:Check(tabella, { hp = "number", nome = "string?" })  → true, oppure false + motivo
+  Dev:Expect(valore, "Vector3")
+  Dev:Dump(istanza, profondita)   Dev:Path(radice, "A/B")
+  Dev:Find(radice, function(o) return o.Name == "Porta" end)
+  Dev:Diff(prima, dopo)   Dev:Clone(tabella)   Dev:Benchmark(nome, fn, volte)
+  Dev:Trace(...)  Dev:Lines()  Dev:WarnOnce(chiave, testo)
+  Dev:Watch(obj, "Hp"):Poll()   Dev:Retry(volte, fn)
+  Dev:FormattaTempo(secondi)  Dev:FormattaByte(n)  Dev:FormattaNumero(n, decimali)
+
+Stati e tempi (li fai avanzare tu con Tick o Update, non da soli):
+  local m = Dev:Machine("Idle")
+  m:Add("Run", { Enter = function(self) end, Update = function(self, dt) end })
+  m:Go("Run")  m:Update(dt)  m:Is("Run")  m.Changed
+  Dev:Cooldown()  :Set(nome, secondi) :Ready :Use :Tick(dt)
+  Dev:Pool(function() return {} end)  :Get :Release
+  Dev:Timer(secondi, fn, ripete) :Start :Tick(dt)
+  Dev:Stopwatch() :Start :Stop :Elapsed :Lap
+  Dev:Bus() :On :Once :Emit
+  Dev:Sequence() :Add :Tick
+  Dev:Board() :Set :Get   (Changed)
+  Dev:Jobs() :Every(nome, secondi, fn) :Tick(dt)
+  Dev:Latch() :Arm   Dev:Queue() :After(secondi, fn) :Tick(dt)
+  Dev:Commands() :Do({ esegui = fn, annulla = fn }) :Undo :Redo
+
+Numeri, colori, spazio (la box ignora la rotazione della Part):
+  Dev:Ease("Quad", "Out", t)     -- Linear Quad Cubic Quart Quint Sine Expo Circ Back Elastic Bounce
+  Dev:Lerp  Dev:Map  Dev:Clamp  Dev:Wrap  Dev:Round  Dev:Approach
+  Dev:Contains(part, punto)  Dev:Bounds({ part, ... })
+  Dev:Closest(origine, parti)  Dev:InRadius(origine, raggio, parti)
+  Dev:CastBox(origine, direzione, distanza, parti)  -- solo sulla lista, non sul mondo
+  Dev:Grid(cella) :Add(pos, dato) :Query(pos, raggio)
+  Dev:Spring(k, smorz, x) :Step(dt, bersaglio)
+  Dev:LerpColor(a, b, t)  Dev:ToHSV(c)  Dev:FromHSV(h, s, v)
+  Dev:Bezier(p0, p1, p2, p3, t)  Dev:LookFlat(da, a)  -- gradi di yaw
+  Dev:Curve() :Add(t, numero) :Eval(t)
+  Dev:Track() :Key(t, valore, "Quad") :Eval(t)   -- numero o Vector3, la chiami tu
+  Dev:Noise(x, y, seme)  Dev:NoiseOctave(x, y, ottave, seme)
+  Dev:Seed(n) Dev:Rand() Dev:RandInt(lo, hi)
+  Dev:Palette() :Add(nome, colore) :Lerp(a, b, t)
+
+Tabelle:
+  Dev:Filter Dev:Map Dev:Reduce Dev:Group Dev:Unique Dev:Zip
+  Dev:Shuffle(lista) Dev:Pick(lista) Dev:Weighted({ { peso = 3, valore = "a" } })
+  Dev:Bisect(listaOrdinata, valore) Dev:SortBy(lista, fn) Dev:Merge(base, sopra)
+  Dev:Ring(cap) :Push :Get :Last
+  Dev:Slots(n) :Put :Take :Swap
+
+Percorso su celle intere (1..w, 1..h). Non e' PathfindingService:
+  local g = Dev:PathGrid(larghezza, altezza, ottoVicini)
+  g:Block(x, y)  g:Cost(x, y, costo)
+  local path = g:Find(x0, y0, x1, y1)   -- { {x,y}, ... } oppure nil
+  g:Smooth(path)  g:Length(path)
+
+TweenService resta il modo per animare una proprieta' da sola.
+Il raggio sul mondo resta workspace:Raycast.
+
+================================================================================
 ERRORI TIPICI
 ================================================================================
 NO  part.Emissive = true           → SI  part.Emissive = 1
 NO  part:Explode() poi :Destroy()  → Explode basta
 NO  humanoid = script.Parent       → Humanoid globale
-NO  TextLabel / ScreenGui          → usa Label 3D in Studio (no API Lua ancora)
-NO  TweenService / DataStore       → non esistono
+NO  inventare una classe che questo file non elenca
 NO  inventare API Roblox           → solo quello in QUESTO file
 ================================================================================
 PER CHI AGGIORNA IL MOTORE

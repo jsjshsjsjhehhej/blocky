@@ -51,6 +51,9 @@ struct HumanoidPartDef {
     // Quanto comandano le animazioni degli script (AnimationTrack) su questa
     // parte: 0 = camminata/salto procedurali del motore, 1 = solo animazione.
     float animWeight = 0.f;
+    // La posa in anim viene dalle animazioni di base R6 (DefaultR6Animate),
+    // non da uno script: gli script ci si mescolano sopra invece di toglierla.
+    bool animFromDefault = false;
 };
 
 // Posa di una parte R6 mentre un item del Backpack e tenuto.
@@ -101,6 +104,22 @@ struct Humanoid {
 
     float velocityY = 0.f;
     bool  grounded  = true;
+    bool  seated = false;
+    int   seatPart = -1;      // su quale Seat (indice della part), -1 = nessuno
+    bool  climbing = false;
+    bool  swimming = false;
+    bool  flying = false;
+    bool  ragdoll = false;
+    // 0 automatico, 1 volo, 2 nuoto chiesto dallo script, 3 ragdoll chiesto dallo script.
+    int   scriptPose = 0;
+    bool  swimEnabled = true;
+    bool  flyEnabled = true;
+    bool  shirtOn = false;
+    bool  pantsOn = false;
+    bool  hatOn = false;
+    glm::vec3 shirtColor{0.85f, 0.15f, 0.18f};
+    glm::vec3 pantsColor{0.15f, 0.25f, 0.75f};
+    glm::vec3 hatColor{0.9f, 0.75f, 0.15f};
     // Per eventi script: ultima salute nota / stato (Running, Jumping, Freefall, Dead).
     float lastEmittedHealth = 100.f;
     bool lastEmittedDead = false;
@@ -108,6 +127,9 @@ struct Humanoid {
     float jumpArmBlend = 0.f;
     bool poseIsJump = false;
     float jumpAnimTime = 0.f;
+    // Le animazioni di base R6 (DefaultR6Animate) comandano il corpo: niente
+    // rimbalzo procedurale della camminata (le R6 non ce l'hanno).
+    bool defaultAnimActive = false;
 
     float healthPct() const {
         if (maxHealth <= 1e-4f) return 0.f;
@@ -141,6 +163,12 @@ struct Humanoid {
         health = maxHealth;
         velocityY = 0.f;
         grounded = true;
+        seated = false;
+        climbing = false;
+        swimming = false;
+        flying = false;
+        ragdoll = false;
+        scriptPose = 0;
         lastEmittedHealth = health;
         lastEmittedDead = false;
         lastEmittedState = "Running";
@@ -148,6 +176,12 @@ struct Humanoid {
 
     const char* getState() const {
         if (dead) return "Dead";
+        if (ragdoll || scriptPose == 3) return "Ragdoll";
+        if (flying || scriptPose == 1) return "Flying";
+        if (scriptPose == 2 && swimEnabled) return "Swimming";
+        if (climbing) return "Climbing";
+        if (swimming && swimEnabled) return "Swimming";
+        if (seated && grounded) return "Seated";
         if (!grounded) {
             if (velocityY > 2.f) return "Jumping";
             return "Freefall";

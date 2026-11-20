@@ -128,7 +128,7 @@ struct OrbitCamera {
     }
 
     void zoom(float steps) {
-        distance = std::clamp(distance * std::pow(0.88f, steps), 1.5f, 400.f);
+        distance = std::clamp(distance * std::pow(0.88f, steps), 0.01f, 400.f);
     }
 
     void pan(float dx, float dy) {
@@ -259,7 +259,12 @@ struct Viewport {
     }
 
     float aspect() const { return height > 0 ? (float)width / (float)height : 1.f; }
-    glm::mat4 projection() const { return glm::perspective(fovY, aspect(), 0.08f, 2000.f); }
+    glm::mat4 projection() const {
+        const float dist = camera.distance;
+        const float zNear = std::clamp(dist * 0.002f, 0.0008f, 0.12f);
+        const float zFar = std::clamp(dist * 80.f, 40.f, 2000.f);
+        return glm::perspective(fovY, aspect(), zNear, zFar);
+    }
     glm::mat4 viewProjection() const { return projection() * camera.view(); }
 
 
@@ -309,12 +314,17 @@ struct Viewport {
         lightPos.clear();
         lightCol.clear();
         lightRange.clear();
+        lightDir.clear();
+        lightAngle.clear();
 
         for (const WorkspacePart& p : world.parts) {
             if (!p.pointLight || lightPos.size() >= 8) continue;
             lightPos.push_back(p.position);
             lightCol.push_back(p.color * p.lightBrightness);
             lightRange.push_back(p.lightRange);
+            const int kind = (int)std::lround(p.lightKind);
+            lightDir.push_back((kind == 1 || kind == 2) ? partLightDirection(p) : glm::vec3(0.f, -1.f, 0.f));
+            lightAngle.push_back((kind == 1 || kind == 2) ? std::clamp(p.lightAngle, 1.f, 180.f) : 0.f);
         }
     }
 
@@ -325,6 +335,10 @@ struct Viewport {
             glUniform3fv(glGetUniformLocation(prog, "uLightPos"), n, glm::value_ptr(lightPos[0]));
             glUniform3fv(glGetUniformLocation(prog, "uLightCol"), n, glm::value_ptr(lightCol[0]));
             glUniform1fv(glGetUniformLocation(prog, "uLightRange"), n, lightRange.data());
+            if (!lightDir.empty())
+                glUniform3fv(glGetUniformLocation(prog, "uLightDir"), n, glm::value_ptr(lightDir[0]));
+            if (!lightAngle.empty())
+                glUniform1fv(glGetUniformLocation(prog, "uLightAngle"), n, lightAngle.data());
         }
         glUniform1f(glGetUniformLocation(prog, "uNight"), frameNight);
         glUniform3fv(glGetUniformLocation(prog, "uSunColor"), 1, glm::value_ptr(frameSunColor));
@@ -509,6 +523,8 @@ struct Viewport {
 private:
     std::vector<glm::vec3> lightPos, lightCol;
     std::vector<float> lightRange;
+    std::vector<glm::vec3> lightDir;
+    std::vector<float> lightAngle;
 
     void bindAndDraw(GLuint vao, int count) {
         if (!vao || count <= 0) return;

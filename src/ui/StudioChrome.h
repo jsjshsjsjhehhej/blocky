@@ -7,6 +7,7 @@
  */
 
 #include <imgui.h>
+#include "studio/StudioTheme.h"
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
@@ -26,17 +27,18 @@ inline constexpr ImVec4 kPlayGreen = {0.18f, 0.62f, 0.32f, 1.f};
 inline constexpr ImVec4 kStopRed   = {0.78f, 0.22f, 0.18f, 1.f};
 
 inline void pushDockPanelColors() {
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgPanel);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, kBgDeep);
-    ImGui::PushStyleColor(ImGuiCol_Text, kText);
-    ImGui::PushStyleColor(ImGuiCol_TextDisabled, kTextDim);
-    ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
+    const studio_theme::Palette& th = studio_theme::pal();   // Scuro o Chiaro (Visualizza > Tema)
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, th.panelBg);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, th.panelDeep);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text);
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled, th.textDim);
+    ImGui::PushStyleColor(ImGuiCol_Border, th.border);
     ImGui::PushStyleColor(ImGuiCol_Header, kSelectSoft);
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, {0.00f, 0.47f, 0.83f, 0.65f});
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, kSelect);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, {0.24f, 0.24f, 0.26f, 1.f});
-    ImGui::PushStyleColor(ImGuiCol_TitleBg, kBgDeep);
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, kBgDeep);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, th.frameBg);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, th.panelDeep);
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, th.panelDeep);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.f);
@@ -49,11 +51,11 @@ inline void popDockPanelColors() {
 }
 
 inline void pushRibbonColors() {
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgDeep);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, studio_theme::pal().panelDeep);
     ImGui::PushStyleColor(ImGuiCol_Button, {0.28f, 0.28f, 0.30f, 1.f});
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.36f, 0.36f, 0.38f, 1.f});
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, kSelect);
-    ImGui::PushStyleColor(ImGuiCol_Text, kText);
+    ImGui::PushStyleColor(ImGuiCol_Text, studio_theme::pal().text);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.f, 4.f});
@@ -71,7 +73,7 @@ inline void drawClassNameBanner(const char* className, const char* instanceName)
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x;
     float h = 52.f;
-    dl->AddRectFilled(p, {p.x + w, p.y + h}, IM_COL32(36, 36, 38, 255));
+    dl->AddRectFilled(p, {p.x + w, p.y + h}, studio_theme::pal().bannerBg);
     dl->AddRectFilled(p, {p.x + 3.f, p.y + h}, IM_COL32(0, 120, 212, 255));
     ImGui::Dummy({0, 6});
     ImGui::Indent(10.f);

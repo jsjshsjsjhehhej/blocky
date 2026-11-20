@@ -4,7 +4,9 @@
 // main.cpp (g_world, g_selectedLabel, g_labelDrag*, ecc.). Compila solo se
 // incluso da main.cpp esattamente in questo punto.
 
+#include <array>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 static bool worldToScreen(const glm::vec3& world, float& outX, float& outY) {
@@ -62,7 +64,14 @@ static void labelAutoTextSize(const WorkspaceLabel& l, float& tw, float& th) {
     th = ts.y + padY * 2.f;
 }
 
+static void uiLabelRect(const WorkspaceLabel& l, float& x0, float& y0, float& w, float& h, int depth = 0);
+
 static void labelBoxSize(const WorkspaceLabel& l, float& w, float& h) {
+    if (l.uiLayout) {   // GUI in stile Roblox: misura vera, anche 0 (Frame vuoti)
+        float x0 = 0.f, y0 = 0.f;
+        uiLabelRect(l, x0, y0, w, h);
+        return;
+    }
     float aw = 0.f, ah = 0.f;
     labelAutoTextSize(l, aw, ah);
     w = (l.sizeW > 1.f) ? l.sizeW : aw;
@@ -72,18 +81,71 @@ static void labelBoxSize(const WorkspaceLabel& l, float& w, float& h) {
 }
 
 static void labelCenter(const WorkspaceLabel& l, float& cx, float& cy) {
+    if (l.uiLayout) {
+        float x0 = 0.f, y0 = 0.f, w = 0.f, h = 0.f;
+        uiLabelRect(l, x0, y0, w, h);
+        cx = x0 + w * 0.5f;
+        cy = y0 + h * 0.5f;
+        return;
+    }
     cx = l.anchorX * (float)g_w + l.offsetX;
     cy = l.anchorY * (float)g_h + l.offsetY;
 }
 
+/**
+ * GUI in stile Roblox: si vede solo se lei e tutti i Frame sopra di lei sono
+ * Visible, e in cima c'e' una ScreenGui accesa messa in PlayerGui / StarterGui.
+ */
+static bool uiLabelShown(const WorkspaceLabel& l) {
+    const WorkspaceLabel* cur = &l;
+    for (int guard = 0; cur && guard < 64; ++guard) {
+        if (!cur->visible) return false;
+        if (cur->className == "ScreenGui") return cur->uiAttached;
+        if (cur->parentIndex < 0 || cur->parentIndex >= (int)g_world.labels.size()) return false;
+        cur = &g_world.labels[(size_t)cur->parentIndex];
+    }
+    return false;
+}
+
 static bool screenLabelRect(const WorkspaceLabel& l, ImVec2& outMin, ImVec2& outMax) {
     if (!l.visible) return false;
+    if (l.uiLayout && (l.className == "ScreenGui" || !uiLabelShown(l))) return false;
     float w = 0.f, h = 0.f, cx = 0.f, cy = 0.f;
     labelBoxSize(l, w, h);
     labelCenter(l, cx, cy);
     outMin = { cx - w * 0.5f, cy - h * 0.5f };
     outMax = { cx + w * 0.5f, cy + h * 0.5f };
     return true;
+}
+
+/**
+ * Rettangolo di una GUI in stile Roblox, in pixel dello schermo: si parte dal
+ * rettangolo del genitore (lo schermo, o il Frame padre) e si applicano
+ *   misura   = genitore * Size.Scale + Size.Offset
+ *   angolo   = genitore.origine + genitore * Position.Scale + Position.Offset - AnchorPoint * misura
+ * come fa Roblox.
+ */
+static void uiLabelRect(const WorkspaceLabel& l, float& x0, float& y0, float& w, float& h, int depth) {
+    float px = 0.f, py = 0.f, pw = (float)g_w, ph = (float)g_h;
+    if (depth < 32 && l.parentIndex >= 0 && l.parentIndex < (int)g_world.labels.size()) {
+        const WorkspaceLabel& p = g_world.labels[(size_t)l.parentIndex];
+        if (p.uiLayout) {
+            uiLabelRect(p, px, py, pw, ph, depth + 1);
+        } else {
+            ImVec2 mn, mx;
+            if (screenLabelRect(p, mn, mx)) { px = mn.x; py = mn.y; pw = mx.x - mn.x; ph = mx.y - mn.y; }
+        }
+    }
+    if (l.className == "ScreenGui" && !l.ignoreGuiInset) {
+        // Come Roblox: sotto la barra in alto (GuiInset 36 px), salvo IgnoreGuiInset.
+        constexpr float kGuiInset = 36.f;
+        py += kGuiInset;
+        ph = std::max(0.f, ph - kGuiInset);
+    }
+    w = std::max(0.f, pw * l.sizeScaleX + l.sizeW);
+    h = std::max(0.f, ph * l.sizeScaleY + l.sizeH);
+    x0 = px + pw * l.anchorX + l.offsetX - l.anchorPointX * w;
+    y0 = py + ph * l.anchorY + l.offsetY - l.anchorPointY * h;
 }
 
 static void labelCornerPos(const ImVec2& mn, const ImVec2& mx, int corner, float& x, float& y) {
@@ -207,8 +269,13 @@ static void drawScreenUiLabel(const WorkspaceLabel& l, bool selected) {
         ImU32 bgCol = IM_COL32((int)(bg.x * 255), (int)(bg.y * 255),
                                (int)(bg.z * 255), (int)(bgA * 255));
         float round = isBtn ? 4.f : 3.f;
+        if (l.uiLayout) {
+            // Stile Roblox: angoli dritti e bordo sottile scuro (BorderColor3 di Studio).
+            dl->AddRectFilled(boxMin, boxMax, bgCol, 0.f);
+            dl->AddRect(boxMin, boxMax, IM_COL32(27, 42, 53, (int)(bgA * 255)), 0.f, 0, 1.f);
+        } else
         dl->AddRectFilled(boxMin, boxMax, bgCol, round);
-        if (isBtn) {
+        if (isBtn && !l.uiLayout) {
             ImU32 border = (g_uiPressedLabel == selfIdx)
                 ? IM_COL32(20, 20, 20, 220)
                 : IM_COL32(255, 255, 255, 90);
@@ -226,7 +293,8 @@ static void drawScreenUiLabel(const WorkspaceLabel& l, bool selected) {
     ImU32 col = IM_COL32((int)(l.color.x * 255), (int)(l.color.y * 255),
                          (int)(l.color.z * 255), 255);
     ImVec2 tp{cx - textSize.x * 0.5f, cy - textSize.y * 0.5f};
-    drawOutlinedText(dl, font, fs, tp, col, text);
+    if (l.uiLayout) dl->AddText(font, fs, tp, col, text);   // Roblox: niente contorno (TextStroke spento)
+    else drawOutlinedText(dl, font, fs, tp, col, text);
 
     if (selected && !g_studioTesting) {
         for (int c = 0; c < 4; ++c) {
@@ -262,7 +330,7 @@ static void fireGuiButton(int idx) {
     if (!l.isButton() || !l.visible) return;
     scriptControls().lastGuiButton = l.name;
     if (g_lua.ok)
-        g_lua.fireGuiButtonActivated(l.name);
+        g_lua.fireGuiButtonIndex(idx);
     g_exportMsg = std::string("TextButton cliccato: ") + l.name;
 }
 
@@ -279,14 +347,16 @@ static void applyUiListLayouts() {
     for (int fi = 0; fi < (int)g_world.labels.size(); ++fi) {
         const auto& frame = g_world.labels[fi];
         if (!frame.isFrame() || !frame.visible) continue;
-        bool hasList = false;
+        const WorkspaceLabel* list = nullptr;
         for (const auto& l : g_world.labels) {
             if (l.parentIndex == fi && l.className == "UIListLayout") {
-                hasList = true;
+                list = &l;
                 break;
             }
         }
-        if (!hasList) continue;
+        if (!list) continue;
+        const float listPad = list->sizeW;   // UIListLayout.Padding (pixel)
+        const bool horizontal = list->listFill == 0;
         ImVec2 fmn, fmx;
         if (!screenLabelRect(frame, fmn, fmx)) continue;
         std::vector<int> kids;
@@ -300,8 +370,27 @@ static void applyUiListLayouts() {
         });
         float y = fmn.y + 4.f - (frame.className == "ScrollingFrame" ? frame.scrollY : 0.f);
         const float pad = 4.f;
+        float yUi = -(frame.className == "ScrollingFrame" ? frame.scrollY : 0.f);   // stile Roblox: da 0, Padding tra gli elementi
+        float xUi = 0.f;
         for (int idx : kids) {
             auto& c = g_world.labels[idx];
+            if (c.uiLayout) {
+                // Stile Roblox: la misura resta quella dello script, si impila nel Frame.
+                float x0 = 0.f, y0 = 0.f, cw = 0.f, ch = 0.f;
+                uiLabelRect(c, x0, y0, cw, ch);
+                c.anchorX = c.anchorY = 0.f;
+                c.anchorPointX = c.anchorPointY = 0.f;
+                if (horizontal) {
+                    c.offsetX = xUi;
+                    c.offsetY = 0.f;
+                    xUi += cw + listPad;
+                } else {
+                    c.offsetX = 0.f;
+                    c.offsetY = yUi;
+                    yUi += ch + listPad;
+                }
+                continue;
+            }
             float cw = 0.f, ch = 0.f;
             labelBoxSize(c, cw, ch);
             if (cw < 1.f) cw = (fmx.x - fmn.x) - 8.f;
@@ -311,10 +400,167 @@ static void applyUiListLayouts() {
             c.anchorX = 0.f;
             c.anchorY = 0.f;
             // offset = centro schermo (labelCenter = anchor*res + offset)
-            c.offsetX = fmn.x + 4.f + cw * 0.5f;
-            c.offsetY = y + ch * 0.5f;
-            y += ch + pad;
+            if (horizontal) {
+                c.offsetX = fmn.x + 4.f + xUi + cw * 0.5f;
+                c.offsetY = fmn.y + 4.f + ch * 0.5f;
+                xUi += cw + pad;
+            } else {
+                c.offsetX = fmn.x + 4.f + cw * 0.5f;
+                c.offsetY = y + ch * 0.5f;
+                y += ch + pad;
+            }
         }
+    }
+}
+
+// ---- GUI in stile Roblox (Instance.new("Frame" / "TextLabel" / ...)) ----
+
+/** Disegna una label uiLayout: sfondo, UICorner, UIStroke, testo con TextScaled / TextWrapped / allineamento. */
+static void drawRobloxGuiLabel(int idx) {
+    const WorkspaceLabel& l = g_world.labels[(size_t)idx];
+    if (l.className == "ScreenGui") return;
+    ImVec2 mn, mx;
+    if (!screenLabelRect(l, mn, mx)) return;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const float w = mx.x - mn.x, h = mx.y - mn.y;
+    const WorkspaceLabel* corner = nullptr;
+    const WorkspaceLabel* stroke = nullptr;
+    for (const auto& c : g_world.labels) {
+        if (c.parentIndex != idx) continue;
+        if (c.className == "UICorner") corner = &c;
+        else if (c.className == "UIStroke") stroke = &c;
+    }
+    const float round = corner ? std::clamp(std::min(w, h) * corner->sizeScaleX + corner->sizeW, 0.f, std::min(w, h) * 0.5f) : 0.f;
+
+    // Sfondo; i bottoni si scuriscono / schiariscono come AutoButtonColor.
+    glm::vec3 bg = l.bgColor;
+    if (l.isButton()) {
+        if (g_uiPressedLabel == idx) bg *= 0.72f;
+        else if (g_uiHoverLabel == idx) bg = glm::clamp(bg * 1.12f + glm::vec3(0.05f), glm::vec3(0.f), glm::vec3(1.f));
+    }
+    const float bgA = std::clamp(1.f - l.bgTransparency, 0.f, 1.f);
+    if (bgA > 0.001f)
+        dl->AddRectFilled(mn, mx, IM_COL32((int)(bg.x * 255), (int)(bg.y * 255), (int)(bg.z * 255), (int)(bgA * 255)), round);
+    if ((l.className == "ImageLabel" || l.className == "ImageButton") && !l.image.empty()) {
+        const float ia = std::clamp(1.f - l.imageTransparency, 0.f, 1.f);
+        if (ia > 0.001f)
+            dl->AddRectFilled(mn, mx, IM_COL32((int)(l.imageColor.x * 255), (int)(l.imageColor.y * 255),
+                                               (int)(l.imageColor.z * 255), (int)(ia * 255)), round);
+    }
+
+    const bool textual = l.className == "TextLabel" || l.className == "TextButton" || l.className == "TextBox";
+    const bool strokeOnText = stroke && textual && stroke->anchorPointX < 0.5f;   // ApplyStrokeMode Contextual
+    if (stroke && !strokeOnText && stroke->sizeW > 0.f) {
+        const float sa = std::clamp(1.f - stroke->bgTransparency, 0.f, 1.f);
+        dl->AddRect(mn, mx, IM_COL32((int)(stroke->color.x * 255), (int)(stroke->color.y * 255), (int)(stroke->color.z * 255),
+                                     (int)(sa * 255)), round, 0, stroke->sizeW);
+    } else if (!stroke && !corner && bgA > 0.001f) {
+        dl->AddRect(mn, mx, IM_COL32(27, 42, 53, (int)(bgA * 255)), 0.f, 0, 1.f);   // BorderColor3 di Studio
+    }
+
+    if (l.text.empty()) return;
+    ImFont* font = ImGui::GetFont();
+    const char* text = l.text.c_str();
+    const float wrapW = l.textWrapped ? std::max(1.f, w - 4.f) : 0.f;
+    float fs = ImGui::GetFontSize() * std::clamp(l.fontScale, 0.3f, 6.f);
+    if (l.textScaled && h > 1.f && w > 1.f) {
+        // TextScaled: il piu' grande che sta nel riquadro.
+        fs = h * 0.82f;
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrapW, text);
+        if (ts.x > w * 0.96f && !l.textWrapped) fs *= (w * 0.96f) / ts.x;
+        if (l.textWrapped && ts.y > h * 0.96f) fs *= std::sqrt((h * 0.96f) / ts.y);
+        fs = std::max(fs, 4.f);
+    }
+    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrapW, text);
+    const float tx = l.textAlignX == 0 ? mn.x + 2.f : l.textAlignX == 2 ? mx.x - ts.x - 2.f : (mn.x + mx.x - ts.x) * 0.5f;
+    const float ty = l.textAlignY == 0 ? mn.y + 1.f : l.textAlignY == 2 ? mx.y - ts.y - 1.f : (mn.y + mx.y - ts.y) * 0.5f;
+    const ImU32 col = IM_COL32((int)(l.color.x * 255), (int)(l.color.y * 255), (int)(l.color.z * 255), 255);
+    if (strokeOnText && stroke->sizeW > 0.f) {
+        const ImU32 sc = IM_COL32((int)(stroke->color.x * 255), (int)(stroke->color.y * 255), (int)(stroke->color.z * 255),
+                                  (int)(std::clamp(1.f - stroke->bgTransparency, 0.f, 1.f) * 255));
+        static const float ox[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        static const float oy[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        for (int k = 0; k < 8; ++k)
+            dl->AddText(font, fs, {tx + ox[k] * stroke->sizeW, ty + oy[k] * stroke->sizeW}, sc, text, nullptr, wrapW);
+    }
+    dl->AddText(font, fs, {tx, ty}, col, text, nullptr, wrapW);
+}
+
+/** Le GUI in stile Roblox: rettangoli assoluti (AbsolutePosition / AbsoluteSize) e disegno in ordine. */
+static void tickFocusedTextBox() {
+    const int idx = g_lua.guiTextFocus;
+    if (idx < 0 || idx >= (int)g_world.labels.size()) {
+        g_lua.guiTextFocus = -1;
+        return;
+    }
+    WorkspaceLabel& lab = g_world.labels[(size_t)idx];
+    if (lab.className != "TextBox") {
+        g_lua.guiTextFocus = -1;
+        return;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+    for (ImWchar ch : io.InputQueueCharacters) {
+        if (ch >= 32 && ch < 127 && lab.text.size() < 200)
+            lab.text.push_back((char)ch);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !lab.text.empty())
+        lab.text.pop_back();
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+        g_lua.fireGuiFocusLost(idx, true);
+        g_lua.guiTextFocus = -1;
+        return;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        g_lua.fireGuiFocusLost(idx, false);
+        g_lua.guiTextFocus = -1;
+    }
+}
+
+static void drawRobloxGuiLabels() {
+    tickFocusedTextBox();
+    static std::vector<int> order;
+    static std::vector<std::array<int, 4>> keys;
+    order.clear();
+    keys.clear();
+    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+        WorkspaceLabel& l = g_world.labels[(size_t)i];
+        if (!l.uiLayout || l.isLayout()) continue;
+        float x0 = 0.f, y0 = 0.f, w = 0.f, h = 0.f;
+        uiLabelRect(l, x0, y0, w, h);
+        l.absX = x0; l.absY = y0; l.absW = w; l.absH = h;
+        // Ordine: DisplayOrder della ScreenGui, poi i figli sopra i padri, poi ZIndex.
+        int depth = 0, rootOrder = 0;
+        const WorkspaceLabel* cur = &l;
+        for (int guard = 0; cur && guard < 64; ++guard) {
+            if (cur->className == "ScreenGui") { rootOrder = cur->zIndex; break; }
+            if (cur->parentIndex < 0 || cur->parentIndex >= (int)g_world.labels.size()) break;
+            cur = &g_world.labels[(size_t)cur->parentIndex];
+            ++depth;
+        }
+        order.push_back((int)keys.size());
+        keys.push_back({rootOrder, depth, l.zIndex, i});
+    }
+    std::sort(order.begin(), order.end(), [](int a, int b) { return keys[(size_t)a] < keys[(size_t)b]; });
+    for (int k : order) drawRobloxGuiLabel(keys[(size_t)k][3]);
+}
+
+/** Testo di un BillboardGui / SurfaceGui: quello del TextLabel figlio, non il nome della classe. */
+static void billboardContent(int idx, std::string& text, glm::vec3& color, float& fontScale) {
+    const WorkspaceLabel& l = g_world.labels[(size_t)idx];
+    text = l.text;
+    color = l.color;
+    fontScale = l.fontScale;
+    if (text == l.className || text == l.name) text.clear();
+    for (int i = 0; i < (int)g_world.labels.size(); ++i) {
+        const auto& c = g_world.labels[(size_t)i];
+        if (c.parentIndex != idx || !c.visible) continue;
+        if (c.className != "TextLabel" && c.className != "TextButton" && c.className != "TextBox") continue;
+        if (c.text.empty()) continue;
+        text = c.text;
+        color = c.color;
+        fontScale = c.textScaled ? 2.2f : std::max(c.fontScale, 1.f);
+        return;
     }
 }
 
@@ -323,18 +569,128 @@ static void drawWorldLabels() {
     for (int i = 0; i < (int)g_world.labels.size(); ++i) {
         auto& l = g_world.labels[i];
         if (l.isLayout()) continue;
-        if (l.isWorldGui() && l.adorneePart >= 0
-            && l.adorneePart < (int)g_world.parts.size() && l.visible) {
-            const auto& p = g_world.parts[l.adorneePart];
-            glm::vec3 top = p.position;
-            glm::vec3 upLocal(0, p.size.y * 0.5f + l.studsOffsetY, 0);
-            top += glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(upLocal, 0.f));
-            drawBillboardText(top, l.text.c_str(), l.color, l.fontScale,
-                              l.bgTransparency < 0.99f,
-                              i == g_selectedLabel && !g_studioTesting);
+        if (l.uiLayout) continue;   // le GUI in stile Roblox dopo, nel loro ordine (drawRobloxGuiLabels)
+        if (l.isWorldGui()) {
+            // Mai come scritta a schermo ("BillboardGui" / "Label"): solo sopra la part,
+            // col testo del TextLabel figlio.
+            if (l.adorneePart >= 0
+                && l.adorneePart < (int)g_world.parts.size() && l.visible) {
+                std::string shown;
+                glm::vec3 shownCol{1.f};
+                float shownFs = 1.f;
+                billboardContent(i, shown, shownCol, shownFs);
+                if (!shown.empty()) {
+                const auto& p = g_world.parts[l.adorneePart];
+                if (l.className == "SurfaceGui") {
+                    const glm::mat4 rot = partRotationMatrix(p.rotation);
+                    const glm::vec3 half = p.size * 0.5f;
+                    const glm::vec3 u = glm::vec3(rot * glm::vec4(1, 0, 0, 0));
+                    const glm::vec3 v = glm::vec3(rot * glm::vec4(0, 1, 0, 0));
+                    const glm::vec3 n = glm::vec3(rot * glm::vec4(0, 0, 1, 0));
+                    const glm::vec3 c = p.position + n * (half.z + 0.04f);
+                    const glm::vec3 hx = u * half.x * 0.92f;
+                    const glm::vec3 hy = v * half.y * 0.92f;
+                    glm::vec3 corners[4] = { c - hx - hy, c + hx - hy, c + hx + hy, c - hx + hy };
+                    ImVec2 s[4];
+                    bool ok = true;
+                    for (int k = 0; k < 4; ++k) {
+                        float x = 0, y = 0;
+                        if (!worldToScreen(corners[k], x, y)) { ok = false; break; }
+                        s[k] = {x, y};
+                    }
+                    if (ok) {
+                        ImDrawList* dl = ImGui::GetForegroundDrawList();
+                        const int a = (int)((1.f - std::clamp(l.bgTransparency, 0.f, 1.f)) * 210.f);
+                        dl->AddTriangleFilled(s[0], s[1], s[2], IM_COL32(12, 16, 28, a));
+                        dl->AddTriangleFilled(s[0], s[2], s[3], IM_COL32(12, 16, 28, a));
+                        const ImVec2 mid{(s[0].x + s[2].x) * 0.5f, (s[0].y + s[2].y) * 0.5f};
+                        ImFont* font = ImGui::GetFont();
+                        const float fs = ImGui::GetFontSize() * std::clamp(shownFs, 0.5f, 2.4f);
+                        const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.f, shown.c_str());
+                        const ImU32 col = IM_COL32((int)(shownCol.x * 255), (int)(shownCol.y * 255),
+                                                   (int)(shownCol.z * 255), 255);
+                        dl->AddText(font, fs, {mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f}, col, shown.c_str());
+                        continue;
+                    }
+                }
+                glm::vec3 top = p.position;
+                glm::vec3 local(0.f, p.size.y * 0.5f + l.studsOffsetY, 0.f);
+                if (l.className == "SurfaceGui")
+                    local = glm::vec3(0.f, 0.f, p.size.z * 0.5f + 0.08f);
+                top += glm::vec3(partRotationMatrix(p.rotation) * glm::vec4(local, 0.f));
+                drawBillboardText(top, shown.c_str(), shownCol, shownFs,
+                                  l.bgTransparency < 0.99f,
+                                  i == g_selectedLabel && !g_studioTesting);
+                }
+            }
             continue;
         }
         drawScreenUiLabel(l, i == g_selectedLabel && !g_studioTesting);
+    }
+    drawRobloxGuiLabels();
+}
+
+// Prompt stile Roblox: sull'oggetto, il tasto nel quadrato e l'azione a fianco.
+// Piu' prompt vicini si impilano. HoldDuration disegna l'anello che si chiude.
+static void drawProximityBillboards() {
+    const bool inPlay = g_screen == AppScreen::Playing
+        || (g_screen == AppScreen::Studio && g_studioTesting);
+    if (!inPlay) return;
+    ImFont* font = ImGui::GetFont();
+    if (!font) return;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const float base = ImGui::GetFontSize();
+    const float fsA = base * 1.12f;
+    const float fsO = base * 0.78f;
+    const float key = 36.f;
+    std::vector<ImVec2> used;
+    for (const Prossimita::Shown& s : g_prossimita.shown()) {
+        const Prossimita::Prompt* p = g_prossimita.promptPtr(s.index);
+        if (!p) continue;
+        glm::vec3 world(p->x, p->y + 1.4f, p->z);
+        if (p->partIndex >= 0 && p->partIndex < (int)g_world.parts.size()) {
+            const auto& part = g_world.parts[p->partIndex];
+            world = glm::vec3(part.position.x, part.position.y + part.size.y * 0.5f + 0.7f, part.position.z);
+        }
+        float sx = 0.f, sy = 0.f;
+        if (!worldToScreen(world, sx, sy)) continue;
+        for (const ImVec2& u : used) {
+            if (std::fabs(u.x - sx) < 90.f && std::fabs(u.y - sy) < 56.f) sy += 54.f;
+        }
+        used.push_back({sx, sy});
+
+        const char* action = p->text.empty() ? "Open" : p->text.c_str();
+        const char* obj = p->objectText.c_str();
+        char keych[2] = { p->key ? p->key : 'E', 0 };
+        ImVec2 asz = font->CalcTextSizeA(fsA, FLT_MAX, 0.f, action);
+        ImVec2 osz = obj[0] ? font->CalcTextSizeA(fsO, FLT_MAX, 0.f, obj) : ImVec2(0.f, 0.f);
+        ImVec2 ksz = font->CalcTextSizeA(fsA, FLT_MAX, 0.f, keych);
+        const float rowW = key + 12.f + asz.x;
+        const float totalW = std::max(rowW, osz.x);
+        const float objH = obj[0] ? osz.y + 4.f : 0.f;
+        const float x0 = sx - totalW * 0.5f;
+        const float y0 = sy - (objH + key) * 0.5f;
+        if (obj[0]) {
+            const float ox = sx - osz.x * 0.5f;
+            dl->AddText(font, fsO, {ox + 1.f, y0 + 1.f}, IM_COL32(0, 0, 0, 170), obj);
+            dl->AddText(font, fsO, {ox, y0}, IM_COL32(225, 228, 235, 230), obj);
+        }
+        const float ky = y0 + objH;
+        dl->AddRectFilled({x0 - 2.f, ky - 2.f}, {x0 + key + 2.f, ky + key + 2.f}, IM_COL32(0, 0, 0, 90), 9.f);
+        dl->AddRectFilled({x0, ky}, {x0 + key, ky + key}, IM_COL32(245, 245, 247, 245), 7.f);
+        if (p->holdDuration > 0.01f && p->hold > 0.f) {
+            const float a = std::clamp(p->hold / p->holdDuration, 0.f, 1.f);
+            dl->PathArcTo({x0 + key * 0.5f, ky + key * 0.5f}, key * 0.68f,
+                          -IM_PI * 0.5f, -IM_PI * 0.5f + a * IM_PI * 2.f, 28);
+            dl->PathStroke(IM_COL32(70, 160, 255, 255), 0, 3.f);
+        }
+        dl->AddText(font, fsA,
+                    {x0 + (key - ksz.x) * 0.5f, ky + (key - ksz.y) * 0.5f},
+                    IM_COL32(18, 18, 22, 255), keych);
+        const float tx = x0 + key + 12.f;
+        const float ty = ky + (key - asz.y) * 0.5f;
+        dl->AddText(font, fsA, {tx + 1.f, ty + 1.f}, IM_COL32(0, 0, 0, 190), action);
+        dl->AddText(font, fsA, {tx, ty}, IM_COL32(255, 255, 255, 250), action);
     }
 }
 

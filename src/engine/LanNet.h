@@ -13,6 +13,7 @@
 #include "PlaceInstance.h"
 using namespace blk::PoolProtocol; // pacchetti Register/Resolve/Relay... vedi PoolProtocol.h
 #include "WorldReplication.h"
+#include "RuntimeScale.h"
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -166,6 +167,9 @@ enum class NetMsg : uint8_t {
     ScriptReport = 10,
     RemoteEventEx = 11, // remotes grandi + FireClient (variabile)
     WorldDelta = 12,    // replica Part host→client
+    LabelDelta = 13,    // GUI (label) host→client
+    ToolDelta = 14,     // zaino host→client
+    NpcDelta = 15,      // NPC Humanoid host→client
 };
 
 enum class NetRejectReason : uint8_t {
@@ -393,17 +397,26 @@ struct LanNet {
         bool hasValidPos = false;
         float lastStateTime = 0.f;
         int speedViolations = 0;
+        int teleportGrace = 0;   // pacchetti di posizione da non controllare dopo un teletrasporto del server
         bool needsWorldSync = false; // appena joinato: stream snapshot Part
         int  worldSyncIndex = 0;
     };
     PeerSlot peers[kMaxPeers]{};
     std::vector<IncomingRemoteEvent> incomingRemotes;
     std::vector<WorldReplication::PartPacket> incomingWorld;
+    std::vector<WorldReplication::LabelPacket> incomingLabels;
+    std::vector<WorldReplication::ToolPacket> incomingTools;
+    std::vector<WorldReplication::NpcPacket> incomingNpcs;
 
     // Replica mondo (solo Host genera; Client applica).
     uint32_t nextPartNetId = 1;
+    uint32_t nextLabelNetId = 1;
+    uint32_t nextNpcNetId = 1;
     size_t worldReplCursor = 0;   // replica a turno (tickWorldReplication)
     WorldReplication::SentCache worldSentCache;
+    WorldReplication::SentCache labelSent;
+    WorldReplication::SentCache toolSent;
+    WorldReplication::SentCache npcSent;
     float worldReplAcc = 0.f;
     static constexpr float kWorldReplHz = 12.f; // upsert dirty ~12/s
     static constexpr int kWorldSyncPartsPerTick = 24; // snapshot join
@@ -492,9 +505,17 @@ struct LanNet {
         clearRemotes();
         incomingRemotes.clear();
         incomingWorld.clear();
+        incomingLabels.clear();
+        incomingTools.clear();
+        incomingNpcs.clear();
         incomingStats.clear();
         worldSentCache.clear();
+        labelSent.clear();
+        toolSent.clear();
+        npcSent.clear();
         nextPartNetId = 1;
+        nextLabelNetId = 1;
+        nextNpcNetId = 1;
         worldReplAcc = 0.f;
         for (auto& p : peers) p = {};
         setStatus("Offline");
@@ -1119,7 +1140,9 @@ struct LanNet {
                 std::snprintf(p.name, sizeof(p.name), "%.23s", st.name);
 
             glm::vec3 claimed{st.x, st.y, st.z};
-            if (p.hasValidPos) {
+            if (p.teleportGrace > 0) {
+                --p.teleportGrace;   // il server l'ha appena teletrasportato: il salto e' voluto
+            } else if (p.hasValidPos) {
                 float dt = std::max(now - p.lastStateTime, 1.f / 20.f);
                 float dist = glm::length(glm::vec2(claimed.x - p.lastValidPos.x,
                                                     claimed.z - p.lastValidPos.z));
@@ -1291,6 +1314,24 @@ struct LanNet {
                 incomingWorld.erase(incomingWorld.begin(), incomingWorld.begin() + 64);
             incomingWorld.push_back(pkt);
         }
+        if (hdr.type == (uint8_t)NetMsg::LabelDelta
+            && n >= (int)sizeof(WorldReplication::LabelPacket)) {
+            WorldReplication::LabelPacket pkt{};
+            std::memcpy(&pkt, buf, sizeof(pkt));
+            if (incomingLabels.size() < 256) incomingLabels.push_back(pkt);
+        }
+        if (hdr.type == (uint8_t)NetMsg::ToolDelta
+            && n >= (int)sizeof(WorldReplication::ToolPacket)) {
+            WorldReplication::ToolPacket pkt{};
+            std::memcpy(&pkt, buf, sizeof(pkt));
+            if (incomingTools.size() < 128) incomingTools.push_back(pkt);
+        }
+        if (hdr.type == (uint8_t)NetMsg::NpcDelta
+            && n >= (int)sizeof(WorldReplication::NpcPacket)) {
+            WorldReplication::NpcPacket pkt{};
+            std::memcpy(&pkt, buf, sizeof(pkt));
+            if (incomingNpcs.size() < 128) incomingNpcs.push_back(pkt);
+        }
     }
 
     void handleRemoteEventEx(const char* buf, int n, const sockaddr_in& from, bool asHost) {
@@ -1383,6 +1424,12 @@ struct LanNet {
             return true;
         }
         return false;
+    }
+
+    /** Il server ha teletrasportato quel giocatore: per ~2 secondi niente controllo di velocita'. */
+    void authorizeTeleport(uint8_t peerId) {
+        for (auto& p : peers)
+            if (p.used && p.id == peerId) { p.teleportGrace = 40; p.speedViolations = 0; }
     }
 
     bool sendRemoteEventToServer(const char* name, const char* payload) {
@@ -1593,10 +1640,92 @@ struct LanNet {
         return 0;
     }
 
+    bool remember(WorldReplication::SentCache& cache, uint32_t id, uint64_t h) {
+        auto it = cache.hashByNetId.find(id);
+        if (it != cache.hashByNetId.end() && it->second == h) return false;
+        cache.hashByNetId[id] = h;
+        return true;
+    }
+
+    /** GUI, tool e NPC creati sull'host: stesso giro della replica delle part. */
+    void sendPlayActors(DataModel& world) {
+        WorldReplication::ensureLabelNetIds(world, nextLabelNetId);
+        for (auto& n : world.npcs) {
+            if (n.skipNet) continue;
+            if (n.netId == 0) n.netId = nextNpcNetId++;
+            else if (n.netId >= nextNpcNetId) nextNpcNetId = n.netId + 1;
+        }
+        int budget = 16;
+        for (const auto& l : world.labels) {
+            if (budget <= 0 || l.skipNet || l.netId == 0) continue;
+            if (!remember(labelSent, l.netId, WorldReplication::labelHash(l))) continue;
+            WorldReplication::LabelPacket pkt{};
+            pkt.magic[0] = 'B'; pkt.magic[1] = 'L'; pkt.magic[2] = 'K'; pkt.magic[3] = '1';
+            pkt.type = (uint8_t)NetMsg::LabelDelta;
+            pkt.peerId = localId;
+            pkt.gameIndex = (uint16_t)gameIndex;
+            pkt.op = 1;
+            pkt.netId = l.netId;
+            pkt.ax = l.anchorX; pkt.ay = l.anchorY;
+            pkt.ox = l.offsetX; pkt.oy = l.offsetY;
+            pkt.sw = l.sizeW; pkt.sh = l.sizeH;
+            pkt.cr = l.color.x; pkt.cg = l.color.y; pkt.cb = l.color.z;
+            pkt.visible = l.visible ? 1 : 0;
+            std::snprintf(pkt.name, sizeof(pkt.name), "%.15s", l.name.c_str());
+            std::snprintf(pkt.text, sizeof(pkt.text), "%.39s", l.text.c_str());
+            std::snprintf(pkt.cls, sizeof(pkt.cls), "%.15s", l.className.c_str());
+            broadcastAll(&pkt, sizeof(pkt));
+            --budget;
+        }
+        for (int s = 0; s < (int)world.backpack.size() && budget > 0; ++s) {
+            const auto& it = world.backpack[(size_t)s];
+            if (it.localOnly) continue;
+            if (!remember(toolSent, (uint32_t)s + 1, WorldReplication::toolHash(it, s))) continue;
+            WorldReplication::ToolPacket pkt{};
+            pkt.magic[0] = 'B'; pkt.magic[1] = 'L'; pkt.magic[2] = 'K'; pkt.magic[3] = '1';
+            pkt.type = (uint8_t)NetMsg::ToolDelta;
+            pkt.peerId = localId;
+            pkt.gameIndex = (uint16_t)gameIndex;
+            pkt.op = 1;
+            pkt.slot = (uint8_t)std::min(s, 255);
+            pkt.dropped = it.dropped ? 1 : 0;
+            pkt.canDrop = it.canBeDropped ? 1 : 0;
+            pkt.dx = it.dropAnchor.x; pkt.dy = it.dropAnchor.y; pkt.dz = it.dropAnchor.z;
+            std::snprintf(pkt.name, sizeof(pkt.name), "%.23s", it.name.c_str());
+            std::snprintf(pkt.id, sizeof(pkt.id), "%.23s", it.id.c_str());
+            broadcastAll(&pkt, sizeof(pkt));
+            --budget;
+        }
+        for (const auto& n : world.npcs) {
+            if (budget <= 0 || n.skipNet || n.netId == 0) continue;
+            // tolto dallo script: una volta sola "op 2" (i client lo cancellano)
+            if (!remember(npcSent, n.netId, n.removed ? 0x52454D56u : WorldReplication::npcHash(n))) continue;
+            WorldReplication::NpcPacket pkt{};
+            pkt.magic[0] = 'B'; pkt.magic[1] = 'L'; pkt.magic[2] = 'K'; pkt.magic[3] = '1';
+            pkt.type = (uint8_t)NetMsg::NpcDelta;
+            pkt.peerId = localId;
+            pkt.gameIndex = (uint16_t)gameIndex;
+            pkt.op = n.removed ? 2 : 1;
+            pkt.netId = n.netId;
+            pkt.x = n.position.x; pkt.y = n.position.y; pkt.z = n.position.z;
+            pkt.yaw = n.yaw;
+            pkt.health = n.humanoid.health;
+            pkt.maxHealth = n.humanoid.maxHealth;
+            pkt.walkSpeed = n.humanoid.walkSpeed;
+            pkt.dead = n.humanoid.dead ? 1 : 0;
+            pkt.moving = n.moving ? 1 : 0;
+            pkt.toolSlot = (int16_t)std::clamp(n.toolSlot, -1, 32767);
+            std::snprintf(pkt.name, sizeof(pkt.name), "%.23s", n.name.c_str());
+            broadcastAll(&pkt, sizeof(pkt));
+            --budget;
+        }
+    }
+
     /** Host: assegna netId e manda snapshot + dirty Part ai client. */
     void tickWorldReplication(DataModel& world, float dt) {
         if (role != NetRole::Host || sock == kInvalidSock) return;
         WorldReplication::ensureNetIds(world, nextPartNetId);
+        sendPlayActors(world);
 
         // Snapshot per peer appena connessi
         for (auto& peer : peers) {
@@ -1605,7 +1734,11 @@ struct LanNet {
             while (peer.worldSyncIndex < (int)world.parts.size()
                    && sent < kWorldSyncPartsPerTick) {
                 const auto& part = world.parts[peer.worldSyncIndex++];
-                if (part.netId == 0) continue;
+                if (part.skipNet || part.netId == 0) continue;
+                if (peer.hasValidPos &&
+                    !blk::scale::interestNear(part.position, &peer.lastValidPos, 1,
+                                              std::max(96.f, blk::scale::stream().radius)))
+                    continue;
                 WorldReplication::PartPacket pkt{};
                 WorldReplication::fillPartPacket(
                     pkt, (uint8_t)NetMsg::WorldDelta, localId, (uint16_t)gameIndex,
@@ -1635,7 +1768,7 @@ struct LanNet {
         for (size_t k = 0; k < total; ++k) {
             if (budget <= 0) { worldReplCursor = (worldReplCursor + k) % total; break; }
             const auto& part = world.parts[(worldReplCursor + k) % total];
-            if (part.netId == 0) continue;
+            if (part.skipNet || part.netId == 0) continue;
             const uint64_t h = WorldReplication::partStateHash(part);
             auto it = worldSentCache.hashByNetId.find(part.netId);
             const bool dirty = (it == worldSentCache.hashByNetId.end()) || (it->second != h);
@@ -1644,11 +1777,37 @@ struct LanNet {
             // Unanchored: invia solo se spostato davvero (dirty), non ogni tick cieco
             if (forcePhys && !dirty) continue;
 
+            const float interestR = std::max(96.f, blk::scale::stream().radius);
+            int listeners = 0;
+            for (const auto& peer : peers)
+                if (peer.used && peer.hasValidPos) ++listeners;
+            if (listeners > 0 && ![&]{
+                    for (const auto& peer : peers) {
+                        if (!peer.used || !peer.hasValidPos) continue;
+                        if (blk::scale::interestNear(part.position, &peer.lastValidPos, 1, interestR))
+                            return true;
+                    }
+                    return false;
+                }()) {
+                ++blk::scale::stats().interestSkipped;
+                continue;
+            }
+
             WorldReplication::PartPacket pkt{};
             WorldReplication::fillPartPacket(
                 pkt, (uint8_t)NetMsg::WorldDelta, localId, (uint16_t)gameIndex,
                 WorldReplication::Op::Upsert, part);
-            broadcastAll(&pkt, sizeof(pkt));
+            if (listeners == 0) {
+                broadcastAll(&pkt, sizeof(pkt));
+            } else {
+                for (const auto& peer : peers) {
+                    if (!peer.used || !peer.hasValidPos) continue;
+                    if (!blk::scale::interestNear(part.position, &peer.lastValidPos, 1, interestR))
+                        continue;
+                    sendTo(peer.addr, &pkt, sizeof(pkt));
+                }
+            }
+            ++blk::scale::stats().interestSent;
             worldSentCache.hashByNetId[part.netId] = h;
             --budget;
         }
@@ -1677,8 +1836,17 @@ struct LanNet {
     int applyIncomingWorld(DataModel& world, const WorldReplication::EraseFn& erase = nullptr) {
         if (role != NetRole::Client) {
             incomingWorld.clear();
+            incomingLabels.clear();
+            incomingTools.clear();
+            incomingNpcs.clear();
             return 0;
         }
+        for (const auto& t : incomingTools) WorldReplication::applyTool(world, t);
+        for (const auto& npc : incomingNpcs) WorldReplication::applyNpc(world, npc);
+        for (const auto& lab : incomingLabels) WorldReplication::applyLabel(world, lab);
+        incomingTools.clear();
+        incomingNpcs.clear();
+        incomingLabels.clear();
         int n = 0;
         for (const auto& pkt : incomingWorld) {
             if (WorldReplication::applyPacket(world, pkt, erase))

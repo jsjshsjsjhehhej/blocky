@@ -28,6 +28,9 @@
 #include "main_ui/AnimationStudioUi.h"
 #include "main_ui/StudioExplorer.h"
 #include "main_ui/StudioPropertyGrid.h"
+#include "main_ui/StudioUndoExtras.h"   // Annulla anche per GUI, Tool, servizi, Lighting
+#include "main_ui/StudioCsg.h"          // Unione / Nega / Interseca / Separa
+#include "main_ui/StudioRojo.h"         // progetti Rojo: script da file (VS Code / AI)
 
 static void drawScriptCreatedGuidePopup() {
     if (!g_showScriptCreatedGuide) return;
@@ -67,6 +70,375 @@ static void drawScriptCreatedGuidePopup() {
 // comando c'e' in un posto solo. Tutte le scritte passano da L() (ui/Loc.h):
 // le traduzioni sono in assets/lang/<lingua>.json.
 
+// Editor dello script di una part: in Roblox lo script si apre in una scheda
+// sua (doppio clic nell'Esploratore), non dentro le Proprieta'.
+static void drawPartScriptEditorBody(WorkspacePart& p) {
+            ImGui::TextWrapped(
+                "Non e' Lua vanilla: usi l'API Blocky (tipo Roblox). "
+                "Esplosione = part:Explode(). Apri View → Guida Lua Blocky.");
+            if (p.script.empty()) {
+                ImGui::TextDisabled("Nessuno script — prova un preset.");
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.65f, 0.85f, 1.f});
+                if (ImGui::Button(LB("btn.jump_block", "jmpblk"), {-1, 36})) {
+                    p.script = makeJumpBlockScript(p);
+                    syncPartEditors();
+                    g_editingPartScript = true;
+                    g_luaRunMsg = "Script salto — Test (F5)";
+                    g_showScriptCreatedGuide = true;
+                }
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.25f, 0.12f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.35f, 0.18f, 1.f});
+                if (ImGui::Button(LB("btn.explode_block", "expblk"), {-1, 36})) {
+                    p.script = makeExplodeBlockScript(p);
+                    p.color = {0.85f, 0.2f, 0.12f};
+                    p.boomOnTouch = false;
+                    p.boomAutoSecs = 0.f;
+                    p.canDestroy = true;
+                    p.canCollide = false;
+                    syncPartEditors();
+                    g_editingPartScript = true;
+                    g_luaRunMsg = "Script esplosione Lua (monete + boom) — Test (F5)";
+                    g_showScriptCreatedGuide = true;
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.72f, 0.55f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.20f, 0.85f, 0.65f, 1.f});
+                if (ImGui::Button("Script Neon (Material)", {-1, 36})) {
+                    p.script = makeNeonBlockScript(p);
+                    p.setMaterial(PartMaterial::Neon);
+                    p.pointLight = true;
+                    p.color = {0.25f, 1.f, 0.85f};
+                    syncPartEditors();
+                    g_editingPartScript = true;
+                    g_luaRunMsg = "Script Neon — Test (F5) per pulse + luce";
+                    g_showScriptCreatedGuide = true;
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.55f, 0.90f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.65f, 1.0f, 1.f});
+                if (ImGui::Button("Script Stamina (sprint)", {-1, 36})) {
+                    applyStaminaToSelectedPart();
+                }
+                ImGui::PopStyleColor(2);
+                // Lo script dell'arma sta QUI, sulla Part, non sull'oggetto:
+                // l'oggetto e' cosa tieni in mano, lo script decide cosa
+                // succede quando lo usi. E' la cosa meno ovvia del motore, e
+                // senza un bottone che la mostri non c'era modo di indovinarla.
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.55f, 0.25f, 0.70f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.68f, 0.35f, 0.85f, 1.f});
+                if (ImGui::Button("Script Arma da fuoco", {-1, 36}))
+                    addWeaponScriptToSelected();
+                ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Fucile a pompa completo (mira, munizioni, rinculo),\n"
+                        "gia' collegato all'oggetto \"%s\" del Backpack.",
+                        weaponScriptTargetName().c_str());
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.65f, 0.12f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.75f, 0.20f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_Text, {0.1f, 0.1f, 0.1f, 1.f});
+                if (ImGui::Button(LB("btn.add_script", "addsc"), {-1, 28}))
+                    addScriptToSelected();
+                ImGui::PopStyleColor(3);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Script vuoto, da scrivere tu.");
+            } else {
+                g_editingPartScript = true;
+                drawLuaScriptEditor(g_partScriptEditor, g_partScriptBuf, sizeof(g_partScriptBuf),
+                    "##partscript", 140.f);
+                p.script = g_partScriptBuf;
+                {
+                    static const char* kScriptTypeNames[] = {
+                        "Legacy (compat)", "Script (Server)",
+                        "LocalScript (Client)", "ModuleScript"
+                    };
+                    int st = (int)p.scriptType;
+                    if (st < 0 || st > 3) st = 0;
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("##scripttype", &st, kScriptTypeNames, 4))
+                        p.scriptType = (ScriptType)st;
+                    if (p.scriptType == ScriptType::Server)
+                        ImGui::TextDisabled("Solo host — stesso place PC + Android.");
+                    else if (p.scriptType == ScriptType::Client)
+                        ImGui::TextDisabled("LocalScript: ogni client (input/UI/viewmodel).");
+                    else if (p.scriptType == ScriptType::ModuleScript)
+                        ImGui::TextDisabled("Non parte da solo — require da altri script.");
+                }
+                if (ImGui::SmallButton("Inserisci Explode")) {
+                    std::string cur = g_partScriptBuf;
+                    cur += "\npart:Explode()\n";
+                    std::snprintf(g_partScriptBuf, sizeof(g_partScriptBuf), "%s", cur.c_str());
+                    p.script = g_partScriptBuf;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Inserisci Touched→Explode")) {
+                    std::snprintf(g_partScriptBuf, sizeof(g_partScriptBuf), "%s",
+                        makeExplodeBlockScript(p).c_str());
+                    p.script = g_partScriptBuf;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Apri guida"))
+                    g_showLuaGuide = true;
+                if (ImGui::SmallButton("Carica Stamina (sprint)"))
+                    applyStaminaToSelectedPart();
+                ImGui::TextDisabled("%s", L("hint.scripts_test"));
+                if (ImGui::Button(LB("btn.save_script", "savesc")))
+                    p.script = g_partScriptBuf;
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.90f, 0.28f, 0.20f, 1.f});
+                if (ImGui::Button(LB("btn.remove_script", "rmsc"), {-1, 0}))
+                    removeScriptFromSelected();
+                ImGui::PopStyleColor(2);
+            }
+            if (!g_luaRunMsg.empty()) {
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", g_luaRunMsg.c_str());
+            }
+}
+
+// ---- Schede dei documenti (come Roblox Studio) ---------------------------------------------
+// In cima all'area centrale: la scheda del place (la vista 3D) e una scheda per
+// ogni script aperto. Lo script aperto prende tutta l'area, come in Studio.
+// Ogni scheda ha il suo editor: si possono tenere aperti piu' script insieme.
+struct ScriptDocTab {
+    int part = -1;
+    std::string partName;            // per accorgersi se l'indice ora e' di un'altra part
+    std::unique_ptr<LuaScriptEditorState> ed;
+    std::string lastSynced;
+};
+static std::vector<ScriptDocTab> g_scriptTabs;
+static int g_activeScriptTab = -1;   // -1 = la vista del place
+static int g_selectScriptTab = -2;   // scheda da selezionare al prossimo frame (-1 = place)
+static int g_lastShownScriptPart = -1;
+// Punti di interruzione per script ("Porta.Script" -> righe), dati al runtime a ogni Test.
+static std::map<std::string, std::set<int>> g_scriptBreakpoints;
+static int g_gotoScriptLine = 0;   // riga da mostrare nello script appena aperto (Analisi script)
+
+static void openScriptTab(int part) {
+    if (!partIndexValid(part)) return;
+    for (int i = 0; i < (int)g_scriptTabs.size(); ++i)
+        if (g_scriptTabs[(size_t)i].part == part) { g_selectScriptTab = i; return; }
+    ScriptDocTab t;
+    t.part = part;
+    t.partName = g_world.parts[(size_t)part].name;
+    t.ed = std::make_unique<LuaScriptEditorState>();
+    t.lastSynced = "\x01";
+    g_scriptTabs.push_back(std::move(t));
+    g_selectScriptTab = (int)g_scriptTabs.size() - 1;
+}
+
+static void drawScriptDocument(ScriptDocTab& t) {
+    WorkspacePart& p = g_world.parts[(size_t)t.part];
+    if (p.script.empty()) {
+        // Script appena tolto o mai scritto: i preset per cominciare.
+        if (g_selectedPart != t.part) selectPart(t.part);
+        drawPartScriptEditorBody(p);
+        return;
+    }
+    if (t.lastSynced != p.script) {   // cambiato da fuori (preset, altro editor, Annulla)
+        t.ed->editor.SetText(p.script);
+        t.lastSynced = p.script;
+    }
+    if (g_gotoScriptLine > 0) {
+        const int l = std::clamp(g_gotoScriptLine, 1, t.ed->editor.GetTotalLines()) - 1;
+        t.ed->editor.SetCursorPosition({l, 0});
+        t.ed->editor.SetSelection({l, 0}, {l, (int)t.ed->editor.GetCurrentLineText().size()});
+        g_gotoScriptLine = 0;
+    }
+    char id[48];
+    std::snprintf(id, sizeof(id), "##scriptdoc%d", t.part);
+    scriptAssistEditor(t.ed->editor, id, ImGui::GetContentRegionAvail().y);
+    {
+        const std::set<int>& bps = scriptAssistBreakpoints(t.ed->editor);
+        const std::string chunk = p.name + ".Script";   // il nome che il runtime da' allo script
+        if (bps.empty()) g_scriptBreakpoints.erase(chunk); else g_scriptBreakpoints[chunk] = bps;
+    }
+    if (t.ed->editor.IsTextChanged()) {
+        std::string txt = t.ed->editor.GetText();
+        if (!txt.empty() && txt.back() == '\n' && (p.script.empty() || p.script.back() != '\n')) txt.pop_back();
+        p.script = txt;
+        t.lastSynced = p.script;
+        if (g_selectedPart == t.part) std::snprintf(g_partScriptBuf, sizeof(g_partScriptBuf), "%s", p.script.c_str());
+        markPlaceDirty();
+    }
+}
+
+static void drawScriptDocumentArea(float x0, float x1, float y0, float y1) {
+    if (g_screen != AppScreen::Studio || g_studioTesting) return;
+    if (g_showPartScriptWin) {   // richiesta di aprire lo script della part selezionata
+        g_showPartScriptWin = false;
+        openScriptTab(g_selectedPart);
+    }
+    // Schede di part sparite o cambiate (cancellate, indici spostati): si chiudono.
+    for (int i = (int)g_scriptTabs.size() - 1; i >= 0; --i) {
+        const ScriptDocTab& t = g_scriptTabs[(size_t)i];
+        if (!partIndexValid(t.part) || g_world.parts[(size_t)t.part].name != t.partName) {
+            g_scriptTabs.erase(g_scriptTabs.begin() + i);
+            if (g_activeScriptTab >= (int)g_scriptTabs.size()) g_activeScriptTab = -1;
+        }
+    }
+    const float tabH = 26.f;
+    ImGui::SetNextWindowPos({x0, y0});
+    ImGui::SetNextWindowSize({std::max(80.f, x1 - x0), tabH});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {6.f, 3.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, studio_theme::pal().docTabs);
+    ImGui::Begin("##doctabs", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
+                                           | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+    int active = -1;
+    if (ImGui::BeginTabBar("##doctabbar", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_Reorderable)) {
+        const std::string placeLabel = (g_world.placeName.empty() ? std::string("Place") : g_world.placeName) + "###tabplace";
+        if (ImGui::BeginTabItem(placeLabel.c_str(), nullptr, g_selectScriptTab == -1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+            active = -1;
+            ImGui::EndTabItem();
+        }
+        for (int i = 0; i < (int)g_scriptTabs.size(); ++i) {
+            ScriptDocTab& t = g_scriptTabs[(size_t)i];
+            const WorkspacePart& p = g_world.parts[(size_t)t.part];
+            bool keep = true;
+            char label[160];
+            std::snprintf(label, sizeof(label), "%s - %s###tabscript%d", exScriptClass(p.scriptType), p.name.c_str(), t.part);
+            if (ImGui::BeginTabItem(label, &keep, g_selectScriptTab == i ? ImGuiTabItemFlags_SetSelected : 0)) {
+                active = i;
+                ImGui::EndTabItem();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s dentro \"%s\"", exScriptClass(p.scriptType), p.name.c_str());
+            if (!keep) {
+                g_scriptTabs.erase(g_scriptTabs.begin() + i);
+                if (active == i) active = -1;
+                --i;
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    g_selectScriptTab = -2;
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    g_activeScriptTab = active;
+    if (active < 0 || active >= (int)g_scriptTabs.size()) { g_lastShownScriptPart = -1; return; }
+
+    // Lo script aperto copre la vista 3D, come una scheda di Roblox Studio.
+    ScriptDocTab& t = g_scriptTabs[(size_t)active];
+    if (g_lastShownScriptPart != t.part) {
+        // Aprendo la scheda si seleziona il suo script (Proprieta' = Script); poi
+        // puoi selezionare altro nell'Esploratore senza chiudere la scheda.
+        g_lastShownScriptPart = t.part;
+        studioMultiClear();
+        selectPart(t.part);
+        g_editingPartScript = !g_world.parts[(size_t)t.part].script.empty();
+    }
+    ImGui::SetNextWindowPos({x0, y0 + tabH});
+    ImGui::SetNextWindowSize({std::max(80.f, x1 - x0), std::max(80.f, y1 - y0 - tabH)});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, studio_theme::pal().scriptBg);
+    ImGui::Begin("##scriptdocwin", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings
+                                                | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    drawScriptDocument(t);
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+}
+
+#include "main_ui/StudioToolsPro.h"   // Analisi script e Inserisci oggetto come Roblox
+
+// Salva / Pubblica: in Roblox sta nel menu File; qui anche nel ribbon Home.
+static void drawPlacePublishBody() {
+            ImGui::TextColored({0.45f, 0.85f, 1.f, 1.f}, "Place / Pubblica");
+            ImGui::TextDisabled("Salva · Salva per pubblicare · Pubblica");
+            ImGui::InputText("Nome gioco", g_gameNameBuf, sizeof(g_gameNameBuf));
+            g_world.placeName = g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName;
+            {
+                // Il campo sopra parte sempre da "Il mio gioco" finche' non lo
+                // cambi — se lo lasci com'e' (o lo riporti a un nome gia' usato)
+                // Pubblica AGGIORNA quel gioco esistente invece di crearne uno
+                // nuovo. Meglio dirlo qui prima di premere il bottone che dopo,
+                // quando il vecchio contenuto e' gia' stato sovrascritto.
+                std::string curId = sanitizeGameId(g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName);
+                for (const auto& g : g_games) {
+                    if (g.isPublished && g.id == curId) {
+                        ImGui::TextColored({1.f, 0.75f, 0.3f, 1.f},
+                            "Aggiornerai il gioco gia' pubblicato \"%s\" (stesso nome/ID) — "
+                            "cambia \"Nome gioco\" se ne vuoi uno nuovo.", g.title.c_str());
+                        break;
+                    }
+                }
+            }
+            if (ImGui::Button("Scegli icona...", { -1, 0 })) {
+                std::string path;
+                if (openImageFileDialog(path, publisherHwnd()))
+                    g_pendingIconPath = path;
+            }
+            if (!g_pendingIconPath.empty()) {
+                auto slash = g_pendingIconPath.find_last_of("\\/");
+                std::string base = slash == std::string::npos
+                    ? g_pendingIconPath : g_pendingIconPath.substr(slash + 1);
+                ImGui::TextDisabled("Icona: %s", base.c_str());
+            } else {
+                ImGui::TextDisabled("Nessuna icona — mostra il colore accent");
+            }
+            if (ImGui::Button("Apri Place...", { -1, 0 })) doOpenPlace();
+            if (ImGui::Button("Salva Place", { -1, 0 })) doSavePlace();
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.48f, 0.78f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.58f, 0.90f, 1.f});
+            if (ImGui::Button("Salva per pubblicare", { -1, 34 })) doSaveForPublish();
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Bozza + autosave ogni 30s — pubblichi dopo quando vuoi");
+            if (g_publishDraftActive)
+                ImGui::TextColored({0.35f, 0.9f, 0.55f, 1.f}, "Autosave bozza publish ON");
+            if (ImGui::Button("Salva Progetto", { -1, 0 })) doSaveProject();
+            ImGui::SliderInt("Max giocatori", &g_maxPlayers, 1, 32);
+            ImGui::TextDisabled("Limite server multiplayer (1–32)");
+            {
+                int usedQ = 0;
+                long long nowQ = (long long)std::time(nullptr);
+                std::string cr = g_menu.username[0] ? g_menu.username : "Builder";
+                std::string gid = sanitizeGameId(g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName);
+                bool okSlot = canPublishGame(g_games, gid, cr, nowQ, &usedQ);
+                ImGui::TextDisabled("Slot giochi: %d / %d (2 mesi)", usedQ, kMaxPublishedGamesPerUser);
+                if (!okSlot)
+                    ImGui::TextColored({1.f, 0.45f, 0.3f, 1.f}, "Limite raggiunto — aggiorna un gioco esistente");
+            }
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.62f, 0.42f, 1.f});
+            if (ImGui::Button("Pubblica nei Games", {-1, 40})) {
+                if (publishCurrentGame())
+                    refreshGamesList();
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::Button("Avvia Server dedicato", {-1, 32})) {
+                if (publishCurrentGame())
+                    refreshGamesList();
+                // Il server carica questo place ed esegue i suoi Script server.
+                const std::string serverPlace = blockyDataDir() + "/server_place.json";
+                launchDedicatedServer(g_maxPlayers, g_gameNameBuf[0] ? g_gameNameBuf : "Blocky",
+                                      writeCurrentPlaceTo(serverPlace) ? serverPlace : std::string());
+            }
+            if (!g_publishMsg.empty())
+                ImGui::TextWrapped("%s", g_publishMsg.c_str());
+            if (!g_exportMsg.empty())
+                ImGui::TextWrapped("%s", g_exportMsg.c_str());
+            ImGui::Separator();
+            ImGui::Text("Place: %s", g_world.placeName.c_str());
+            if (!g_placeFilePath.empty())
+                ImGui::TextDisabled("%s", g_placeFilePath.c_str());
+            if (g_publishDraftActive && !g_publishDraftPath.empty())
+                ImGui::TextDisabled("Bozza: %s", g_publishDraftPath.c_str());
+            ImGui::SliderFloat("FOV", &g_cam.fov, 40.f, 100.f);
+            ImGui::Checkbox("VSync", &g_vsync);
+}
+
+static void drawPlacePublishWindow() {
+    if (!g_showPlacePublish || g_screen != AppScreen::Studio) return;
+    ImGui::SetNextWindowSize({380, 560}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos({g_w * 0.5f - 190.f, 120.f}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Salva e pubblica###placepublish", &g_showPlacePublish)) drawPlacePublishBody();
+    ImGui::End();
+}
+
 static void ribbonPartMenuItems() {
     if (ImGui::MenuItem(L("rb.block"))) insertNewPart();
     if (ImGui::MenuItem(L("rb.ball"))) insertShapedPart(PartShape::Ball);
@@ -78,6 +450,11 @@ static void ribbonPartMenuItems() {
     if (ImGui::MenuItem(L("rb.explode"))) insertExplodePart();
     ImGui::Separator();
     if (ImGui::MenuItem(L("rb.spawn"))) studioRunInsertKind(7);
+    ImGui::Separator();
+    if (ImGui::MenuItem(L("rb.decal"), nullptr, false, g_selectedPart >= 0)) studioTagSelection(0);
+    if (ImGui::MenuItem(L("rb.highlight"), nullptr, false, g_selectedPart >= 0)) studioTagSelection(1);
+    if (ImGui::MenuItem(L("rb.selbox"), nullptr, false, g_selectedPart >= 0)) studioTagSelection(2);
+    if (ImGui::MenuItem(L("rb.dragdet"), nullptr, false, g_selectedPart >= 0)) studioTagDragOnSelection();
 }
 
 // Script, LocalScript o ModuleScript sulla part selezionata, come il menu
@@ -190,10 +567,7 @@ static void drawStudioRibbonBody(int& tab) {
         }
         if (small("hui", Icon::NewFile, "rb.uimenu")) ImGui::OpenPopup("hui##menu");
         if (ImGui::BeginPopup("hui##menu")) {
-            if (ImGui::MenuItem(L("rb.textlabel"))) insertNewTextLabel();
-            if (ImGui::MenuItem(L("rb.textbutton"))) insertNewTextButton();
-            if (ImGui::MenuItem(L("rb.frame"))) insertNewFrame();
-            if (ImGui::MenuItem(L("rb.image"))) insertNewImageLabel();
+            ribbonGuiMenuItems();
             ImGui::EndPopup();
         }
         studio::ribbonEndStack();
@@ -228,6 +602,7 @@ static void drawStudioRibbonBody(int& tab) {
         studio::ribbonEndGroup(L("rb.g.test"));
 
         studio::ribbonBeginGroup();
+        toggle("hpub", Icon::Save, "rb.publish", g_showPlacePublish);
         toggle("hset", Icon::Grid, "rb.settings", g_showGameSettings);
         if (studio::ribbonMenuButton("hgame", Icon::Package, L("rb.gamemenu"))) {
             ImGui::MenuItem(L("rb.teams"), nullptr, &g_showTeamsEditor);
@@ -310,6 +685,18 @@ static void drawStudioRibbonBody(int& tab) {
         }
         studio::ribbonEndGroup(L("rb.g.arrange"));
 
+        // Solidi (Roblox Studio > Modello > Solid Modeling)
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("csgu", Icon::Package, "rb.csg.union", studioMultiSelectionSize() >= 2)) studioCsgCombine(0);
+        if (small("csgn", Icon::Cube, "rb.csg.negate", hasSel)) studioCsgNegate();
+        if (small("csgi", Icon::Cube, "rb.csg.intersect", studioMultiSelectionSize() >= 2)) studioCsgCombine(1);
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("csgs", Icon::Package, "rb.csg.separate", g_selectedModel >= 0)) studioCsgSeparate();
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.solids"));
+
         // Snap come in Roblox Studio: passo di spostamento (stud) e di rotazione (gradi).
         studio::ribbonBeginGroup();
         studio::ribbonBeginStack();
@@ -318,12 +705,35 @@ static void drawStudioRibbonBody(int& tab) {
         if (ImGui::SmallButton(g_studioLocalSpace ? L("rb.space.local") : L("rb.space.world")))
             g_studioLocalSpace = !g_studioLocalSpace;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", L("rb.space.tip"));
+        ImGui::SameLine();
+        ImGui::Checkbox(L("rb.collide.drag"), &g_studioCollisions);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", L("rb.collide.tip"));
         ImGui::SetNextItemWidth(110.f);
-        if (ImGui::DragFloat("##snapmove", &g_studioSnapMove, 0.05f, 0.05f, 64.f, L("rb.snap.move")))
-            g_studioSnapMove = std::max(0.05f, g_studioSnapMove);
+        if (ImGui::DragFloat("##snapmove", &g_studioSnapMove, 0.001f, kMinPartSize, 64.f, L("rb.snap.move"))) {
+            g_studioSnapMove = std::max(kMinPartSize, g_studioSnapMove);
+            g_studioSnapScale = g_studioSnapMove;
+        }
         ImGui::SetNextItemWidth(110.f);
-        if (ImGui::DragFloat("##snaprot", &g_studioSnapRotate, 0.5f, 1.f, 180.f, L("rb.snap.rot")))
-            g_studioSnapRotate = std::clamp(g_studioSnapRotate, 1.f, 180.f);
+        if (ImGui::DragFloat("##snaprot", &g_studioSnapRotate, 0.1f, 0.1f, 180.f, L("rb.snap.rot")))
+            g_studioSnapRotate = std::clamp(g_studioSnapRotate, 0.1f, 180.f);
+        {
+            static const float kStep[] = {1.f, 0.1f, 0.01f, 0.001f};
+            static const char* kLab[] = {"1", ".1", ".01", ".001"};
+            for (int i = 0; i < 4; ++i) {
+                if (i) ImGui::SameLine(0.f, 4.f);
+                const bool on = g_studioSnapEnabled && std::fabs(g_studioSnapMove - kStep[i]) < 0.0001f;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.635f, 1.f, 1.f));
+                char id[24];
+                std::snprintf(id, sizeof(id), "%s##snaprec%d", kLab[i], i);
+                if (ImGui::SmallButton(id)) {
+                    g_studioSnapMove = kStep[i];
+                    g_studioSnapScale = kStep[i];
+                    g_studioSnapEnabled = true;
+                }
+                if (on) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", L("rb.snap.fine"));
+            }
+        }
         studio::ribbonEndStack();
         studio::ribbonEndGroup(L("rb.g.snap"));
 
@@ -372,6 +782,15 @@ static void drawStudioRibbonBody(int& tab) {
         if (small("mcgrp", Icon::Package, "rb.colgroups")) g_showCollisionGroups = !g_showCollisionGroups;
         studio::ribbonEndStack();
         if (studio::ribbonMenuButton("mcons", Icon::Anchor, L("rb.constraints"))) {
+            ImGui::TextDisabled("%s", L("rb.c.tool"));
+            static const ConstraintKind kTool[] = {ConstraintKind::Hinge, ConstraintKind::Rope, ConstraintKind::Spring, ConstraintKind::Rod};
+            for (ConstraintKind k : kTool) {
+                char lab[64];
+                std::snprintf(lab, sizeof(lab), "%s##tool%d", constraintKindName(k), (int)k);
+                if (ImGui::MenuItem(lab, nullptr, g_constraintToolKind == (int)k)) { g_constraintToolKind = (int)k; g_ctPart0 = -1; }
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", L("rb.c.fromsel"));
             if (ImGui::MenuItem(L("rb.c.weld"))) studioCreateWeldFromSelection();
             if (ImGui::MenuItem(L("rb.c.hinge"))) studioCreateConstraintFromSelection(ConstraintKind::Hinge);
             if (ImGui::MenuItem(L("rb.c.rope"))) studioCreateConstraintFromSelection(ConstraintKind::Rope);
@@ -428,12 +847,54 @@ static void drawStudioRibbonBody(int& tab) {
         studio::ribbonEndGroup(L("rb.g.anim"), true);
     } else if (tab == 3) {   // ---- INTERFACCIA ----
         studio::ribbonBeginGroup();
-        if (studio::ribbonBigButton("utl", Icon::NewFile, L("rb.textlabel"))) insertNewTextLabel();
-        if (studio::ribbonBigButton("utb", Icon::NewFile, L("rb.textbutton"))) insertNewTextButton();
-        if (studio::ribbonBigButton("ufr", Icon::NewFile, L("rb.frame"))) insertNewFrame();
-        if (studio::ribbonBigButton("uim", Icon::NewFile, L("rb.image"))) insertNewImageLabel();
+        if (studio::ribbonBigButton("usg", Icon::NewFile, L("rb.screengui"))) insertRobloxWidget("ScreenGui");
+        if (studio::ribbonBigButton("ufr", Icon::NewFile, L("rb.frame"))) insertRobloxWidget("Frame");
+        if (studio::ribbonBigButton("usc", Icon::NewFile, L("rb.scroll"))) insertRobloxWidget("ScrollingFrame");
+        if (studio::ribbonMenuButton("umore", Icon::NewFile, L("rb.uimore"))) {
+            ribbonGuiMenuItems();
+            ImGui::EndPopup();
+        }
         studio::ribbonEndGroup(L("rb.g.gui"));
         studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("utl", Icon::NewFile, L("rb.textlabel"))) insertRobloxWidget("TextLabel");
+        if (studio::ribbonBigButton("utb", Icon::NewFile, L("rb.textbutton"))) insertRobloxWidget("TextButton");
+        if (studio::ribbonBigButton("utx", Icon::NewFile, L("rb.textbox"))) insertRobloxWidget("TextBox");
+        studio::ribbonBeginStack();
+        if (small("uim", Icon::NewFile, "rb.image")) insertRobloxWidget("ImageLabel");
+        if (small("uib", Icon::NewFile, "rb.imagebtn")) insertRobloxWidget("ImageButton");
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.gui"));
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("ulist", Icon::Grid, "rb.uilist")) insertRobloxWidget("UIListLayout");
+        if (small("ugrid", Icon::Grid, "rb.uigrid")) insertRobloxWidget("UIGridLayout");
+        if (small("upad", Icon::NewFile, "rb.uipad")) insertRobloxWidget("UIPadding");
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("ucor", Icon::Cube, "rb.uicorner")) insertRobloxWidget("UICorner");
+        if (small("ustr", Icon::Cube, "rb.uistroke")) insertRobloxWidget("UIStroke");
+        if (small("udup", Icon::Duplicate, "rb.ui.dup")) studioDuplicateGui();
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.layout"));
+        studio::ribbonBeginGroup();
+        studio::ribbonBeginStack();
+        if (small("uileft", Icon::Move, "rb.ui.left")) studioAlignGui(0, 0);
+        if (small("uicx", Icon::Move, "rb.ui.cx")) studioAlignGui(0, 1);
+        if (small("uiright", Icon::Move, "rb.ui.right")) studioAlignGui(0, 2);
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("uitop", Icon::Move, "rb.ui.top")) studioAlignGui(1, 0);
+        if (small("uicy", Icon::Move, "rb.ui.cy")) studioAlignGui(1, 1);
+        if (small("uibot", Icon::Move, "rb.ui.bottom")) studioAlignGui(1, 2);
+        studio::ribbonEndStack();
+        studio::ribbonBeginStack();
+        if (small("uifront", Icon::Transform, "rb.ui.front")) studioNudgeGuiZ(1);
+        if (small("uiback", Icon::Transform, "rb.ui.back")) studioNudgeGuiZ(-1);
+        studio::ribbonEndStack();
+        studio::ribbonEndGroup(L("rb.g.arrange"));
+        studio::ribbonBeginGroup();
+        if (studio::ribbonBigButton("ubb", Icon::NewFile, L("rb.billboard"))) insertRobloxWidget("BillboardGui");
+        if (studio::ribbonBigButton("usf", Icon::NewFile, L("rb.surface"))) insertRobloxWidget("SurfaceGui");
         if (studio::ribbonBigButton("ul3", Icon::NewFile, L("rb.label3d"))) insertNewLabel();
         if (studio::ribbonBigButton("usnd", Icon::Package, L("rb.sound"))) insertSound();
         studio::ribbonEndGroup(L("rb.g.media"), true);
@@ -518,6 +979,10 @@ static void drawStudioRibbonBody(int& tab) {
         studio::ribbonEndGroup(L("rb.g.camera"));
         studio::ribbonBeginGroup();
         if (studio::ribbonBigButton("vshot", Icon::Camera, L("rb.screenshot"))) studioRequestScreenshot();
+        if (studio::ribbonBigButton("vtheme", Icon::Light, L(studio_theme::isLight() ? "rb.theme.dark" : "rb.theme.light"))) {
+            studio_theme::setLight(!studio_theme::isLight());   // si salva per la prossima volta
+            applyStudioTheme();
+        }
 #ifndef __ANDROID__
         if (studio::ribbonBigButton("vfull", Icon::Grid, L("rb.fullscreen"), win && glfwGetWindowMonitor(win)))
             studioToggleFullscreen(win);
@@ -679,10 +1144,11 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             if (ImGui::MenuItem(L("menu.open_place"), "Ctrl+O")) doOpenPlace();
             if (ImGui::MenuItem(L("menu.save_place"), "Ctrl+S")) doSavePlace();
             if (ImGui::MenuItem(L("menu.save_place_as"), "Ctrl+Shift+S")) doSavePlaceAs();
-            if (ImGui::MenuItem("Salva per pubblicare", "Ctrl+Shift+U")) doSaveForPublish();
+            if (ImGui::MenuItem("Salva per pubblicare")) doSaveForPublish();
             if (ImGui::MenuItem(L("menu.save_project"))) doSaveProject();
             ImGui::Separator();
             if (ImGui::MenuItem(L("menu.export_place"), "Ctrl+E")) doExport();
+            if (ImGui::MenuItem("Salva e pubblica...")) g_showPlacePublish = true;
             if (ImGui::MenuItem(L("menu.publish"), "Ctrl+Shift+P")) {
                 if (publishCurrentGame()) {
                     refreshGamesList();
@@ -822,6 +1288,8 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::MenuItem("Guida Lua Blocky", nullptr, &g_showLuaGuide);
             if (ImGui::MenuItem("Apri script globale place"))
                 g_showScript = true;
+            ImGui::Separator();
+            drawStudioRojoMenu();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Test")) {
@@ -894,7 +1362,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
     ImGui::SetNextWindowSize({std::max(1.f, (float)g_w), kRibbonH}, ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.f, 0.f});
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, {0.20f, 0.20f, 0.21f, 1.f});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, studio_theme::pal().windowBg);
     if (ImGui::Begin("##StudioRibbon", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
@@ -967,7 +1435,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         ImGui::SetNextWindowSize({kStudioPanelRight, std::max(64.f, explorerH)}, ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(1.f);
         studio_chrome::pushDockPanelColors();
-        ImGui::Begin("Explorer", &g_showExplorer, kStudioPanelFlags);
+        ImGui::Begin((std::string(L("menu.explorer")) + "###Explorer").c_str(), &g_showExplorer, kStudioPanelFlags);
 
         drawRobloxExplorer();   // main_ui/StudioExplorer.h: albero stile Roblox Studio
         (void)fbxOk;
@@ -975,19 +1443,23 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
         studio_chrome::popDockPanelColors();
     }
     drawViewportContextMenu();   // clic destro fermo sul viewport (StudioExplorer.h)
+    studioTrackExtrasUndo();     // StudioUndoExtras.h
+    studioCsgPollHotkeys();      // Ctrl+Maiusc+G / N / U (StudioCsg.h)
+    studioRojoTick(ImGui::GetIO().DeltaTime);   // progetto Rojo: file -> script (StudioRojo.h)
 
     if (g_showProps) {
         ImGui::SetNextWindowPos({rightX, propsY}, ImGuiCond_Always);
         ImGui::SetNextWindowSize({kStudioPanelRight, std::max(64.f, propsH)}, ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(1.f);
         studio_chrome::pushDockPanelColors();
-        ImGui::Begin("Properties", &g_showProps, kStudioPanelFlags);
+        ImGui::Begin((robloxPropertiesTitle() + "###Properties").c_str(), &g_showProps, kStudioPanelFlags);
 
-        if (g_selectedService == 0) {
+        if (drawRobloxSelectionProperties()) {   // StudioPropertyGrid.h
+        } else if (g_selectedService == 0) {
             studio_chrome::drawClassNameBanner("Lighting", "game.Lighting");
             studio_chrome::section("Grafica");
             ImGui::TextWrapped(
-                "Performance / Studio Default / Beautiful — Quality + luce + post.");
+                "Performance / Studio Default / Beautiful / Realistico.");
             {
                 if (ImGui::Button("Performance##studiogfx")) {
                     applyStudioGraphicsPreset(StudioGraphicsPreset::Performance,
@@ -1012,6 +1484,14 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                     g_exportMsg = "Grafica: Beautiful";
                     markPlaceDirty();
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Realistico##studiogfx")) {
+                    applyStudioGraphicsPreset(StudioGraphicsPreset::Realistic,
+                                             g_engine.quality, g_look, g_lighting);
+                    g_lookPresetUi = (int)LookPreset::Realistic;
+                    g_exportMsg = "Grafica: Realistico";
+                    markPlaceDirty();
+                }
             }
             ImGui::Checkbox("Ombre (quality.shadows)", &g_engine.quality.shadows);
             if (ImGui::IsItemHovered())
@@ -1025,7 +1505,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             {
                 const char* lookNames[] = {
                     "Default (off)", "Forest (bosco)", "Cinematic", "Golden Hour",
-                    "Night Neon", "Clean AAA", "Misty / Atmosphere"
+                    "Night Neon", "Clean AAA", "Misty / Atmosphere", "Realistico"
                 };
                 if (ImGui::Combo("Preset Look##lookaaa", &g_lookPresetUi, lookNames,
                                  IM_ARRAYSIZE(lookNames))) {
@@ -1501,7 +1981,23 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
                 else if (g_world.equippedBackpack == g_selectedBackpack)
                     g_world.equippedBackpack = -1;
             }
-            ImGui::TextDisabled("Test: 1-9 equip · Sword/Pistol = tool in mano");
+            ImGui::TextDisabled("Test: 1-9 equip · clic = Activated · Handle in mano");
+            ImGui::Checkbox("RequiresHandle", &b.requiresHandle);
+            ImGui::Checkbox("CanBeDropped", &b.canBeDropped);
+            ImGui::Checkbox("ManualActivationOnly", &b.manualActivationOnly);
+            ImGui::Checkbox("Enabled", &b.enabled);
+            {
+                char tip[128];
+                std::snprintf(tip, sizeof(tip), "%s", b.toolTip.c_str());
+                if (ImGui::InputText("ToolTip", tip, sizeof(tip)))
+                    b.toolTip = tip;
+            }
+            {
+                int handles = 0;
+                for (const auto& p : g_world.parts)
+                    if (p.toolSlot == g_selectedBackpack) ++handles;
+                ImGui::TextDisabled("Parti del tool (Handle e figli): %d", handles);
+            }
             if (studioAccentButton("Rimuovi dal Backpack", {-1, 32}, {0.75f, 0.2f, 0.18f, 1.f})) {
                 int idx = g_selectedBackpack;
                 g_world.backpack.erase(g_world.backpack.begin() + idx);
@@ -1609,7 +2105,7 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             bool xformEdited = false;
             xformEdited |= ImGui::DragFloat3("Position", &m.position.x, 0.25f);
             xformEdited |= ImGui::DragFloat3("Rotation °", &m.rotation.x, 1.f);
-            xformEdited |= ImGui::DragFloat3("Scale", &m.scale.x, 0.05f, 0.01f, 100000.f);
+            xformEdited |= ImGui::DragFloat3("Scale", &m.scale.x, 0.001f, kMinPartSize, 100000.f, "%.4f");
             if (xformEdited) {
                 m.anim.reseedIfStatic(m.position, m.rotation, m.scale);
                 markPlaceDirty();
@@ -1715,247 +2211,16 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
             if (ImGui::Button("Rimuovi Sound", {-1, 0})) deleteSelected();
             ImGui::PopStyleColor();
-        } else if (g_selectedPart < 0 || g_selectedPart >= (int)g_world.parts.size()) {
-            ImGui::TextColored({0.9f, 0.7f, 0.3f, 1.f}, "Animator");
-            ImGui::InputText("Clip", g_animNameBuf, sizeof(g_animNameBuf));
-            ImGui::TextDisabled("Idle · Walk · Wave · Dance · Jump");
-            if (ImGui::Button("Play Clip", {-1, 32}))
-                g_animator.play(g_animNameBuf[0] ? g_animNameBuf : "Wave");
-            if (ImGui::Button("Stop / Idle", {-1, 0})) g_animator.stop();
-            ImGui::Text("Attivo: %s", g_animator.lastPlayed.c_str());
-            ImGui::Separator();
-            ImGui::TextDisabled("Nessuna Part/Model selezionata.");
-            ImGui::TextDisabled("Salva/Pubblica sono sempre in fondo a questo pannello.");
         } else {
-            auto& p = g_world.parts[g_selectedPart];
-            studio_chrome::drawClassNameBanner(exPartClass(p), p.name.c_str());
-            drawMultiPartPropertiesSection();
-            drawRobloxPartProperties(p, g_selectedPart);   // StudioPropertyGrid.h
-
-            ImGui::PushStyleColor(ImGuiCol_Header, {0.22f, 0.23f, 0.26f, 1.f});
-            const bool scriptOpen = ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen);
-            ImGui::PopStyleColor();
-            if (scriptOpen) {
-            ImGui::TextWrapped(
-                "Non e' Lua vanilla: usi l'API Blocky (tipo Roblox). "
-                "Esplosione = part:Explode(). Apri View → Guida Lua Blocky.");
-            if (p.script.empty()) {
-                ImGui::TextDisabled("Nessuno script — prova un preset.");
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.65f, 0.85f, 1.f});
-                if (ImGui::Button(LB("btn.jump_block", "jmpblk"), {-1, 36})) {
-                    p.script = makeJumpBlockScript(p);
-                    syncPartEditors();
-                    g_editingPartScript = true;
-                    g_luaRunMsg = "Script salto — Test (F5)";
-                    g_showScriptCreatedGuide = true;
-                }
-                ImGui::PopStyleColor();
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.25f, 0.12f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.35f, 0.18f, 1.f});
-                if (ImGui::Button(LB("btn.explode_block", "expblk"), {-1, 36})) {
-                    p.script = makeExplodeBlockScript(p);
-                    p.color = {0.85f, 0.2f, 0.12f};
-                    p.boomOnTouch = false;
-                    p.boomAutoSecs = 0.f;
-                    p.canDestroy = true;
-                    p.canCollide = false;
-                    syncPartEditors();
-                    g_editingPartScript = true;
-                    g_luaRunMsg = "Script esplosione Lua (monete + boom) — Test (F5)";
-                    g_showScriptCreatedGuide = true;
-                }
-                ImGui::PopStyleColor(2);
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.72f, 0.55f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.20f, 0.85f, 0.65f, 1.f});
-                if (ImGui::Button("Script Neon (Material)", {-1, 36})) {
-                    p.script = makeNeonBlockScript(p);
-                    p.setMaterial(PartMaterial::Neon);
-                    p.pointLight = true;
-                    p.color = {0.25f, 1.f, 0.85f};
-                    syncPartEditors();
-                    g_editingPartScript = true;
-                    g_luaRunMsg = "Script Neon — Test (F5) per pulse + luce";
-                    g_showScriptCreatedGuide = true;
-                }
-                ImGui::PopStyleColor(2);
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.20f, 0.55f, 0.90f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.65f, 1.0f, 1.f});
-                if (ImGui::Button("Script Stamina (sprint)", {-1, 36})) {
-                    applyStaminaToSelectedPart();
-                }
-                ImGui::PopStyleColor(2);
-                // Lo script dell'arma sta QUI, sulla Part, non sull'oggetto:
-                // l'oggetto e' cosa tieni in mano, lo script decide cosa
-                // succede quando lo usi. E' la cosa meno ovvia del motore, e
-                // senza un bottone che la mostri non c'era modo di indovinarla.
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.55f, 0.25f, 0.70f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.68f, 0.35f, 0.85f, 1.f});
-                if (ImGui::Button("Script Arma da fuoco", {-1, 36}))
-                    addWeaponScriptToSelected();
-                ImGui::PopStyleColor(2);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "Fucile a pompa completo (mira, munizioni, rinculo),\n"
-                        "gia' collegato all'oggetto \"%s\" del Backpack.",
-                        weaponScriptTargetName().c_str());
-                }
-
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.85f, 0.65f, 0.12f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.95f, 0.75f, 0.20f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_Text, {0.1f, 0.1f, 0.1f, 1.f});
-                if (ImGui::Button(LB("btn.add_script", "addsc"), {-1, 28}))
-                    addScriptToSelected();
-                ImGui::PopStyleColor(3);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Script vuoto, da scrivere tu.");
-            } else {
-                g_editingPartScript = true;
-                drawLuaScriptEditor(g_partScriptEditor, g_partScriptBuf, sizeof(g_partScriptBuf),
-                    "##partscript", 140.f);
-                p.script = g_partScriptBuf;
-                {
-                    static const char* kScriptTypeNames[] = {
-                        "Legacy (compat)", "Script (Server)",
-                        "LocalScript (Client)", "ModuleScript"
-                    };
-                    int st = (int)p.scriptType;
-                    if (st < 0 || st > 3) st = 0;
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::Combo("##scripttype", &st, kScriptTypeNames, 4))
-                        p.scriptType = (ScriptType)st;
-                    if (p.scriptType == ScriptType::Server)
-                        ImGui::TextDisabled("Solo host — stesso place PC + Android.");
-                    else if (p.scriptType == ScriptType::Client)
-                        ImGui::TextDisabled("LocalScript: ogni client (input/UI/viewmodel).");
-                    else if (p.scriptType == ScriptType::ModuleScript)
-                        ImGui::TextDisabled("Non parte da solo — require da altri script.");
-                }
-                if (ImGui::SmallButton("Inserisci Explode")) {
-                    std::string cur = g_partScriptBuf;
-                    cur += "\npart:Explode()\n";
-                    std::snprintf(g_partScriptBuf, sizeof(g_partScriptBuf), "%s", cur.c_str());
-                    p.script = g_partScriptBuf;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Inserisci Touched→Explode")) {
-                    std::snprintf(g_partScriptBuf, sizeof(g_partScriptBuf), "%s",
-                        makeExplodeBlockScript(p).c_str());
-                    p.script = g_partScriptBuf;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Apri guida"))
-                    g_showLuaGuide = true;
-                if (ImGui::SmallButton("Carica Stamina (sprint)"))
-                    applyStaminaToSelectedPart();
-                ImGui::TextDisabled("%s", L("hint.scripts_test"));
-                if (ImGui::Button(LB("btn.save_script", "savesc")))
-                    p.script = g_partScriptBuf;
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.75f, 0.18f, 0.15f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.90f, 0.28f, 0.20f, 1.f});
-                if (ImGui::Button(LB("btn.remove_script", "rmsc"), {-1, 0}))
-                    removeScriptFromSelected();
-                ImGui::PopStyleColor(2);
-            }
-            if (!g_luaRunMsg.empty()) {
-                ImGui::Separator();
-                ImGui::TextWrapped("%s", g_luaRunMsg.c_str());
-            }
-            }   // Script
+            ImGui::TextDisabled("Seleziona un oggetto nell'Esploratore o nel viewport.");
         }
 
-        // Salva/Pubblica: SEMPRE visibile qui sotto, qualunque cosa sia
-        // selezionata nell'Explorer — prima viveva solo dentro il ramo
-        // "niente selezionato" del blocco sopra, quindi bastava avere una
-        // Part/Model/Sound selezionato per non trovarlo piu' da nessuna
-        // parte (il motivo di "non mi fa pubblicare i giochi").
-        ImGui::Separator();
-        {
-            ImGui::TextColored({0.45f, 0.85f, 1.f, 1.f}, "Place / Pubblica");
-            ImGui::TextDisabled("Salva · Salva per pubblicare · Pubblica");
-            ImGui::InputText("Nome gioco", g_gameNameBuf, sizeof(g_gameNameBuf));
-            g_world.placeName = g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName;
-            {
-                // Il campo sopra parte sempre da "Il mio gioco" finche' non lo
-                // cambi — se lo lasci com'e' (o lo riporti a un nome gia' usato)
-                // Pubblica AGGIORNA quel gioco esistente invece di crearne uno
-                // nuovo. Meglio dirlo qui prima di premere il bottone che dopo,
-                // quando il vecchio contenuto e' gia' stato sovrascritto.
-                std::string curId = sanitizeGameId(g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName);
-                for (const auto& g : g_games) {
-                    if (g.isPublished && g.id == curId) {
-                        ImGui::TextColored({1.f, 0.75f, 0.3f, 1.f},
-                            "Aggiornerai il gioco gia' pubblicato \"%s\" (stesso nome/ID) — "
-                            "cambia \"Nome gioco\" se ne vuoi uno nuovo.", g.title.c_str());
-                        break;
-                    }
-                }
-            }
-            if (ImGui::Button("Scegli icona...", { -1, 0 })) {
-                std::string path;
-                if (openImageFileDialog(path, publisherHwnd()))
-                    g_pendingIconPath = path;
-            }
-            if (!g_pendingIconPath.empty()) {
-                auto slash = g_pendingIconPath.find_last_of("\\/");
-                std::string base = slash == std::string::npos
-                    ? g_pendingIconPath : g_pendingIconPath.substr(slash + 1);
-                ImGui::TextDisabled("Icona: %s", base.c_str());
-            } else {
-                ImGui::TextDisabled("Nessuna icona — mostra il colore accent");
-            }
-            if (ImGui::Button("Apri Place...", { -1, 0 })) doOpenPlace();
-            if (ImGui::Button("Salva Place", { -1, 0 })) doSavePlace();
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.48f, 0.78f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.30f, 0.58f, 0.90f, 1.f});
-            if (ImGui::Button("Salva per pubblicare", { -1, 34 })) doSaveForPublish();
-            ImGui::PopStyleColor(2);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Bozza + autosave ogni 30s — pubblichi dopo quando vuoi");
-            if (g_publishDraftActive)
-                ImGui::TextColored({0.35f, 0.9f, 0.55f, 1.f}, "Autosave bozza publish ON");
-            if (ImGui::Button("Salva Progetto", { -1, 0 })) doSaveProject();
-            ImGui::SliderInt("Max giocatori", &g_maxPlayers, 1, 32);
-            ImGui::TextDisabled("Limite server multiplayer (1–32)");
-            {
-                int usedQ = 0;
-                long long nowQ = (long long)std::time(nullptr);
-                std::string cr = g_menu.username[0] ? g_menu.username : "Builder";
-                std::string gid = sanitizeGameId(g_gameNameBuf[0] ? g_gameNameBuf : g_world.placeName);
-                bool okSlot = canPublishGame(g_games, gid, cr, nowQ, &usedQ);
-                ImGui::TextDisabled("Slot giochi: %d / %d (2 mesi)", usedQ, kMaxPublishedGamesPerUser);
-                if (!okSlot)
-                    ImGui::TextColored({1.f, 0.45f, 0.3f, 1.f}, "Limite raggiunto — aggiorna un gioco esistente");
-            }
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.12f, 0.62f, 0.42f, 1.f});
-            if (ImGui::Button("Pubblica nei Games", {-1, 40})) {
-                if (publishCurrentGame())
-                    refreshGamesList();
-            }
-            ImGui::PopStyleColor();
-            if (ImGui::Button("Avvia Server dedicato", {-1, 32})) {
-                if (publishCurrentGame())
-                    refreshGamesList();
-                // Il server carica questo place ed esegue i suoi Script server.
-                const std::string serverPlace = blockyDataDir() + "/server_place.json";
-                launchDedicatedServer(g_maxPlayers, g_gameNameBuf[0] ? g_gameNameBuf : "Blocky",
-                                      writeCurrentPlaceTo(serverPlace) ? serverPlace : std::string());
-            }
-            if (!g_publishMsg.empty())
-                ImGui::TextWrapped("%s", g_publishMsg.c_str());
-            if (!g_exportMsg.empty())
-                ImGui::TextWrapped("%s", g_exportMsg.c_str());
-            ImGui::Separator();
-            ImGui::Text("Place: %s", g_world.placeName.c_str());
-            if (!g_placeFilePath.empty())
-                ImGui::TextDisabled("%s", g_placeFilePath.c_str());
-            if (g_publishDraftActive && !g_publishDraftPath.empty())
-                ImGui::TextDisabled("Bozza: %s", g_publishDraftPath.c_str());
-            ImGui::SliderFloat("FOV", &g_cam.fov, 40.f, 100.f);
-            ImGui::Checkbox("VSync", &g_vsync);
-        }
         ImGui::End();
         studio_chrome::popDockPanelColors();
     }
+    drawScriptDocumentArea(leftW, rightX, panelY, (float)g_h - outputReserve);   // schede: place + script aperti
+    drawDebuggerWindow();   // StudioToolsPro.h: quando il Test si ferma su un punto di interruzione
+    drawPlacePublishWindow();   // Pubblica (ribbon Home / menu File)
 
     if (g_showScript) {
         ImGui::SetNextWindowPos({12, (float)g_h - 280}, ImGuiCond_FirstUseEver);
@@ -2138,6 +2403,12 @@ static void drawStudioUi(AnimatedModel& fbx, bool fbxOk) {
             applyStudioGraphicsPreset(StudioGraphicsPreset::Beautiful,
                                      g_engine.quality, g_look, g_lighting);
             g_lookPresetUi = (int)LookPreset::CleanAaa;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Realistico##engfx")) {
+            applyStudioGraphicsPreset(StudioGraphicsPreset::Realistic,
+                                     g_engine.quality, g_look, g_lighting);
+            g_lookPresetUi = (int)LookPreset::Realistic;
         }
         ImGui::TextDisabled("Preset tecnici:");
         if (ImGui::Button("Low"))    g_engine.setPreset(QualityPreset::Low);

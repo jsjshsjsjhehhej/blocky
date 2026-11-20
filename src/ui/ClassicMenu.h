@@ -3,6 +3,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include "studio/StudioTheme.h"
 
 #include "engine/GameHub.h"
 #include "engine/PoolConfig.h"
@@ -532,6 +533,7 @@ inline void applyStudioTheme() {
     // e' malformato, loadUiTheme applica esattamente questi stessi valori
     // di prima, quindi nessun comportamento cambia finche' non lo tocchi.
     loadUiTheme(ImGui::GetStyle());
+    studio_theme::applyToImGui(ImGui::GetStyle());   // Tema chiaro dello Studio, se scelto
     blk::ui::applyToStyle(ImGui::GetStyle());
 }
 

@@ -31,6 +31,7 @@ static bool g_showPerfStats = false;
 static bool g_showTeamsEditor = false;
 static bool g_showLeaderstatsEditor = false;
 static bool g_showPromptPlacer = false;
+static bool g_showSocial = false;
 static bool g_showDataStoreBrowser = false;
 static bool g_showLightingPresets = false;
 static bool g_showScriptAnalysis = false;
@@ -73,7 +74,10 @@ static float g_teamColor[3] = {1.f, 0.2f, 0.2f};
 static char g_statName[16] = "Coins";
 static char g_promptName[32] = "Door";
 static char g_promptText[32] = "Open";
+static char g_promptObject[32] = "Door";
+static char g_promptKey[4] = "E";
 static float g_promptRadius = 8.f;
+static float g_promptHold = 0.f;
 static char g_dsStoreName[64] = "PlayerData";
 static char g_dsKey[64] = "coins";
 static char g_dsValue[128] = "0";
@@ -83,7 +87,7 @@ static int g_devicePreset = 0;
 static char g_publishTitle[64] = "My Place";
 static char g_publishDesc[256] = "";
 static bool g_httpEnabled = true;
-static bool g_streamingEnabled = false;
+static bool g_streamingEnabled = true;
 static bool g_filteringEnabled = true;
 static float g_camFovPro = 70.f;
 static float g_physGravity = 80.f;
@@ -338,9 +342,29 @@ static void drawLeaderstatsEditorWindow() {
 
 static void drawPromptPlacerWindow() {
     if (!g_showPromptPlacer) return;
-    proBeginWindow("ProximityPrompt##pro", &g_showPromptPlacer, 400.f, 280.f);
+    proBeginWindow("ProximityPrompt##pro", &g_showPromptPlacer, 420.f, 420.f);
+    ImGui::TextDisabled("In Play compare sull'oggetto: tasto e azione, come in Roblox.");
+    auto preset = [](const char* name, const char* action, const char* object, const char* key, float hold) {
+        std::snprintf(g_promptName, sizeof(g_promptName), "%s", name);
+        std::snprintf(g_promptText, sizeof(g_promptText), "%s", action);
+        std::snprintf(g_promptObject, sizeof(g_promptObject), "%s", object);
+        std::snprintf(g_promptKey, sizeof(g_promptKey), "%s", key);
+        g_promptHold = hold;
+    };
+    if (ImGui::Button("E  Open")) preset("Door", "Open", "Door", "E", 0.f);
+    ImGui::SameLine();
+    if (ImGui::Button("E  Sit")) preset("Seat", "Sit", "Chair", "E", 0.f);
+    ImGui::SameLine();
+    if (ImGui::Button("F  Pick up")) preset("Item", "Pick up", "Item", "F", 0.f);
+    if (ImGui::Button("E  Talk")) preset("Npc", "Talk", "NPC", "E", 0.f);
+    ImGui::SameLine();
+    if (ImGui::Button("Tieni E  Open")) preset("Gate", "Open", "Gate", "E", 0.7f);
+    ImGui::Separator();
     ImGui::InputText("Name", g_promptName, sizeof(g_promptName));
     ImGui::InputText("ActionText", g_promptText, sizeof(g_promptText));
+    ImGui::InputText("ObjectText", g_promptObject, sizeof(g_promptObject));
+    ImGui::InputText("Key", g_promptKey, sizeof(g_promptKey));
+    ImGui::SliderFloat("HoldDuration", &g_promptHold, 0.f, 3.f, "%.2f s");
     ImGui::SliderFloat("MaxActivationDistance", &g_promptRadius, 2.f, 32.f);
     glm::vec3 pos = g_playerPos;
     int partIdx = -1;
@@ -353,6 +377,8 @@ static void drawPromptPlacerWindow() {
     }
     if (ImGui::Button("Create ProximityPrompt", {-1, 0})) {
         g_prossimita.add(g_promptName, g_promptText, pos.x, pos.y, pos.z, g_promptRadius, partIdx);
+        const char key = g_promptKey[0] ? g_promptKey[0] : 'E';
+        g_prossimita.style(g_promptName, g_promptObject, key, g_promptHold);
         proPushHistory("ProximityPrompt");
         g_exportMsg = std::string("Prompt: ") + g_promptName;
     }
@@ -489,41 +515,8 @@ static void drawLightingPresetsWindow() {
 // 14. Script Analysis
 // ===========================================================================
 
-static void drawScriptAnalysisWindow() {
-    if (!g_showScriptAnalysis) return;
-    proBeginWindow("Script Analysis##pro", &g_showScriptAnalysis, 520.f, 400.f);
-    if (ImGui::Button("Scan place scripts", {-1, 0})) {
-        g_scriptAnalysisHits.clear();
-        auto check = [&](const std::string& where, const std::string& src) {
-            if (src.empty()) return;
-            if (src.find("while true do") != std::string::npos && src.find("wait") == std::string::npos
-                && src.find("task.wait") == std::string::npos)
-                g_scriptAnalysisHits.push_back(where + ": possible infinite loop (no wait)");
-            if (src.find("getfenv") != std::string::npos)
-                g_scriptAnalysisHits.push_back(where + ": getfenv (blocked in sandbox?)");
-            if (src.find("loadstring") != std::string::npos)
-                g_scriptAnalysisHits.push_back(where + ": loadstring");
-            if (src.size() > 50000)
-                g_scriptAnalysisHits.push_back(where + ": very large script");
-            if (src.find("FireServer") != std::string::npos && src.find("OnServerEvent") == std::string::npos)
-                g_scriptAnalysisHits.push_back(where + ": FireServer without local OnServerEvent (ok if other script)");
-        };
-        for (int i = 0; i < (int)g_world.parts.size(); ++i)
-            check("Part:" + g_world.parts[i].name, g_world.parts[i].script);
-        for (int i = 0; i < (int)g_world.instances.size(); ++i)
-            check(g_world.instances[i].className + ":" + g_world.instances[i].name,
-                  g_world.instances[i].source);
-        if (g_scriptAnalysisHits.empty())
-            g_scriptAnalysisHits.push_back("Nessun problema ovvio trovato.");
-        proPushHistory("Script Analysis");
-    }
-    ImGui::BeginChild("##sa", {0, -28}, true);
-    for (const auto& h : g_scriptAnalysisHits)
-        ImGui::TextWrapped("%s", h.c_str());
-    ImGui::EndChild();
-    ImGui::Text("%d hits", (int)g_scriptAnalysisHits.size());
-    ImGui::End();
-}
+static void drawScriptAnalysisWindowPro();   // StudioToolsPro.h
+static void drawScriptAnalysisWindow() { drawScriptAnalysisWindowPro(); }
 
 // ===========================================================================
 // 15. Device Emulator
@@ -826,6 +819,23 @@ static void drawQuickActionsWindow() {
             p.scriptType = ScriptType::Client;
         }
     }
+    if (ImGui::Button("Giro di partita", {-1, 0})) {
+        insertNewPart();
+        if (partIndexValid(g_selectedPart)) {
+            auto& p = g_world.parts[g_selectedPart];
+            p.name = "Traguardo";
+            p.size = {8.f, 1.f, 8.f};
+            p.color = {1.f, 0.86f, 0.2f};
+            p.anchored = true;
+            p.canCollide = true;
+            p.scriptType = ScriptType::Client;
+            p.script =
+                "local pos = script.Parent:GetPosition()\n"
+                "GameKit.StartMatch(45, 3)\n"
+                "GameKit.AddPad(\"Traguardo\", \"Win\", pos.X, pos.Y, pos.Z, 5, 3, 5, 1, 0)\n";
+            proPushHistory("Giro di partita");
+        }
+    }
     if (ImGui::Button("Door + Prompt", {-1, 0})) {
         insertNewPart();
         if (partIndexValid(g_selectedPart)) {
@@ -833,6 +843,7 @@ static void drawQuickActionsWindow() {
             p.name = "Door";
             p.size = {1.f, 8.f, 4.f};
             g_prossimita.add("DoorPrompt", "Open", p.position.x, p.position.y, p.position.z, 10.f, g_selectedPart);
+            g_prossimita.style("DoorPrompt", "Door", 'E', 0.f);
         }
     }
     if (ImGui::Button("Module + Remote kit", {-1, 0})) {
@@ -1036,6 +1047,7 @@ static void drawStudioProViewMenu() {
     ImGui::MenuItem("Teams…", nullptr, &g_showTeamsEditor);
     ImGui::MenuItem("leaderstats…", nullptr, &g_showLeaderstatsEditor);
     ImGui::MenuItem("ProximityPrompt…", nullptr, &g_showPromptPlacer);
+    ImGui::MenuItem("Account, Marketplace, Gruppi…", nullptr, &g_showSocial);
     ImGui::MenuItem("Lighting Presets…", nullptr, &g_showLightingPresets);
     ImGui::MenuItem("Script Analysis…", nullptr, &g_showScriptAnalysis);
     ImGui::MenuItem("Device Emulator…", nullptr, &g_showDeviceEmulator);
@@ -1078,6 +1090,50 @@ static void drawStudioProOverlays() {
     drawTeamsEditorWindow();
     drawLeaderstatsEditorWindow();
     drawPromptPlacerWindow();
+    if (g_showSocial) {
+        proBeginWindow("Account##social", &g_showSocial, 420.f, 460.f);
+        if (social().user.empty()) socialBind(g_menu.username);
+        ImGui::Text("%s", social().user.c_str());
+        ImGui::TextDisabled("UserId %d   ·   %d B$", social().userId, ecoBalance(social().user.c_str()));
+        ImGui::Separator();
+        ImGui::TextUnformatted("Gruppo");
+        static char gname[32] = "Amici";
+        ImGui::InputText("Nome", gname, sizeof(gname));
+        if (ImGui::Button("Crea gruppo")) {
+            int id = socialCreateGroup(gname);
+            g_exportMsg = id ? ("Gruppo " + std::to_string(id)) : "Nome non valido";
+        }
+        for (const auto& g : social().groups) {
+            ImGui::PushID(g.id);
+            const int rank = socialRank(g.id);
+            ImGui::Text("%s  (#%d)  %s", g.name.c_str(), g.id, rank >= 255 ? "owner" : (rank > 0 ? "dentro" : ""));
+            ImGui::SameLine();
+            if (rank <= 0) {
+                if (ImGui::SmallButton("Entra")) socialJoin(g.id);
+            } else if (rank < 255) {
+                if (ImGui::SmallButton("Esci")) socialLeave(g.id);
+            }
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Marketplace");
+        static int pid = 1;
+        static char pname[32] = "Spada VIP";
+        static int pprice = 50;
+        static bool ppass = true;
+        ImGui::InputInt("Id", &pid);
+        ImGui::InputText("Oggetto", pname, sizeof(pname));
+        ImGui::InputInt("Prezzo B$", &pprice);
+        ImGui::Checkbox("Game Pass", &ppass);
+        if (ImGui::Button("Metti in catalogo")) {
+            if (socialRegister(pid, pname, std::max(0, pprice), ppass))
+                g_exportMsg = "In catalogo";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Prova acquisto")) socialPrompt(pid, ppass);
+        ImGui::TextDisabled("In Play: Compra o Annulla. I B$ sono quelli del tuo account.");
+        ImGui::End();
+    }
     drawDataStoreBrowserWindow();
     drawLightingPresetsWindow();
     drawScriptAnalysisWindow();
@@ -1108,8 +1164,7 @@ static void studioProPollHotkeys() {
         g_showCommandPalette = true;
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_I))
         g_showInsertObject = true;
-    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_G))
-        g_showGameSettings = true;
+    // Ctrl+Maiusc+G ora e' Unione (come Roblox Studio): Impostazioni gioco stanno nel ribbon Home.
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A))
         g_showAttributesEditor = true;
 }
